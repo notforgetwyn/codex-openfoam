@@ -2,13 +2,17 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QComboBox,
     QFrame,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
     QMenu,
+    QPushButton,
     QSplitter,
     QStatusBar,
     QTabWidget,
@@ -63,7 +67,7 @@ class MainWindow(QMainWindow):
         toolbar.addAction("运行")
         toolbar.addAction("停止")
         toolbar.addSeparator()
-        toolbar.addAction("设置")
+        toolbar.addAction("设置", self._open_settings_tab)
         toolbar.addAction("切换主题", self._cycle_theme)
         self.addToolBar(toolbar)
 
@@ -136,13 +140,16 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        tab_strip = QTabWidget()
-        tab_strip.setDocumentMode(True)
-        tab_strip.setTabsClosable(False)
-        tab_strip.addTab(self._make_text_panel("参数配置区"), "参数配置")
-        tab_strip.addTab(self._make_text_panel("求解运行区"), "求解运行")
-        tab_strip.addTab(self._make_text_panel("结果区"), "结果")
-        layout.addWidget(tab_strip)
+        self._workspace_tabs = QTabWidget()
+        self._workspace_tabs.setDocumentMode(True)
+        self._workspace_tabs.setTabsClosable(False)
+        self._workspace_tabs.addTab(self._build_project_home_tab(), "项目主页")
+        self._workspace_tabs.addTab(self._make_text_panel("参数配置区"), "参数配置")
+        self._workspace_tabs.addTab(self._make_text_panel("求解运行区"), "求解运行")
+        self._workspace_tabs.addTab(self._build_environment_tab(), "环境检查")
+        self._workspace_tabs.addTab(self._build_settings_tab(), "设置")
+        self._workspace_tabs.addTab(self._make_text_panel("结果区"), "结果")
+        layout.addWidget(self._workspace_tabs)
         return container
 
     def _build_bottom_panel(self) -> QWidget:
@@ -171,18 +178,139 @@ class MainWindow(QMainWindow):
         layout.addWidget(editor)
         return wrapper
 
+    def _build_project_home_tab(self) -> QWidget:
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        title = QLabel("项目主页")
+        title.setStyleSheet("font-size: 18px; font-weight: 600;")
+        summary = QTextEdit()
+        summary.setReadOnly(True)
+        summary.setPlainText(
+            "当前阶段：设置页 + 环境检查页 + 项目管理入口占位\n\n"
+            "已具备：\n"
+            "- VS Code 风格工作台\n"
+            "- 基础主题切换\n"
+            "- OpenFOAM 环境探测骨架\n"
+            "- 项目树和结果/日志面板占位\n\n"
+            "下一步将接入：\n"
+            "- 项目新建流程\n"
+            "- blockMesh 命令执行\n"
+            "- 实时日志和任务状态"
+        )
+        layout.addWidget(title)
+        layout.addWidget(summary)
+        return wrapper
+
+    def _build_environment_tab(self) -> QWidget:
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        title = QLabel("环境检查")
+        title.setStyleSheet("font-size: 18px; font-weight: 600;")
+        self._environment_text = QTextEdit()
+        self._environment_text.setReadOnly(True)
+        refresh_button = QPushButton("重新检测 OpenFOAM 环境")
+        refresh_button.clicked.connect(self._refresh_environment_panels)
+
+        layout.addWidget(title)
+        layout.addWidget(refresh_button)
+        layout.addWidget(self._environment_text)
+        return wrapper
+
+    def _build_settings_tab(self) -> QWidget:
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        title = QLabel("设置")
+        title.setStyleSheet("font-size: 18px; font-weight: 600;")
+        form = QFormLayout()
+
+        settings = self._context.settings_service.load()
+        self._theme_combo = QComboBox()
+        self._theme_combo.addItems(self._theme_names)
+        self._theme_combo.setCurrentText(settings.theme_name)
+
+        self._background_color_input = QLineEdit(settings.background_color)
+        self._workspace_input = QLineEdit(str(settings.workspace_dir))
+        self._env_script_input = QLineEdit(settings.openfoam_env_script or "")
+
+        form.addRow("主题", self._theme_combo)
+        form.addRow("主背景色", self._background_color_input)
+        form.addRow("工作区路径", self._workspace_input)
+        form.addRow("OpenFOAM 环境脚本", self._env_script_input)
+
+        save_button = QPushButton("保存设置并应用")
+        save_button.clicked.connect(self._save_settings)
+        hint = QLabel("示例背景色：#1e1e1e、#151b23、#202020")
+
+        layout.addWidget(title)
+        layout.addLayout(form)
+        layout.addWidget(hint)
+        layout.addWidget(save_button)
+        layout.addStretch(1)
+        return wrapper
+
+    def _open_settings_tab(self) -> None:
+        self._workspace_tabs.setCurrentIndex(4)
+
     def _apply_settings_theme(self) -> None:
         settings = self._context.settings_service.load()
         self._theme_index = self._theme_names.index(settings.theme_name)
         self.setStyleSheet(build_stylesheet(settings.theme_name, settings.background_color))
+        if hasattr(self, "_theme_combo"):
+            self._theme_combo.setCurrentText(settings.theme_name)
+            self._background_color_input.setText(settings.background_color)
+            self._workspace_input.setText(str(settings.workspace_dir))
+            self._env_script_input.setText(settings.openfoam_env_script or "")
 
     def _cycle_theme(self) -> None:
         self._theme_index = (self._theme_index + 1) % len(self._theme_names)
         theme_name = self._theme_names[self._theme_index]
         palette = THEMES[theme_name]
-        self.setStyleSheet(build_stylesheet(theme_name, palette.window_bg))
+        settings = self._context.settings_service.load()
+        updated_settings = type(settings)(
+            workspace_dir=settings.workspace_dir,
+            openfoam_env_script=settings.openfoam_env_script,
+            theme_name=theme_name,
+            background_color=palette.window_bg,
+        )
+        self._context.settings_service.save(updated_settings)
+        self._apply_settings_theme()
+        self._refresh_environment_panels()
+
+    def _save_settings(self) -> None:
+        background_color = self._background_color_input.text().strip() or "#1e1e1e"
+        env_script = self._env_script_input.text().strip() or None
+        settings = self._context.settings_service.load()
+        updated_settings = type(settings)(
+            workspace_dir=settings.workspace_dir.__class__(self._workspace_input.text().strip()),
+            openfoam_env_script=env_script,
+            theme_name=self._theme_combo.currentText(),
+            background_color=background_color,
+        )
+        self._context.settings_service.save(updated_settings)
+        self._apply_settings_theme()
+        self._refresh_environment_panels()
 
     def _refresh_status_bar(self) -> None:
         status = self._context.environment_detector.detect()
         version_text = status.foam_version if status.is_available else "未就绪"
         self._version_label.setText(f"OpenFOAM: {version_text}")
+        self._refresh_environment_panels(status)
+
+    def _refresh_environment_panels(self, status=None) -> None:
+        if status is None:
+            status = self._context.environment_detector.detect()
+        status_flag = "可用" if status.is_available else "不可用"
+        self._environment_text.setPlainText(
+            "OpenFOAM 环境检查结果\n\n"
+            f"- 状态：{status_flag}\n"
+            f"- bash 路径：{status.bash_path or '未找到'}\n"
+            f"- 环境脚本：{status.env_script_path or '未配置'}\n"
+            f"- OpenFOAM 版本：{status.foam_version or '未知'}\n"
+            f"- 说明：{status.detail}\n"
+        )

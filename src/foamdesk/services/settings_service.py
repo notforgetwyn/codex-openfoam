@@ -29,6 +29,19 @@ class AppSettingsService:
             background_color=background_color,
         )
 
+    def save(self, settings: AppSettings) -> None:
+        self._config_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "workspace_dir": str(settings.workspace_dir),
+            "openfoam_env_script": settings.openfoam_env_script,
+            "theme_name": settings.theme_name,
+            "background_color": settings.background_color,
+        }
+        self._settings_file.write_text(
+            yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+
     def _ensure_defaults(self) -> None:
         self._config_dir.mkdir(parents=True, exist_ok=True)
         if self._settings_file.exists():
