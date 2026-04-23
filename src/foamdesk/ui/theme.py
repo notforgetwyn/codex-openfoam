@@ -21,11 +21,11 @@ class ThemePalette:
 THEMES: dict[str, ThemePalette] = {
     "vscode-dark": ThemePalette(
         name="vscode-dark",
-        window_bg="#181818",
+        window_bg="#1e1e1e",
         surface_bg="#1e1e1e",
-        panel_bg="#181818",
-        sidebar_bg="#252526",
-        activity_bg="#333333",
+        panel_bg="#1e1e1e",
+        sidebar_bg="#1e1e1e",
+        activity_bg="#1e1e1e",
         status_bg="#007acc",
         border="#2d2d30",
         text="#cccccc",
@@ -71,10 +71,10 @@ def build_stylesheet(theme_name: str, background_color: str | None = None) -> st
     }}
     QWidget {{
         color: {palette.text};
-        background-color: {palette.surface_bg};
+        background-color: {window_bg};
     }}
     QMenuBar, QToolBar {{
-        background-color: {palette.surface_bg};
+        background-color: {window_bg};
         border-bottom: 1px solid {palette.border};
     }}
     QMenuBar::item:selected, QMenu::item:selected, QToolButton:hover {{
@@ -88,7 +88,7 @@ def build_stylesheet(theme_name: str, background_color: str | None = None) -> st
         border: 1px solid {palette.border};
     }}
     QTabBar::tab {{
-        background: {palette.surface_bg};
+        background: {window_bg};
         color: {palette.muted_text};
         padding: 8px 14px;
         border: 1px solid {palette.border};
@@ -96,13 +96,13 @@ def build_stylesheet(theme_name: str, background_color: str | None = None) -> st
     }}
     QTabBar::tab:selected {{
         color: {palette.text};
-        background: {palette.panel_bg};
+        background: {window_bg};
     }}
     QTreeWidget, QListWidget {{
-        background-color: {palette.sidebar_bg};
+        background-color: {window_bg};
     }}
     QTextEdit {{
-        background-color: {palette.panel_bg};
+        background-color: {window_bg};
         selection-background-color: {palette.accent};
     }}
     """
