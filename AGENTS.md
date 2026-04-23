@@ -458,3 +458,16 @@
 - 如果已有 `1.md`，则后续依次使用 `2.md`、`3.md`、`4.md`
 - 文件内容应包含本次输出的主题、日期和正文
 - 当用户明确要求“保存本次输出”或当前协作默认要求持续归档时，应同步写入对应编号文件
+
+## WSL 开发规则
+
+本项目后续固定在 WSL 环境中开发、运行和集成 OpenFOAM。
+
+- 主开发目录固定为：`/home/shihuayue/codex_project`
+- Windows 侧访问路径仅作为文件查看入口：`\\wsl.localhost\Ubuntu\home\shihuayue\codex_project`
+- 后续开发平台默认视为：`WSL / Ubuntu`
+- OpenFOAM 运行环境默认视为：`WSL / Ubuntu`
+- 后续执行命令时，优先在 WSL 内执行，不再以 Windows 本地目录作为主执行环境
+- 如需从外层调用命令，优先采用：`wsl -e bash -lc "cd /home/shihuayue/codex_project && <command>"`
+- 与 OpenFOAM、Python、Git、测试、构建、打包相关的实际执行，应尽量在 `/home/shihuayue/codex_project` 下完成
+- 后续提到“当前项目目录”时，默认都指：`/home/shihuayue/codex_project`
