@@ -77,6 +77,20 @@ def build_stylesheet(theme_name: str, background_color: str | None = None) -> st
         background-color: {window_bg};
         border-bottom: 1px solid {palette.border};
     }}
+    QMenu {{
+        background-color: {window_bg};
+        color: {palette.text};
+        border: 1px solid {palette.border};
+    }}
+    QToolBar {{
+        spacing: 6px;
+    }}
+    QToolButton {{
+        background-color: transparent;
+        border: none;
+        padding: 4px 8px;
+        color: {palette.text};
+    }}
     QMenuBar::item:selected, QMenu::item:selected, QToolButton:hover {{
         background-color: {palette.accent};
     }}
@@ -84,8 +98,24 @@ def build_stylesheet(theme_name: str, background_color: str | None = None) -> st
         background-color: {palette.status_bg};
         color: #ffffff;
     }}
-    QTabWidget::pane, QTreeWidget, QTextEdit, QListWidget, QFrame {{
+    QStatusBar QLabel {{
+        background-color: transparent;
+        color: #ffffff;
+    }}
+    QSplitter {{
+        background-color: {window_bg};
+    }}
+    QSplitter::handle {{
+        background-color: {palette.border};
+    }}
+    QTabWidget::pane {{
         border: 1px solid {palette.border};
+        background-color: {window_bg};
+        top: -1px;
+    }}
+    QTreeWidget, QTextEdit, QListWidget, QFrame, QLineEdit, QComboBox {{
+        border: 1px solid {palette.border};
+        background-color: {window_bg};
     }}
     QTabBar::tab {{
         background: {window_bg};
@@ -98,11 +128,47 @@ def build_stylesheet(theme_name: str, background_color: str | None = None) -> st
         color: {palette.text};
         background: {window_bg};
     }}
+    QTabBar::tab:!selected {{
+        margin-top: 2px;
+    }}
+    QTabBar::tab:hover {{
+        background: {palette.surface_bg};
+        color: {palette.text};
+    }}
     QTreeWidget, QListWidget {{
         background-color: {window_bg};
+    }}
+    QTreeWidget::item:selected, QListWidget::item:selected {{
+        background-color: {palette.accent};
+        color: #ffffff;
+    }}
+    QHeaderView::section {{
+        background-color: {window_bg};
+        color: {palette.text};
+        border: none;
+        border-right: 1px solid {palette.border};
+        border-bottom: 1px solid {palette.border};
+        padding: 4px 6px;
     }}
     QTextEdit {{
         background-color: {window_bg};
         selection-background-color: {palette.accent};
+    }}
+    QLineEdit, QComboBox {{
+        padding: 6px;
+        selection-background-color: {palette.accent};
+    }}
+    QLabel {{
+        background-color: transparent;
+    }}
+    QPushButton {{
+        background-color: {palette.surface_bg};
+        color: {palette.text};
+        border: 1px solid {palette.border};
+        padding: 6px 10px;
+    }}
+    QPushButton:hover {{
+        background-color: {palette.accent};
+        color: #ffffff;
     }}
     """
