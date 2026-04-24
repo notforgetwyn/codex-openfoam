@@ -24,6 +24,7 @@ class AppSettingsService:
         background_color = payload.get("background_color", "#1e1e1e")
         font_family = payload.get("font_family", "Noto Sans CJK SC")
         font_size = int(payload.get("font_size", 15))
+        show_tutorial_on_startup = bool(payload.get("show_tutorial_on_startup", True))
         return AppSettings(
             workspace_dir=workspace_dir,
             openfoam_env_script=env_script,
@@ -31,6 +32,7 @@ class AppSettingsService:
             background_color=background_color,
             font_family=font_family,
             font_size=font_size,
+            show_tutorial_on_startup=show_tutorial_on_startup,
         )
 
     def save(self, settings: AppSettings) -> None:
@@ -42,6 +44,7 @@ class AppSettingsService:
             "background_color": settings.background_color,
             "font_family": settings.font_family,
             "font_size": settings.font_size,
+            "show_tutorial_on_startup": settings.show_tutorial_on_startup,
         }
         self._settings_file.write_text(
             yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
@@ -60,6 +63,7 @@ class AppSettingsService:
             "background_color": "#1e1e1e",
             "font_family": "Noto Sans CJK SC",
             "font_size": 15,
+            "show_tutorial_on_startup": True,
         }
         self._settings_file.write_text(
             yaml.safe_dump(default_settings, allow_unicode=True, sort_keys=False),

@@ -21,6 +21,7 @@ class AppSettings:
     background_color: str
     font_family: str
     font_size: int
+    show_tutorial_on_startup: bool
 
 
 @dataclass(slots=True)
