@@ -14,7 +14,9 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMenu,
+    QMenuBar,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QStatusBar,
@@ -112,12 +114,14 @@ class MainWindow(QMainWindow):
         shell_layout.addWidget(WindowTitleBar(self))
         shell_layout.addWidget(self._build_menu_bar())
         shell_layout.addWidget(self._build_toolbar())
-        shell_layout.addWidget(workbench)
+        shell_layout.addWidget(workbench, 1)
         self.setCentralWidget(shell)
 
     def _build_menu_bar(self) -> QWidget:
-        menu_bar = self.menuBar()
+        menu_bar = QMenuBar(self)
         menu_bar.setObjectName("topMenuBar")
+        menu_bar.setFixedHeight(34)
+        menu_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         for label in ("文件", "项目", "Case", "求解器", "工具", "帮助"):
             menu_bar.addMenu(QMenu(label, self))
         return menu_bar
@@ -125,6 +129,8 @@ class MainWindow(QMainWindow):
     def _build_toolbar(self) -> QWidget:
         toolbar = QToolBar("主工具栏")
         toolbar.setObjectName("topToolBar")
+        toolbar.setFixedHeight(44)
+        toolbar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         toolbar.addAction("新建项目", self._new_project_placeholder)
         toolbar.addAction("打开", self._open_project_placeholder)
         toolbar.addAction("保存", self._save_current_state)
