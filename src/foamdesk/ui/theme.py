@@ -26,11 +26,11 @@ THEMES: dict[str, ThemePalette] = {
         panel_bg="#1e1e1e",
         sidebar_bg="#1e1e1e",
         activity_bg="#1e1e1e",
-        status_bg="#007acc",
+        status_bg="#1e1e1e",
         border="#2d2d30",
         text="#cccccc",
         muted_text="#9d9d9d",
-        accent="#0e639c",
+        accent="#37373d",
     ),
     "vscode-light": ThemePalette(
         name="vscode-light",
@@ -72,6 +72,11 @@ def build_stylesheet(
     safe_font_family = font_family.replace('"', "")
     status_font_size = max(font_size - 1, 11)
     return f"""
+    * {{
+        outline: none;
+        selection-background-color: {palette.accent};
+        selection-color: #ffffff;
+    }}
     QMainWindow {{
         background-color: {window_bg};
         color: {palette.text};
@@ -110,11 +115,13 @@ def build_stylesheet(
     QStatusBar {{
         background-color: {palette.status_bg};
         color: #ffffff;
+        border-top: 1px solid {palette.border};
         font-size: {status_font_size}px;
     }}
     QStatusBar QLabel {{
         background-color: transparent;
         color: #ffffff;
+        border: none;
     }}
     QSplitter {{
         background-color: {window_bg};
