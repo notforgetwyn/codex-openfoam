@@ -60,12 +60,12 @@ class MainWindow(QMainWindow):
 
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("主工具栏")
-        toolbar.addAction("新建项目")
-        toolbar.addAction("打开")
-        toolbar.addAction("保存")
+        toolbar.addAction("新建项目", self._new_project_placeholder)
+        toolbar.addAction("打开", self._open_project_placeholder)
+        toolbar.addAction("保存", self._save_current_state)
         toolbar.addSeparator()
-        toolbar.addAction("运行")
-        toolbar.addAction("停止")
+        toolbar.addAction("运行", self._run_placeholder)
+        toolbar.addAction("停止", self._stop_placeholder)
         toolbar.addSeparator()
         toolbar.addAction("设置", self._open_settings_tab)
         toolbar.addAction("切换主题", self._cycle_theme)
@@ -95,6 +95,7 @@ class MainWindow(QMainWindow):
         for item_text in ("资源", "搜索", "任务", "结果"):
             activity_list.addItem(QListWidgetItem(item_text))
         activity_list.setCurrentRow(0)
+        activity_list.currentRowChanged.connect(self._on_activity_changed)
         layout.addWidget(activity_list)
         return container
 
@@ -153,11 +154,20 @@ class MainWindow(QMainWindow):
         return container
 
     def _build_bottom_panel(self) -> QWidget:
-        panel = QTabWidget()
-        panel.addTab(self._make_text_panel("日志输出"), "日志")
-        panel.addTab(self._make_text_panel("任务状态"), "任务")
-        panel.addTab(self._make_text_panel("问题诊断"), "问题")
-        return panel
+        self._bottom_tabs = QTabWidget()
+        self._log_text = QTextEdit()
+        self._log_text.setReadOnly(True)
+        self._task_text = QTextEdit()
+        self._task_text.setReadOnly(True)
+        self._problem_text = QTextEdit()
+        self._problem_text.setReadOnly(True)
+        self._bottom_tabs.addTab(self._log_text, "日志")
+        self._bottom_tabs.addTab(self._task_text, "任务")
+        self._bottom_tabs.addTab(self._problem_text, "问题")
+        self._append_log("应用已启动。")
+        self._task_text.setPlainText("任务状态：空闲")
+        self._problem_text.setPlainText("暂无问题。")
+        return self._bottom_tabs
 
     def _make_text_panel(self, title: str) -> QWidget:
         wrapper = QWidget()
@@ -184,7 +194,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 16, 16, 16)
 
         title = QLabel("项目主页")
-        title.setStyleSheet("font-size: 18px; font-weight: 600;")
+        title.setStyleSheet("font-size: 22px; font-weight: 600;")
         summary = QTextEdit()
         summary.setReadOnly(True)
         summary.setPlainText(
@@ -209,7 +219,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 16, 16, 16)
 
         title = QLabel("环境检查")
-        title.setStyleSheet("font-size: 18px; font-weight: 600;")
+        title.setStyleSheet("font-size: 22px; font-weight: 600;")
         self._environment_text = QTextEdit()
         self._environment_text.setReadOnly(True)
         refresh_button = QPushButton("重新检测 OpenFOAM 环境")
@@ -226,7 +236,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 16, 16, 16)
 
         title = QLabel("设置")
-        title.setStyleSheet("font-size: 18px; font-weight: 600;")
+        title.setStyleSheet("font-size: 22px; font-weight: 600;")
         form = QFormLayout()
 
         settings = self._context.settings_service.load()
@@ -256,6 +266,7 @@ class MainWindow(QMainWindow):
 
     def _open_settings_tab(self) -> None:
         self._workspace_tabs.setCurrentIndex(4)
+        self._set_status("已打开设置页。")
 
     def _apply_settings_theme(self) -> None:
         settings = self._context.settings_service.load()
@@ -281,6 +292,7 @@ class MainWindow(QMainWindow):
         self._context.settings_service.save(updated_settings)
         self._apply_settings_theme()
         self._refresh_environment_panels()
+        self._set_status(f"主题已切换为 {theme_name}。")
 
     def _save_settings(self) -> None:
         background_color = self._background_color_input.text().strip() or "#1e1e1e"
@@ -295,6 +307,7 @@ class MainWindow(QMainWindow):
         self._context.settings_service.save(updated_settings)
         self._apply_settings_theme()
         self._refresh_environment_panels()
+        self._set_status("设置已保存。")
 
     def _refresh_status_bar(self) -> None:
         status = self._context.environment_detector.detect()
@@ -314,3 +327,53 @@ class MainWindow(QMainWindow):
             f"- OpenFOAM 版本：{status.foam_version or '未知'}\n"
             f"- 说明：{status.detail}\n"
         )
+        self._append_log(f"环境检查完成：{status_flag}，OpenFOAM={status.foam_version or '未知'}")
+
+    def _on_activity_changed(self, index: int) -> None:
+        if index == 0:
+            self._workspace_tabs.setCurrentIndex(0)
+            self._set_status("已切换到资源视图。")
+        elif index == 1:
+            self._workspace_tabs.setCurrentIndex(0)
+            self._set_status("搜索功能将在项目管理阶段接入。")
+        elif index == 2:
+            self._workspace_tabs.setCurrentIndex(2)
+            self._bottom_tabs.setCurrentIndex(1)
+            self._set_status("已切换到任务视图。")
+        elif index == 3:
+            self._workspace_tabs.setCurrentIndex(5)
+            self._set_status("已切换到结果视图。")
+
+    def _new_project_placeholder(self) -> None:
+        self._workspace_tabs.setCurrentIndex(0)
+        self._append_log("新建项目：功能入口已响应，下一阶段接入真实项目创建流程。")
+        self._set_status("新建项目入口已响应。")
+
+    def _open_project_placeholder(self) -> None:
+        self._workspace_tabs.setCurrentIndex(0)
+        self._append_log("打开项目：功能入口已响应，下一阶段接入本地项目选择。")
+        self._set_status("打开项目入口已响应。")
+
+    def _save_current_state(self) -> None:
+        self._save_settings()
+        self._append_log("保存：当前设置已写入本地配置。")
+
+    def _run_placeholder(self) -> None:
+        self._workspace_tabs.setCurrentIndex(2)
+        self._bottom_tabs.setCurrentIndex(1)
+        self._task_text.setPlainText("任务状态：等待接入 blockMesh 执行链路")
+        self._append_log("运行：按钮已响应，下一阶段接入 blockMesh 和实时日志。")
+        self._set_status("运行入口已响应。")
+
+    def _stop_placeholder(self) -> None:
+        self._task_text.setPlainText("任务状态：空闲")
+        self._append_log("停止：当前没有正在运行的任务。")
+        self._set_status("当前没有正在运行的任务。")
+
+    def _append_log(self, message: str) -> None:
+        if hasattr(self, "_log_text"):
+            self._log_text.append(message)
+
+    def _set_status(self, message: str) -> None:
+        self._task_label.setText(f"任务状态: {message}")
+        self._append_log(message)
