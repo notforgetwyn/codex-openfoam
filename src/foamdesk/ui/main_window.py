@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import shlex
+from pathlib import Path
+
 from PySide6.QtCore import Qt
+from PySide6.QtCore import QProcess
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QComboBox,
+    QFileDialog,
     QFontComboBox,
     QFrame,
     QFormLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -15,6 +21,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMenuBar,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QSpinBox,
@@ -30,6 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from foamdesk.app.bootstrap import ApplicationContext
+from foamdesk.domain.models import SimulationProject
 from foamdesk.ui.theme import THEMES, build_stylesheet
 
 
@@ -89,6 +97,8 @@ class MainWindow(QMainWindow):
         self._context = context
         self._theme_names = list(THEMES.keys())
         self._theme_index = 0
+        self._current_project: SimulationProject | None = None
+        self._foam_process: QProcess | None = None
         self.setWindowTitle("FoamDesk")
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.resize(1400, 900)
@@ -122,8 +132,31 @@ class MainWindow(QMainWindow):
         menu_bar.setObjectName("topMenuBar")
         menu_bar.setFixedHeight(34)
         menu_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        for label in ("文件", "项目", "Case", "求解器", "工具", "帮助"):
-            menu_bar.addMenu(QMenu(label, self))
+        file_menu = menu_bar.addMenu("文件")
+        file_menu.addAction("新建项目", self._create_project)
+        file_menu.addAction("打开项目", self._open_project)
+        file_menu.addAction("保存设置", self._save_current_state)
+        file_menu.addSeparator()
+        file_menu.addAction("退出", self.close)
+
+        project_menu = menu_bar.addMenu("项目")
+        project_menu.addAction("刷新项目树", self._refresh_project_tree)
+        project_menu.addAction("搜索项目", self._search_projects)
+
+        case_menu = menu_bar.addMenu("Case")
+        case_menu.addAction("打开当前 Case 目录", self._show_current_case_path)
+
+        solver_menu = menu_bar.addMenu("求解器")
+        solver_menu.addAction("运行 blockMesh", self._run_block_mesh)
+        solver_menu.addAction("停止当前任务", self._stop_current_process)
+
+        tools_menu = menu_bar.addMenu("工具")
+        tools_menu.addAction("环境检查", self._open_environment_tab)
+        tools_menu.addAction("设置", self._open_settings_tab)
+        tools_menu.addAction("切换主题", self._cycle_theme)
+
+        help_menu = menu_bar.addMenu("帮助")
+        help_menu.addAction("当前阶段说明", self._show_stage_summary)
         return menu_bar
 
     def _build_toolbar(self) -> QWidget:
@@ -131,12 +164,12 @@ class MainWindow(QMainWindow):
         toolbar.setObjectName("topToolBar")
         toolbar.setFixedHeight(44)
         toolbar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        toolbar.addAction("新建项目", self._new_project_placeholder)
-        toolbar.addAction("打开", self._open_project_placeholder)
+        toolbar.addAction("新建项目", self._create_project)
+        toolbar.addAction("打开", self._open_project)
         toolbar.addAction("保存", self._save_current_state)
         toolbar.addSeparator()
-        toolbar.addAction("运行", self._run_placeholder)
-        toolbar.addAction("停止", self._stop_placeholder)
+        toolbar.addAction("运行", self._run_block_mesh)
+        toolbar.addAction("停止", self._stop_current_process)
         toolbar.addSeparator()
         toolbar.addAction("设置", self._open_settings_tab)
         toolbar.addAction("切换主题", self._cycle_theme)
@@ -183,14 +216,11 @@ class MainWindow(QMainWindow):
         return container
 
     def _build_project_tree(self) -> QWidget:
-        tree = QTreeWidget()
-        tree.setHeaderLabel("项目树")
-        project = QTreeWidgetItem(["示例项目"])
-        project.addChild(QTreeWidgetItem(["Case1"]))
-        project.addChild(QTreeWidgetItem(["Case2"]))
-        tree.addTopLevelItem(project)
-        tree.expandAll()
-        return tree
+        self._project_tree = QTreeWidget()
+        self._project_tree.setHeaderLabel("项目树")
+        self._project_tree.itemClicked.connect(self._on_project_tree_item_clicked)
+        self._refresh_project_tree()
+        return self._project_tree
 
     def _build_editor_panel(self) -> QWidget:
         container = QWidget()
@@ -346,6 +376,11 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.setCurrentIndex(4)
         self._set_status("已打开设置页。")
 
+    def _open_environment_tab(self) -> None:
+        self._workspace_tabs.setCurrentIndex(3)
+        self._refresh_environment_panels()
+        self._set_status("已打开环境检查页。")
+
     def _apply_settings_theme(self) -> None:
         settings = self._context.settings_service.load()
         self._theme_index = self._theme_names.index(settings.theme_name)
@@ -425,8 +460,7 @@ class MainWindow(QMainWindow):
             self._workspace_tabs.setCurrentIndex(0)
             self._set_status("已切换到资源视图。")
         elif index == 1:
-            self._workspace_tabs.setCurrentIndex(0)
-            self._set_status("搜索功能将在项目管理阶段接入。")
+            self._search_projects()
         elif index == 2:
             self._workspace_tabs.setCurrentIndex(2)
             self._bottom_tabs.setCurrentIndex(1)
@@ -435,31 +469,175 @@ class MainWindow(QMainWindow):
             self._workspace_tabs.setCurrentIndex(5)
             self._set_status("已切换到结果视图。")
 
-    def _new_project_placeholder(self) -> None:
-        self._workspace_tabs.setCurrentIndex(0)
-        self._append_log("新建项目：功能入口已响应，下一阶段接入真实项目创建流程。")
-        self._set_status("新建项目入口已响应。")
-
-    def _open_project_placeholder(self) -> None:
-        self._workspace_tabs.setCurrentIndex(0)
-        self._append_log("打开项目：功能入口已响应，下一阶段接入本地项目选择。")
-        self._set_status("打开项目入口已响应。")
-
     def _save_current_state(self) -> None:
         self._save_settings()
         self._append_log("保存：当前设置已写入本地配置。")
 
-    def _run_placeholder(self) -> None:
-        self._workspace_tabs.setCurrentIndex(2)
-        self._bottom_tabs.setCurrentIndex(1)
-        self._task_text.setPlainText("任务状态：等待接入 blockMesh 执行链路")
-        self._append_log("运行：按钮已响应，下一阶段接入 blockMesh 和实时日志。")
-        self._set_status("运行入口已响应。")
+    def _create_project(self) -> None:
+        name, ok = QInputDialog.getText(self, "新建项目", "项目名称")
+        if not ok:
+            return
+        try:
+            project = self._context.project_service.create_project(name)
+        except ValueError as error:
+            self._show_error(str(error))
+            return
 
-    def _stop_placeholder(self) -> None:
-        self._task_text.setPlainText("任务状态：空闲")
-        self._append_log("停止：当前没有正在运行的任务。")
-        self._set_status("当前没有正在运行的任务。")
+        self._current_project = project
+        self._refresh_project_tree()
+        self._workspace_tabs.setCurrentIndex(0)
+        self._case_label.setText(f"当前 Case: {project.name}")
+        self._append_log(f"已创建项目：{project.path}")
+        self._set_status("项目创建完成。")
+
+    def _open_project(self) -> None:
+        settings = self._context.settings_service.load()
+        selected_dir = QFileDialog.getExistingDirectory(
+            self,
+            "打开 FoamDesk 项目",
+            str(settings.workspace_dir / "projects"),
+        )
+        if not selected_dir:
+            return
+        try:
+            project = self._context.project_service.open_project(Path(selected_dir))
+        except ValueError as error:
+            self._show_error(str(error))
+            return
+
+        self._current_project = project
+        self._refresh_project_tree()
+        self._workspace_tabs.setCurrentIndex(0)
+        self._case_label.setText(f"当前 Case: {project.name}")
+        self._append_log(f"已打开项目：{project.path}")
+        self._set_status("项目打开完成。")
+
+    def _refresh_project_tree(self) -> None:
+        if not hasattr(self, "_project_tree"):
+            return
+        self._project_tree.clear()
+        projects = self._context.project_service.list_projects()
+        if not projects:
+            empty_item = QTreeWidgetItem(["暂无项目"])
+            empty_item.setDisabled(True)
+            self._project_tree.addTopLevelItem(empty_item)
+            return
+
+        for project in projects:
+            project_item = QTreeWidgetItem([project.name])
+            project_item.setData(0, Qt.ItemDataRole.UserRole, str(project.path))
+            case_item = QTreeWidgetItem(["case"])
+            case_item.setData(0, Qt.ItemDataRole.UserRole, str(project.path))
+            project_item.addChild(case_item)
+            self._project_tree.addTopLevelItem(project_item)
+        self._project_tree.expandAll()
+
+    def _on_project_tree_item_clicked(self, item: QTreeWidgetItem) -> None:
+        project_path = item.data(0, Qt.ItemDataRole.UserRole)
+        if not project_path:
+            return
+        try:
+            self._current_project = self._context.project_service.open_project(Path(project_path))
+        except ValueError as error:
+            self._show_error(str(error))
+            return
+        self._case_label.setText(f"当前 Case: {self._current_project.name}")
+        self._append_log(f"当前项目：{self._current_project.path}")
+
+    def _search_projects(self) -> None:
+        keyword, ok = QInputDialog.getText(self, "搜索项目", "项目名称关键字")
+        if not ok:
+            return
+        normalized = keyword.strip().lower()
+        root_count = self._project_tree.topLevelItemCount()
+        for index in range(root_count):
+            item = self._project_tree.topLevelItem(index)
+            visible = not normalized or normalized in item.text(0).lower()
+            item.setHidden(not visible)
+        self._set_status("项目搜索已应用。")
+
+    def _run_block_mesh(self) -> None:
+        if self._foam_process and self._foam_process.state() != QProcess.ProcessState.NotRunning:
+            self._show_error("已有任务正在运行，请先停止当前任务。")
+            return
+        if self._current_project is None:
+            self._show_error("请先新建或打开一个项目。")
+            return
+
+        status = self._context.environment_detector.detect()
+        if not status.is_available or not status.env_script_path:
+            self._show_error(f"OpenFOAM 环境不可用：{status.detail}")
+            return
+
+        block_mesh_dict = self._current_project.case_dir / "system" / "blockMeshDict"
+        if not block_mesh_dict.exists():
+            self._show_error("当前 case 缺少 system/blockMeshDict。")
+            return
+
+        self._workspace_tabs.setCurrentIndex(2)
+        self._bottom_tabs.setCurrentIndex(0)
+        self._task_text.setPlainText("任务状态：blockMesh 运行中")
+        self._set_status("blockMesh 运行中。")
+
+        command = (
+            f"source {shlex.quote(status.env_script_path)} >/dev/null 2>&1 && "
+            f"cd {shlex.quote(str(self._current_project.case_dir))} && blockMesh"
+        )
+        self._foam_process = QProcess(self)
+        self._foam_process.setProgram("bash")
+        self._foam_process.setArguments(["-lc", command])
+        self._foam_process.readyReadStandardOutput.connect(self._read_process_stdout)
+        self._foam_process.readyReadStandardError.connect(self._read_process_stderr)
+        self._foam_process.finished.connect(self._on_process_finished)
+        self._foam_process.start()
+        self._append_log(f"启动 blockMesh：{self._current_project.case_dir}")
+
+    def _stop_current_process(self) -> None:
+        if not self._foam_process or self._foam_process.state() == QProcess.ProcessState.NotRunning:
+            self._task_text.setPlainText("任务状态：空闲")
+            self._set_status("当前没有正在运行的任务。")
+            return
+        self._foam_process.terminate()
+        if not self._foam_process.waitForFinished(3000):
+            self._foam_process.kill()
+        self._task_text.setPlainText("任务状态：已停止")
+        self._set_status("任务已停止。")
+
+    def _read_process_stdout(self) -> None:
+        if self._foam_process:
+            self._append_log(bytes(self._foam_process.readAllStandardOutput()).decode(errors="replace"))
+
+    def _read_process_stderr(self) -> None:
+        if self._foam_process:
+            self._append_log(bytes(self._foam_process.readAllStandardError()).decode(errors="replace"))
+
+    def _on_process_finished(self, exit_code: int, _exit_status) -> None:
+        if exit_code == 0:
+            self._task_text.setPlainText("任务状态：blockMesh 完成")
+            self._set_status("blockMesh 完成。")
+        else:
+            self._task_text.setPlainText(f"任务状态：blockMesh 失败，退出码 {exit_code}")
+            self._set_status(f"blockMesh 失败，退出码 {exit_code}。")
+
+    def _show_current_case_path(self) -> None:
+        if self._current_project is None:
+            self._show_error("当前没有打开的项目。")
+            return
+        self._workspace_tabs.setCurrentIndex(0)
+        self._append_log(f"当前 Case 目录：{self._current_project.case_dir}")
+        self._set_status("已输出当前 Case 目录。")
+
+    def _show_stage_summary(self) -> None:
+        self._append_log(
+            "当前 Sprint：Sprint 2 UI 可用性与设置系统；下一阶段：Sprint 3 项目管理与 OpenFOAM 最小执行闭环。"
+        )
+        self._set_status("已输出当前阶段说明。")
+
+    def _show_error(self, message: str) -> None:
+        self._problem_text.setPlainText(message)
+        self._bottom_tabs.setCurrentIndex(2)
+        self._append_log(f"错误：{message}")
+        QMessageBox.warning(self, "FoamDesk", message)
 
     def _append_log(self, message: str) -> None:
         if hasattr(self, "_log_text"):

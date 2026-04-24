@@ -21,3 +21,10 @@ class AppSettings:
     background_color: str
     font_family: str
     font_size: int
+
+
+@dataclass(slots=True)
+class SimulationProject:
+    name: str
+    path: Path
+    case_dir: Path
