@@ -61,24 +61,33 @@ THEMES: dict[str, ThemePalette] = {
 }
 
 
-def build_stylesheet(theme_name: str, background_color: str | None = None) -> str:
+def build_stylesheet(
+    theme_name: str,
+    background_color: str | None = None,
+    font_family: str = "Noto Sans CJK SC",
+    font_size: int = 15,
+) -> str:
     palette = THEMES.get(theme_name, THEMES["vscode-dark"])
     window_bg = background_color or palette.window_bg
+    safe_font_family = font_family.replace('"', "")
+    status_font_size = max(font_size - 1, 11)
     return f"""
     QMainWindow {{
         background-color: {window_bg};
         color: {palette.text};
-        font-size: 15px;
+        font-family: "{safe_font_family}";
+        font-size: {font_size}px;
     }}
     QWidget {{
         color: {palette.text};
         background-color: {window_bg};
-        font-size: 15px;
+        font-family: "{safe_font_family}";
+        font-size: {font_size}px;
     }}
     QMenuBar, QToolBar {{
         background-color: {window_bg};
         border-bottom: 1px solid {palette.border};
-        font-size: 15px;
+        font-size: {font_size}px;
     }}
     QMenu {{
         background-color: {window_bg};
@@ -93,7 +102,7 @@ def build_stylesheet(theme_name: str, background_color: str | None = None) -> st
         border: none;
         padding: 8px 12px;
         color: {palette.text};
-        font-size: 15px;
+        font-size: {font_size}px;
     }}
     QMenuBar::item:selected, QMenu::item:selected, QToolButton:hover {{
         background-color: {palette.accent};
@@ -101,7 +110,7 @@ def build_stylesheet(theme_name: str, background_color: str | None = None) -> st
     QStatusBar {{
         background-color: {palette.status_bg};
         color: #ffffff;
-        font-size: 14px;
+        font-size: {status_font_size}px;
     }}
     QStatusBar QLabel {{
         background-color: transparent;
@@ -118,7 +127,7 @@ def build_stylesheet(theme_name: str, background_color: str | None = None) -> st
         background-color: {window_bg};
         top: -1px;
     }}
-    QTreeWidget, QTextEdit, QListWidget, QFrame, QLineEdit, QComboBox {{
+    QTreeWidget, QTextEdit, QListWidget, QFrame, QLineEdit, QComboBox, QSpinBox {{
         border: 1px solid {palette.border};
         background-color: {window_bg};
     }}
@@ -128,7 +137,7 @@ def build_stylesheet(theme_name: str, background_color: str | None = None) -> st
         padding: 11px 18px;
         border: 1px solid {palette.border};
         border-bottom: none;
-        font-size: 15px;
+        font-size: {font_size}px;
     }}
     QTabBar::tab:selected {{
         color: {palette.text};
@@ -155,17 +164,17 @@ def build_stylesheet(theme_name: str, background_color: str | None = None) -> st
         border-right: 1px solid {palette.border};
         border-bottom: 1px solid {palette.border};
         padding: 8px 10px;
-        font-size: 15px;
+        font-size: {font_size}px;
     }}
     QTextEdit {{
         background-color: {window_bg};
         selection-background-color: {palette.accent};
-        font-size: 15px;
+        font-size: {font_size}px;
     }}
-    QLineEdit, QComboBox {{
+    QLineEdit, QComboBox, QSpinBox {{
         padding: 8px;
         selection-background-color: {palette.accent};
-        font-size: 15px;
+        font-size: {font_size}px;
     }}
     QLabel {{
         background-color: transparent;
@@ -175,7 +184,7 @@ def build_stylesheet(theme_name: str, background_color: str | None = None) -> st
         color: {palette.text};
         border: 1px solid {palette.border};
         padding: 9px 14px;
-        font-size: 15px;
+        font-size: {font_size}px;
     }}
     QPushButton:hover {{
         background-color: {palette.accent};

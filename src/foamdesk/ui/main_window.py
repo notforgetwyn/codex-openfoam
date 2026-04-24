@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QComboBox,
+    QFontComboBox,
     QFrame,
     QFormLayout,
     QHBoxLayout,
@@ -13,6 +15,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QPushButton,
+    QSpinBox,
     QSplitter,
     QStatusBar,
     QTabWidget,
@@ -247,9 +250,16 @@ class MainWindow(QMainWindow):
         self._background_color_input = QLineEdit(settings.background_color)
         self._workspace_input = QLineEdit(str(settings.workspace_dir))
         self._env_script_input = QLineEdit(settings.openfoam_env_script or "")
+        self._font_combo = QFontComboBox()
+        self._font_combo.setCurrentFont(QFont(settings.font_family))
+        self._font_size_input = QSpinBox()
+        self._font_size_input.setRange(11, 28)
+        self._font_size_input.setValue(settings.font_size)
 
         form.addRow("主题", self._theme_combo)
         form.addRow("主背景色", self._background_color_input)
+        form.addRow("界面字体", self._font_combo)
+        form.addRow("字体大小", self._font_size_input)
         form.addRow("工作区路径", self._workspace_input)
         form.addRow("OpenFOAM 环境脚本", self._env_script_input)
 
@@ -271,12 +281,21 @@ class MainWindow(QMainWindow):
     def _apply_settings_theme(self) -> None:
         settings = self._context.settings_service.load()
         self._theme_index = self._theme_names.index(settings.theme_name)
-        self.setStyleSheet(build_stylesheet(settings.theme_name, settings.background_color))
+        self.setStyleSheet(
+            build_stylesheet(
+                settings.theme_name,
+                settings.background_color,
+                settings.font_family,
+                settings.font_size,
+            )
+        )
         if hasattr(self, "_theme_combo"):
             self._theme_combo.setCurrentText(settings.theme_name)
             self._background_color_input.setText(settings.background_color)
             self._workspace_input.setText(str(settings.workspace_dir))
             self._env_script_input.setText(settings.openfoam_env_script or "")
+            self._font_combo.setCurrentFont(QFont(settings.font_family))
+            self._font_size_input.setValue(settings.font_size)
 
     def _cycle_theme(self) -> None:
         self._theme_index = (self._theme_index + 1) % len(self._theme_names)
@@ -288,6 +307,8 @@ class MainWindow(QMainWindow):
             openfoam_env_script=settings.openfoam_env_script,
             theme_name=theme_name,
             background_color=palette.window_bg,
+            font_family=settings.font_family,
+            font_size=settings.font_size,
         )
         self._context.settings_service.save(updated_settings)
         self._apply_settings_theme()
@@ -303,6 +324,8 @@ class MainWindow(QMainWindow):
             openfoam_env_script=env_script,
             theme_name=self._theme_combo.currentText(),
             background_color=background_color,
+            font_family=self._font_combo.currentFont().family(),
+            font_size=self._font_size_input.value(),
         )
         self._context.settings_service.save(updated_settings)
         self._apply_settings_theme()

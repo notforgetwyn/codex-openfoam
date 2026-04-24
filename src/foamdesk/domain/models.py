@@ -19,3 +19,5 @@ class AppSettings:
     openfoam_env_script: str | None
     theme_name: str
     background_color: str
+    font_family: str
+    font_size: int

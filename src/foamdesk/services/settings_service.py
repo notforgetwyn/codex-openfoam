@@ -22,11 +22,15 @@ class AppSettingsService:
         env_script = payload.get("openfoam_env_script")
         theme_name = payload.get("theme_name", "vscode-dark")
         background_color = payload.get("background_color", "#1e1e1e")
+        font_family = payload.get("font_family", "Noto Sans CJK SC")
+        font_size = int(payload.get("font_size", 15))
         return AppSettings(
             workspace_dir=workspace_dir,
             openfoam_env_script=env_script,
             theme_name=theme_name,
             background_color=background_color,
+            font_family=font_family,
+            font_size=font_size,
         )
 
     def save(self, settings: AppSettings) -> None:
@@ -36,6 +40,8 @@ class AppSettingsService:
             "openfoam_env_script": settings.openfoam_env_script,
             "theme_name": settings.theme_name,
             "background_color": settings.background_color,
+            "font_family": settings.font_family,
+            "font_size": settings.font_size,
         }
         self._settings_file.write_text(
             yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
@@ -52,6 +58,8 @@ class AppSettingsService:
             "openfoam_env_script": None,
             "theme_name": "vscode-dark",
             "background_color": "#1e1e1e",
+            "font_family": "Noto Sans CJK SC",
+            "font_size": 15,
         }
         self._settings_file.write_text(
             yaml.safe_dump(default_settings, allow_unicode=True, sort_keys=False),
