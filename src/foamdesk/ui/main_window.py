@@ -4,7 +4,7 @@ import shlex
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtCore import QProcess
+from PySide6.QtCore import QProcess, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QComboBox,
@@ -92,6 +92,60 @@ class WindowTitleBar(QFrame):
             self._window.showMaximized()
 
 
+class TutorialOverlay(QFrame):
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setObjectName("tutorialOverlay")
+        self.hide()
+
+        overlay_layout = QVBoxLayout(self)
+        overlay_layout.setContentsMargins(0, 0, 0, 0)
+        overlay_layout.addStretch(1)
+
+        panel = QFrame(self)
+        panel.setObjectName("tutorialPanel")
+        panel.setFixedWidth(620)
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(24, 22, 24, 22)
+        panel_layout.setSpacing(14)
+
+        title = QLabel("FoamDesk 新手教程")
+        title.setObjectName("tutorialTitle")
+        body = QLabel(
+            "1. 点击“新建项目”，输入项目名称。\n"
+            "2. 左侧项目树会显示真实项目，点击项目设为当前 Case。\n"
+            "3. 打开“设置”，确认工作区、字体、字号和 OpenFOAM 环境脚本。\n"
+            "4. 打开“环境检查”，确认 OpenFOAM 环境是否可用。\n"
+            "5. 点击“运行”，当前阶段会尝试执行 blockMesh。\n"
+            "6. 底部“日志 / 任务 / 问题”面板会显示运行信息。\n\n"
+            "当前 Sprint：Sprint 2 UI 可用性与设置系统。\n"
+            "下一阶段：Sprint 3 项目管理与 OpenFOAM 最小执行闭环。"
+        )
+        body.setObjectName("tutorialBody")
+        body.setWordWrap(True)
+
+        close_button = QPushButton("开始使用")
+        close_button.setObjectName("tutorialCloseButton")
+        close_button.clicked.connect(self.hide)
+
+        panel_layout.addWidget(title)
+        panel_layout.addWidget(body)
+        panel_layout.addWidget(close_button, alignment=Qt.AlignmentFlag.AlignRight)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(panel)
+        row.addStretch(1)
+        overlay_layout.addLayout(row)
+        overlay_layout.addStretch(1)
+
+    def show_overlay(self) -> None:
+        if self.parentWidget():
+            self.setGeometry(self.parentWidget().rect())
+        self.raise_()
+        self.show()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, context: ApplicationContext) -> None:
         super().__init__()
@@ -100,6 +154,7 @@ class MainWindow(QMainWindow):
         self._theme_index = 0
         self._current_project: SimulationProject | None = None
         self._foam_process: QProcess | None = None
+        self._tutorial_overlay: TutorialOverlay | None = None
         self.setWindowTitle("FoamDesk")
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.resize(1400, 900)
@@ -107,7 +162,7 @@ class MainWindow(QMainWindow):
         self._apply_settings_theme()
         self._refresh_status_bar()
         if self._context.settings_service.load().show_tutorial_on_startup:
-            self._show_tutorial()
+            QTimer.singleShot(0, self._show_tutorial)
 
     def _build_ui(self) -> None:
         self._build_status_bar()
@@ -128,7 +183,13 @@ class MainWindow(QMainWindow):
         shell_layout.addWidget(self._build_menu_bar())
         shell_layout.addWidget(self._build_toolbar())
         shell_layout.addWidget(workbench, 1)
+        self._tutorial_overlay = TutorialOverlay(shell)
         self.setCentralWidget(shell)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self._tutorial_overlay and self._tutorial_overlay.parentWidget():
+            self._tutorial_overlay.setGeometry(self._tutorial_overlay.parentWidget().rect())
 
     def _build_menu_bar(self) -> QWidget:
         menu_bar = QMenuBar(self)
@@ -644,19 +705,8 @@ class MainWindow(QMainWindow):
         self._set_status("已输出当前阶段说明。")
 
     def _show_tutorial(self) -> None:
-        QMessageBox.information(
-            self,
-            "FoamDesk 新手教程",
-            "FoamDesk 当前可用流程：\n\n"
-            "1. 点击“新建项目”，输入项目名称。\n"
-            "2. 左侧项目树会显示真实项目，点击项目即可设为当前 Case。\n"
-            "3. 打开“设置”，确认工作区路径、界面字体、字体大小和 OpenFOAM 环境脚本。\n"
-            "4. 打开“环境检查”，确认 OpenFOAM 环境是否可用。\n"
-            "5. 点击“运行”，当前阶段会尝试执行 blockMesh。\n"
-            "6. 底部“日志 / 任务 / 问题”面板会显示运行信息。\n\n"
-            "当前 Sprint：Sprint 2 UI 可用性与设置系统。\n"
-            "下一阶段：Sprint 3 项目管理与 OpenFOAM 最小执行闭环。",
-        )
+        if self._tutorial_overlay:
+            self._tutorial_overlay.show_overlay()
         self._append_log("已显示新手教程。")
 
     def _show_error(self, message: str) -> None:
