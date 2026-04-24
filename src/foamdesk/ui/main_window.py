@@ -31,6 +31,56 @@ from foamdesk.app.bootstrap import ApplicationContext
 from foamdesk.ui.theme import THEMES, build_stylesheet
 
 
+class WindowTitleBar(QFrame):
+    def __init__(self, window: QMainWindow) -> None:
+        super().__init__(window)
+        self._window = window
+        self.setObjectName("customTitleBar")
+        self.setFixedHeight(36)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 0, 4, 0)
+        layout.setSpacing(6)
+
+        title = QLabel("FoamDesk")
+        title.setObjectName("windowTitleLabel")
+        layout.addStretch(1)
+        layout.addWidget(title)
+        layout.addStretch(1)
+
+        minimize_button = QPushButton("—")
+        maximize_button = QPushButton("□")
+        close_button = QPushButton("×")
+        for button in (minimize_button, maximize_button, close_button):
+            button.setObjectName("windowControlButton")
+            button.setFixedSize(42, 30)
+        close_button.setObjectName("windowCloseButton")
+
+        minimize_button.clicked.connect(window.showMinimized)
+        maximize_button.clicked.connect(self._toggle_maximized)
+        close_button.clicked.connect(window.close)
+
+        layout.addWidget(minimize_button)
+        layout.addWidget(maximize_button)
+        layout.addWidget(close_button)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._toggle_maximized()
+        super().mouseDoubleClickEvent(event)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self._window.windowHandle():
+            self._window.windowHandle().startSystemMove()
+        super().mousePressEvent(event)
+
+    def _toggle_maximized(self) -> None:
+        if self._window.isMaximized():
+            self._window.showNormal()
+        else:
+            self._window.showMaximized()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, context: ApplicationContext) -> None:
         super().__init__()
@@ -38,14 +88,13 @@ class MainWindow(QMainWindow):
         self._theme_names = list(THEMES.keys())
         self._theme_index = 0
         self.setWindowTitle("FoamDesk")
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.resize(1400, 900)
         self._build_ui()
         self._apply_settings_theme()
         self._refresh_status_bar()
 
     def _build_ui(self) -> None:
-        self._build_menu_bar()
-        self._build_toolbar()
         self._build_status_bar()
 
         workbench = QSplitter(Qt.Orientation.Horizontal)
@@ -54,15 +103,28 @@ class MainWindow(QMainWindow):
         workbench.addWidget(self._build_editor_panel())
         workbench.setSizes([72, 300, 1028])
         workbench.setChildrenCollapsible(False)
-        self.setCentralWidget(workbench)
 
-    def _build_menu_bar(self) -> None:
+        shell = QWidget()
+        shell.setObjectName("appShell")
+        shell_layout = QVBoxLayout(shell)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(0)
+        shell_layout.addWidget(WindowTitleBar(self))
+        shell_layout.addWidget(self._build_menu_bar())
+        shell_layout.addWidget(self._build_toolbar())
+        shell_layout.addWidget(workbench)
+        self.setCentralWidget(shell)
+
+    def _build_menu_bar(self) -> QWidget:
         menu_bar = self.menuBar()
+        menu_bar.setObjectName("topMenuBar")
         for label in ("文件", "项目", "Case", "求解器", "工具", "帮助"):
             menu_bar.addMenu(QMenu(label, self))
+        return menu_bar
 
-    def _build_toolbar(self) -> None:
+    def _build_toolbar(self) -> QWidget:
         toolbar = QToolBar("主工具栏")
+        toolbar.setObjectName("topToolBar")
         toolbar.addAction("新建项目", self._new_project_placeholder)
         toolbar.addAction("打开", self._open_project_placeholder)
         toolbar.addAction("保存", self._save_current_state)
@@ -72,7 +134,7 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addAction("设置", self._open_settings_tab)
         toolbar.addAction("切换主题", self._cycle_theme)
-        self.addToolBar(toolbar)
+        return toolbar
 
     def _build_status_bar(self) -> None:
         status_bar = QStatusBar()

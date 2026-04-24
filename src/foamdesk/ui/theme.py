@@ -82,6 +82,7 @@ def build_stylesheet(
         color: {palette.text};
         font-family: "{safe_font_family}";
         font-size: {font_size}px;
+        border: 1px solid {window_bg};
     }}
     QWidget {{
         color: {palette.text};
@@ -89,10 +90,52 @@ def build_stylesheet(
         font-family: "{safe_font_family}";
         font-size: {font_size}px;
     }}
+    #appShell {{
+        background-color: {window_bg};
+        border: 1px solid {palette.border};
+    }}
+    #customTitleBar {{
+        background-color: {window_bg};
+        border: none;
+        border-bottom: 1px solid {palette.border};
+    }}
+    #windowTitleLabel {{
+        color: {palette.muted_text};
+        background-color: transparent;
+        font-size: {status_font_size}px;
+    }}
+    #windowControlButton {{
+        background-color: transparent;
+        border: none;
+        color: {palette.muted_text};
+        padding: 0;
+        font-size: {font_size}px;
+    }}
+    #windowControlButton:hover {{
+        background-color: {palette.accent};
+        color: {palette.text};
+    }}
+    #windowCloseButton {{
+        background-color: transparent;
+        border: none;
+        color: {palette.muted_text};
+        padding: 0;
+        font-size: {font_size}px;
+    }}
+    #windowCloseButton:hover {{
+        background-color: #c42b1c;
+        color: #ffffff;
+    }}
     QMenuBar, QToolBar {{
         background-color: {window_bg};
         border-bottom: 1px solid {palette.border};
         font-size: {font_size}px;
+    }}
+    #topMenuBar {{
+        border-top: none;
+    }}
+    #topToolBar {{
+        border-top: none;
     }}
     QMenu {{
         background-color: {window_bg};
