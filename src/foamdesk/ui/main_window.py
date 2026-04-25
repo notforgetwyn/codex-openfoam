@@ -95,22 +95,25 @@ class WindowTitleBar(QFrame):
 class TutorialOverlay(QFrame):
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
-        self.setObjectName("tutorialOverlay")
+        self.setObjectName("tutorialPanel")
         self.hide()
+        self.setFixedWidth(460)
 
-        overlay_layout = QVBoxLayout(self)
-        overlay_layout.setContentsMargins(0, 0, 0, 0)
-        overlay_layout.addStretch(1)
+        panel_layout = QVBoxLayout(self)
+        panel_layout.setContentsMargins(20, 18, 20, 18)
+        panel_layout.setSpacing(12)
 
-        panel = QFrame(self)
-        panel.setObjectName("tutorialPanel")
-        panel.setFixedWidth(620)
-        panel_layout = QVBoxLayout(panel)
-        panel_layout.setContentsMargins(24, 22, 24, 22)
-        panel_layout.setSpacing(14)
-
+        header = QHBoxLayout()
         title = QLabel("FoamDesk 新手教程")
         title.setObjectName("tutorialTitle")
+        close_button = QPushButton("×")
+        close_button.setObjectName("tutorialIconButton")
+        close_button.setFixedSize(32, 30)
+        close_button.clicked.connect(self.hide)
+        header.addWidget(title)
+        header.addStretch(1)
+        header.addWidget(close_button)
+
         body = QLabel(
             "1. 点击“新建项目”，输入项目名称。\n"
             "2. 左侧项目树会显示真实项目，点击项目设为当前 Case。\n"
@@ -124,24 +127,15 @@ class TutorialOverlay(QFrame):
         body.setObjectName("tutorialBody")
         body.setWordWrap(True)
 
-        close_button = QPushButton("开始使用")
-        close_button.setObjectName("tutorialCloseButton")
-        close_button.clicked.connect(self.hide)
-
-        panel_layout.addWidget(title)
+        panel_layout.addLayout(header)
         panel_layout.addWidget(body)
-        panel_layout.addWidget(close_button, alignment=Qt.AlignmentFlag.AlignRight)
-
-        row = QHBoxLayout()
-        row.addStretch(1)
-        row.addWidget(panel)
-        row.addStretch(1)
-        overlay_layout.addLayout(row)
-        overlay_layout.addStretch(1)
 
     def show_overlay(self) -> None:
         if self.parentWidget():
-            self.setGeometry(self.parentWidget().rect())
+            parent_rect = self.parentWidget().rect()
+            self.adjustSize()
+            margin = 18
+            self.move(parent_rect.right() - self.width() - margin, 126)
         self.raise_()
         self.show()
 
@@ -188,8 +182,8 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        if self._tutorial_overlay and self._tutorial_overlay.parentWidget():
-            self._tutorial_overlay.setGeometry(self._tutorial_overlay.parentWidget().rect())
+        if self._tutorial_overlay and self._tutorial_overlay.isVisible():
+            self._tutorial_overlay.show_overlay()
 
     def _build_menu_bar(self) -> QWidget:
         menu_bar = QMenuBar(self)
