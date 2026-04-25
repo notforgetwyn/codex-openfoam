@@ -12,6 +12,7 @@ class OpenFOAMEnvironmentDetector:
     """Detects whether the current WSL environment can run OpenFOAM commands."""
 
     CANDIDATE_ENV_SCRIPTS = (
+        "/home/shihuayue/openfoam/OpenFOAM-dev/etc/bashrc",
         "/opt/openfoam/etc/bashrc",
         "/usr/lib/openfoam/openfoam*/etc/bashrc",
         "/usr/lib/openfoam*/etc/bashrc",
@@ -85,4 +86,3 @@ class OpenFOAMEnvironmentDetector:
             if matches:
                 return matches[0]
         return None
-

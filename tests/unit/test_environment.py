@@ -3,16 +3,20 @@ from __future__ import annotations
 from pathlib import Path
 
 from foamdesk.domain.models import AppSettings
+from foamdesk.services import settings_service
 from foamdesk.services.settings_service import AppSettingsService
 
 
 def test_settings_service_creates_default_file(tmp_path: Path) -> None:
+    settings_service.DEFAULT_OPENFOAM_ENV_SCRIPT = str(tmp_path / "OpenFOAM-dev" / "etc" / "bashrc")
+    Path(settings_service.DEFAULT_OPENFOAM_ENV_SCRIPT).parent.mkdir(parents=True)
+    Path(settings_service.DEFAULT_OPENFOAM_ENV_SCRIPT).write_text("", encoding="utf-8")
     service = AppSettingsService(tmp_path)
 
     settings = service.load()
 
     assert settings.workspace_dir == tmp_path / "workspace"
-    assert settings.openfoam_env_script is None
+    assert settings.openfoam_env_script == settings_service.DEFAULT_OPENFOAM_ENV_SCRIPT
     assert settings.theme_name == "vscode-dark"
     assert settings.background_color == "#1e1e1e"
     assert settings.font_family == "Noto Sans CJK SC"
@@ -22,6 +26,7 @@ def test_settings_service_creates_default_file(tmp_path: Path) -> None:
 
 
 def test_settings_service_saves_roundtrip(tmp_path: Path) -> None:
+    settings_service.DEFAULT_OPENFOAM_ENV_SCRIPT = str(tmp_path / "missing" / "etc" / "bashrc")
     service = AppSettingsService(tmp_path)
     service.save(
         AppSettings(

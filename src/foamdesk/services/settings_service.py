@@ -6,6 +6,8 @@ import yaml
 
 from foamdesk.domain.models import AppSettings
 
+DEFAULT_OPENFOAM_ENV_SCRIPT = "/home/shihuayue/openfoam/OpenFOAM-dev/etc/bashrc"
+
 
 class AppSettingsService:
     """Loads and stores local application settings."""
@@ -19,7 +21,7 @@ class AppSettingsService:
         self._ensure_defaults()
         payload = yaml.safe_load(self._settings_file.read_text(encoding="utf-8")) or {}
         workspace_dir = Path(payload["workspace_dir"])
-        env_script = payload.get("openfoam_env_script")
+        env_script = payload.get("openfoam_env_script") or self._default_openfoam_env_script()
         theme_name = payload.get("theme_name", "vscode-dark")
         background_color = payload.get("background_color", "#1e1e1e")
         font_family = payload.get("font_family", "Noto Sans CJK SC")
@@ -58,7 +60,7 @@ class AppSettingsService:
 
         default_settings = {
             "workspace_dir": str(self._project_root / "workspace"),
-            "openfoam_env_script": None,
+            "openfoam_env_script": self._default_openfoam_env_script(),
             "theme_name": "vscode-dark",
             "background_color": "#1e1e1e",
             "font_family": "Noto Sans CJK SC",
@@ -69,3 +71,8 @@ class AppSettingsService:
             yaml.safe_dump(default_settings, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
         )
+
+    def _default_openfoam_env_script(self) -> str | None:
+        if Path(DEFAULT_OPENFOAM_ENV_SCRIPT).exists():
+            return DEFAULT_OPENFOAM_ENV_SCRIPT
+        return None
