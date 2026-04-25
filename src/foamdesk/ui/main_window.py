@@ -3,7 +3,7 @@ from __future__ import annotations
 import shlex
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtCore import QProcess, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
@@ -97,10 +97,11 @@ class TutorialOverlay(QFrame):
         super().__init__(parent)
         self.setObjectName("tutorialPanel")
         self.hide()
-        self.setFixedWidth(460)
+        self.setFixedWidth(560)
+        self._drag_start: QPoint | None = None
 
         panel_layout = QVBoxLayout(self)
-        panel_layout.setContentsMargins(20, 18, 20, 18)
+        panel_layout.setContentsMargins(24, 20, 24, 20)
         panel_layout.setSpacing(12)
 
         header = QHBoxLayout()
@@ -135,9 +136,32 @@ class TutorialOverlay(QFrame):
             parent_rect = self.parentWidget().rect()
             self.adjustSize()
             margin = 18
-            self.move(parent_rect.right() - self.width() - margin, 126)
+            self.move(parent_rect.right() - self.width() - margin, 118)
         self.raise_()
         self.show()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._drag_start is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            target = event.globalPosition().toPoint() - self._drag_start
+            if self.parentWidget():
+                parent_rect = self.parentWidget().rect()
+                target.setX(max(8, min(target.x(), parent_rect.width() - self.width() - 8)))
+                target.setY(max(8, min(target.y(), parent_rect.height() - self.height() - 8)))
+            self.move(target)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        self._drag_start = None
+        super().mouseReleaseEvent(event)
 
 
 class MainWindow(QMainWindow):

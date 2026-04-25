@@ -150,6 +150,9 @@ def build_stylesheet(
         color: {palette.text};
         line-height: 1.45;
     }}
+    #tutorialPanel:hover {{
+        border: 1px solid {palette.accent};
+    }}
     #tutorialIconButton {{
         background-color: transparent;
         border: none;
