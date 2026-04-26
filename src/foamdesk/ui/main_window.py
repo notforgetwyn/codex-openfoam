@@ -407,7 +407,7 @@ class MainWindow(QMainWindow):
         self._environment_text = QTextEdit()
         self._environment_text.setReadOnly(True)
         refresh_button = QPushButton("重新检测 OpenFOAM 环境")
-        refresh_button.clicked.connect(self._refresh_environment_panels)
+        refresh_button.clicked.connect(lambda _checked=False: self._refresh_environment_panels())
 
         layout.addWidget(title)
         layout.addWidget(refresh_button)
@@ -531,7 +531,7 @@ class MainWindow(QMainWindow):
         self._refresh_environment_panels(status)
 
     def _refresh_environment_panels(self, status=None) -> None:
-        if status is None:
+        if status is None or isinstance(status, bool):
             status = self._context.environment_detector.detect()
         status_flag = "可用" if status.is_available else "不可用"
         self._environment_text.setPlainText(
