@@ -330,7 +330,7 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.setTabsClosable(False)
         self._workspace_tabs.addTab(self._build_project_home_tab(), "项目主页")
         self._workspace_tabs.addTab(self._build_parameter_tab(), "参数配置")
-        self._workspace_tabs.addTab(self._make_text_panel("求解运行区"), "求解运行")
+        self._workspace_tabs.addTab(self._build_solver_run_tab(), "求解运行")
         self._workspace_tabs.addTab(self._build_environment_tab(), "环境检查")
         self._workspace_tabs.addTab(self._build_settings_tab(), "设置")
         self._workspace_tabs.addTab(self._make_text_panel("结果区"), "结果")
@@ -454,6 +454,61 @@ class MainWindow(QMainWindow):
         self._set_parameter_inputs_enabled(False)
         return wrapper
 
+    def _build_solver_run_tab(self) -> QWidget:
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        title = QLabel("求解运行")
+        title.setStyleSheet("font-size: 22px; font-weight: 600;")
+        description = QLabel("当前阶段执行最小链路：blockMesh -> icoFoam。")
+        description.setWordWrap(True)
+
+        self._solver_status_label = QLabel("状态：空闲")
+        self._solver_project_label = QLabel("当前项目：未选择")
+        self._solver_case_path_label = QLabel("Case 路径：未选择")
+        self._solver_command_label = QLabel("执行命令：blockMesh && icoFoam")
+
+        action_row = QHBoxLayout()
+        run_button = QPushButton("运行最小仿真")
+        stop_button = QPushButton("停止当前任务")
+        refresh_button = QPushButton("刷新摘要")
+        run_button.clicked.connect(lambda _checked=False: self._run_minimal_simulation())
+        stop_button.clicked.connect(lambda _checked=False: self._stop_current_process())
+        refresh_button.clicked.connect(lambda _checked=False: self._refresh_solver_run_panel())
+        action_row.addWidget(run_button)
+        action_row.addWidget(stop_button)
+        action_row.addWidget(refresh_button)
+        action_row.addStretch(1)
+
+        self._solver_parameter_summary = QTextEdit()
+        self._solver_parameter_summary.setReadOnly(True)
+        self._solver_parameter_summary.setMaximumHeight(160)
+        self._solver_parameter_summary.setPlainText("参数摘要：请先新建或打开项目。")
+
+        self._solver_hint_text = QTextEdit()
+        self._solver_hint_text.setReadOnly(True)
+        self._solver_hint_text.setPlainText(
+            "运行说明：\n"
+            "1. 先在“参数配置”页确认参数。\n"
+            "2. 点击“运行最小仿真”。\n"
+            "3. 程序会先保存参数，再执行 blockMesh 和 icoFoam。\n"
+            "4. 底部“日志”显示 OpenFOAM 实时输出。\n"
+            "5. 底部“问题”显示失败原因。"
+        )
+
+        layout.addWidget(title)
+        layout.addWidget(description)
+        layout.addWidget(self._solver_status_label)
+        layout.addWidget(self._solver_project_label)
+        layout.addWidget(self._solver_case_path_label)
+        layout.addWidget(self._solver_command_label)
+        layout.addLayout(action_row)
+        layout.addWidget(self._solver_parameter_summary)
+        layout.addWidget(self._solver_hint_text, 1)
+        return wrapper
+
     def _build_environment_tab(self) -> QWidget:
         wrapper = QWidget()
         layout = QVBoxLayout(wrapper)
@@ -562,6 +617,7 @@ class MainWindow(QMainWindow):
         self._show_parameters(parameters)
         self._set_parameter_inputs_enabled(True)
         self._parameter_status_label.setText(f"已加载项目参数：{self._current_project.name}")
+        self._refresh_solver_run_panel()
         self._set_status("参数已加载。")
 
     def _save_case_parameters(self) -> bool:
@@ -585,6 +641,7 @@ class MainWindow(QMainWindow):
             f"deltaT={parameters.delta_t:g}, writeInterval={parameters.write_interval}, "
             f"nu={parameters.viscosity:g}"
         )
+        self._refresh_solver_run_panel()
         self._append_log("参数已写入 system/controlDict 和 constant/physicalProperties。")
         self._set_status("参数保存完成。")
         return True
@@ -594,6 +651,36 @@ class MainWindow(QMainWindow):
         self._show_parameters(parameters)
         self._parameter_status_label.setText("已恢复默认参数，点击“保存参数到 Case”后生效。")
         self._set_parameter_inputs_enabled(self._current_project is not None)
+        self._refresh_solver_run_panel()
+
+    def _refresh_solver_run_panel(self, status_text: str | None = None) -> None:
+        if not hasattr(self, "_solver_status_label"):
+            return
+
+        self._solver_status_label.setText(f"状态：{status_text or '空闲'}")
+        if self._current_project is None:
+            self._solver_project_label.setText("当前项目：未选择")
+            self._solver_case_path_label.setText("Case 路径：未选择")
+            self._solver_parameter_summary.setPlainText("参数摘要：请先新建或打开项目。")
+            return
+
+        self._solver_project_label.setText(f"当前项目：{self._current_project.name}")
+        self._solver_case_path_label.setText(f"Case 路径：{self._current_project.case_dir}")
+        try:
+            parameters = self._context.case_parameter_service.load(self._current_project)
+        except (OSError, ValueError) as error:
+            self._solver_parameter_summary.setPlainText(f"参数摘要加载失败：{error}")
+            return
+
+        self._solver_parameter_summary.setPlainText(
+            "参数摘要：\n"
+            f"- endTime：{parameters.end_time:g}\n"
+            f"- deltaT：{parameters.delta_t:g}\n"
+            f"- writeInterval：{parameters.write_interval}\n"
+            f"- nu：{parameters.viscosity:g}\n"
+            "\n"
+            "输出位置：当前 Case 目录下的时间步目录、constant/polyMesh 和日志面板。"
+        )
 
     def _apply_settings_theme(self) -> None:
         settings = self._context.settings_service.load()
@@ -705,6 +792,7 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.setCurrentIndex(0)
         self._case_label.setText(f"当前 Case: {project.name}")
         self._load_case_parameters()
+        self._refresh_solver_run_panel()
         self._append_log(f"已创建项目：{project.path}")
         self._set_status("项目创建完成。")
 
@@ -728,6 +816,7 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.setCurrentIndex(0)
         self._case_label.setText(f"当前 Case: {project.name}")
         self._load_case_parameters()
+        self._refresh_solver_run_panel()
         self._append_log(f"已打开项目：{project.path}")
         self._set_status("项目打开完成。")
 
@@ -762,6 +851,7 @@ class MainWindow(QMainWindow):
             return
         self._case_label.setText(f"当前 Case: {self._current_project.name}")
         self._load_case_parameters()
+        self._refresh_solver_run_panel()
         self._append_log(f"当前项目：{self._current_project.path}")
 
     def _search_projects(self) -> None:
@@ -806,6 +896,7 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.setCurrentIndex(2)
         self._bottom_tabs.setCurrentIndex(0)
         self._task_text.setPlainText("任务状态：最小仿真运行中")
+        self._refresh_solver_run_panel("最小仿真运行中")
         self._set_status("最小仿真运行中。")
 
         command = (
@@ -826,12 +917,14 @@ class MainWindow(QMainWindow):
     def _stop_current_process(self) -> None:
         if not self._foam_process or self._foam_process.state() == QProcess.ProcessState.NotRunning:
             self._task_text.setPlainText("任务状态：空闲")
+            self._refresh_solver_run_panel("空闲")
             self._set_status("当前没有正在运行的任务。")
             return
         self._foam_process.terminate()
         if not self._foam_process.waitForFinished(3000):
             self._foam_process.kill()
         self._task_text.setPlainText("任务状态：已停止")
+        self._refresh_solver_run_panel("已停止")
         self._set_status("任务已停止。")
 
     def _read_process_stdout(self) -> None:
@@ -845,9 +938,11 @@ class MainWindow(QMainWindow):
     def _on_process_finished(self, exit_code: int, _exit_status) -> None:
         if exit_code == 0:
             self._task_text.setPlainText("任务状态：最小仿真完成")
+            self._refresh_solver_run_panel("最小仿真完成")
             self._set_status("最小仿真完成。")
         else:
             self._task_text.setPlainText(f"任务状态：最小仿真失败，退出码 {exit_code}")
+            self._refresh_solver_run_panel(f"最小仿真失败，退出码 {exit_code}")
             self._set_status(f"最小仿真失败，退出码 {exit_code}。")
 
     def _show_current_case_path(self) -> None:
