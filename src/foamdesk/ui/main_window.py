@@ -489,6 +489,11 @@ class MainWindow(QMainWindow):
         self._solver_parameter_summary.setMaximumHeight(160)
         self._solver_parameter_summary.setPlainText("参数摘要：请先新建或打开项目。")
 
+        self._solver_metric_summary = QTextEdit()
+        self._solver_metric_summary.setReadOnly(True)
+        self._solver_metric_summary.setMaximumHeight(150)
+        self._solver_metric_summary.setPlainText("关键指标摘要：尚未运行。")
+
         self._solver_hint_text = QTextEdit()
         self._solver_hint_text.setReadOnly(True)
         self._solver_hint_text.setPlainText(
@@ -512,6 +517,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._solver_command_label)
         layout.addLayout(action_row)
         layout.addWidget(self._solver_parameter_summary)
+        layout.addWidget(self._solver_metric_summary)
         layout.addWidget(self._solver_diagnostic_text)
         layout.addWidget(self._solver_hint_text, 1)
         return wrapper
@@ -687,6 +693,7 @@ class MainWindow(QMainWindow):
             return
 
         self._solver_status_label.setText(f"状态：{status_text or '空闲'}")
+        self._refresh_solver_metrics_panel()
         if hasattr(self, "_solver_diagnostic_text"):
             self._solver_diagnostic_text.setPlainText(f"最近诊断：\n{self._last_diagnostic_summary}")
         if self._current_project is None:
@@ -711,6 +718,17 @@ class MainWindow(QMainWindow):
             f"- nu：{parameters.viscosity:g}\n"
             "\n"
             "输出位置：当前 Case 目录下的时间步目录、constant/polyMesh 和日志面板。"
+        )
+
+    def _refresh_solver_metrics_panel(self) -> None:
+        if not hasattr(self, "_solver_metric_summary"):
+            return
+        if not self._current_process_output.strip():
+            self._solver_metric_summary.setPlainText("关键指标摘要：尚未运行。")
+            return
+        metrics = self._context.log_metric_service.parse(self._current_process_output)
+        self._solver_metric_summary.setPlainText(
+            self._context.log_metric_service.format_summary(metrics)
         )
 
     def _refresh_results_panel(self) -> None:
@@ -987,12 +1005,14 @@ class MainWindow(QMainWindow):
             output = bytes(self._foam_process.readAllStandardOutput()).decode(errors="replace")
             self._current_process_output += output
             self._append_log(output)
+            self._refresh_solver_metrics_panel()
 
     def _read_process_stderr(self) -> None:
         if self._foam_process:
             output = bytes(self._foam_process.readAllStandardError()).decode(errors="replace")
             self._current_process_output += output
             self._append_log(output)
+            self._refresh_solver_metrics_panel()
 
     def _on_process_finished(self, exit_code: int, _exit_status) -> None:
         if exit_code == 0:

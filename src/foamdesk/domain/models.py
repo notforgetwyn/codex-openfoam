@@ -53,3 +53,20 @@ class CaseResultIndex:
     field_files: list[str]
     has_mesh: bool
     mesh_path: Path
+
+
+@dataclass(slots=True)
+class SolverResidual:
+    time: float | None
+    field: str
+    initial: float
+    final: float
+    iterations: int
+
+
+@dataclass(slots=True)
+class SolverMetrics:
+    times: list[float]
+    residuals: list[SolverResidual]
+    courant_max: float | None
+    latest_continuity_global: float | None
