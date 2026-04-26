@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from foamdesk.domain.models import SimulationProject
@@ -40,32 +41,7 @@ class ProjectService:
         ):
             path.mkdir(parents=True, exist_ok=True)
 
-        (case_dir / "system" / "blockMeshDict").write_text(
-            self._default_block_mesh_dict(),
-            encoding="utf-8",
-        )
-        (case_dir / "0" / "U").write_text(self._default_velocity_field(), encoding="utf-8")
-        (case_dir / "0" / "p").write_text(self._default_pressure_field(), encoding="utf-8")
-        (case_dir / "constant" / "transportProperties").write_text(
-            self._default_transport_properties(),
-            encoding="utf-8",
-        )
-        (case_dir / "constant" / "physicalProperties").write_text(
-            self._default_physical_properties(),
-            encoding="utf-8",
-        )
-        (case_dir / "system" / "controlDict").write_text(
-            self._default_control_dict(),
-            encoding="utf-8",
-        )
-        (case_dir / "system" / "fvSchemes").write_text(
-            self._default_fv_schemes(),
-            encoding="utf-8",
-        )
-        (case_dir / "system" / "fvSolution").write_text(
-            self._default_fv_solution(),
-            encoding="utf-8",
-        )
+        self._write_minimal_case_template(case_dir, overwrite=True)
         metadata = {
             "name": clean_name,
             "case_dir": "case",
@@ -89,6 +65,12 @@ class ProjectService:
             raise ValueError("项目 case 目录不存在。")
         return SimulationProject(name=name, path=project_dir, case_dir=case_dir)
 
+    def ensure_minimal_case_template(self, project: SimulationProject) -> list[Path]:
+        """Backfill missing files for projects created by older templates."""
+        written_files = self._write_minimal_case_template(project.case_dir, overwrite=False)
+        written_files.extend(self._sync_field_boundaries(project.case_dir))
+        return written_files
+
     def _projects_dir(self) -> Path:
         return self._settings_service.load().workspace_dir / "projects"
 
@@ -100,6 +82,82 @@ class ProjectService:
         if any(char in invalid_chars for char in clean_name):
             raise ValueError("项目名称包含非法路径字符。")
         return clean_name
+
+    def _write_minimal_case_template(self, case_dir: Path, *, overwrite: bool) -> list[Path]:
+        files = {
+            case_dir / "system" / "blockMeshDict": self._default_block_mesh_dict(),
+            case_dir / "0" / "U": self._default_velocity_field(("movingWall", "fixedWalls")),
+            case_dir / "0" / "p": self._default_pressure_field(("movingWall", "fixedWalls")),
+            case_dir / "constant" / "transportProperties": self._default_transport_properties(),
+            case_dir / "constant" / "physicalProperties": self._default_physical_properties(),
+            case_dir / "system" / "controlDict": self._default_control_dict(),
+            case_dir / "system" / "fvSchemes": self._default_fv_schemes(),
+            case_dir / "system" / "fvSolution": self._default_fv_solution(),
+        }
+        written_files: list[Path] = []
+        for path, content in files.items():
+            if path.exists() and not overwrite:
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+            written_files.append(path)
+        return written_files
+
+    def _sync_field_boundaries(self, case_dir: Path) -> list[Path]:
+        boundary_names = self._extract_boundary_names(case_dir / "system" / "blockMeshDict")
+        if not boundary_names:
+            return []
+
+        written_files: list[Path] = []
+        velocity_field = case_dir / "0" / "U"
+        pressure_field = case_dir / "0" / "p"
+        if not self._field_has_boundaries(velocity_field, boundary_names):
+            velocity_field.write_text(self._default_velocity_field(boundary_names), encoding="utf-8")
+            written_files.append(velocity_field)
+        if not self._field_has_boundaries(pressure_field, boundary_names):
+            pressure_field.write_text(self._default_pressure_field(boundary_names), encoding="utf-8")
+            written_files.append(pressure_field)
+        return written_files
+
+    def _extract_boundary_names(self, block_mesh_dict: Path) -> tuple[str, ...]:
+        if not block_mesh_dict.exists():
+            return ()
+        content = block_mesh_dict.read_text(encoding="utf-8")
+        boundary_match = re.search(r"\bboundary\s*\(", content)
+        if not boundary_match:
+            return ()
+
+        start_index = boundary_match.end() - 1
+        depth = 0
+        end_index: int | None = None
+        for index in range(start_index, len(content)):
+            char = content[index]
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    end_index = index
+                    break
+        if end_index is None:
+            return ()
+
+        names: list[str] = []
+        lines = [line.strip() for line in content[start_index + 1 : end_index].splitlines()]
+        for index, line in enumerate(lines[:-1]):
+            if not line or line.startswith("//") or line in {"(", ")", "{", "}"}:
+                continue
+            if line.endswith(";") or line in {"type", "faces"}:
+                continue
+            if lines[index + 1] == "{":
+                names.append(line)
+        return tuple(names)
+
+    def _field_has_boundaries(self, field_path: Path, boundary_names: tuple[str, ...]) -> bool:
+        if not field_path.exists():
+            return False
+        content = field_path.read_text(encoding="utf-8")
+        return all(re.search(rf"\b{re.escape(name)}\s*\{{", content) for name in boundary_names)
 
     def _default_block_mesh_dict(self) -> str:
         return """FoamFile
@@ -159,7 +217,8 @@ mergePatchPairs
 );
 """
 
-    def _default_velocity_field(self) -> str:
+    def _default_velocity_field(self, boundary_names: tuple[str, ...]) -> str:
+        boundary_field = "\n".join(self._velocity_boundary_entry(name) for name in boundary_names)
         return """FoamFile
 {
     version     2.0;
@@ -173,20 +232,12 @@ internalField   uniform (0 0 0);
 
 boundaryField
 {
-    movingWall
-    {
-        type            fixedValue;
-        value           uniform (1 0 0);
-    }
-
-    fixedWalls
-    {
-        type            noSlip;
-    }
+__BOUNDARY_FIELD__
 }
-"""
+""".replace("__BOUNDARY_FIELD__", boundary_field)
 
-    def _default_pressure_field(self) -> str:
+    def _default_pressure_field(self, boundary_names: tuple[str, ...]) -> str:
+        boundary_field = "\n".join(self._pressure_boundary_entry(name) for name in boundary_names)
         return """FoamFile
 {
     version     2.0;
@@ -200,16 +251,44 @@ internalField   uniform 0;
 
 boundaryField
 {
-    movingWall
-    {
-        type            zeroGradient;
-    }
-
-    fixedWalls
-    {
-        type            zeroGradient;
-    }
+__BOUNDARY_FIELD__
 }
+""".replace("__BOUNDARY_FIELD__", boundary_field)
+
+    def _velocity_boundary_entry(self, name: str) -> str:
+        normalized_name = name.lower()
+        if "movingwall" in normalized_name or "inlet" in normalized_name:
+            return f"""    {name}
+    {{
+        type            fixedValue;
+        value           uniform (1 0 0);
+    }}
+"""
+        if "outlet" in normalized_name:
+            return f"""    {name}
+    {{
+        type            zeroGradient;
+    }}
+"""
+        return f"""    {name}
+    {{
+        type            noSlip;
+    }}
+"""
+
+    def _pressure_boundary_entry(self, name: str) -> str:
+        normalized_name = name.lower()
+        if "outlet" in normalized_name:
+            return f"""    {name}
+    {{
+        type            fixedValue;
+        value           uniform 0;
+    }}
+"""
+        return f"""    {name}
+    {{
+        type            zeroGradient;
+    }}
 """
 
     def _default_transport_properties(self) -> str:

@@ -41,3 +41,62 @@ def test_project_service_rejects_duplicate_project(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="项目已存在"):
         service.create_project("demo")
+
+
+def test_project_service_backfills_missing_minimal_case_files(tmp_path: Path) -> None:
+    service = ProjectService(AppSettingsService(tmp_path))
+    project = service.create_project("legacy")
+    velocity_field = project.case_dir / "0" / "U"
+    velocity_field.write_text("custom velocity", encoding="utf-8")
+    missing_control_dict = project.case_dir / "system" / "controlDict"
+    missing_physical_properties = project.case_dir / "constant" / "physicalProperties"
+    missing_control_dict.unlink()
+    missing_physical_properties.unlink()
+
+    repaired_files = service.ensure_minimal_case_template(project)
+
+    assert missing_control_dict in repaired_files
+    assert missing_physical_properties in repaired_files
+    assert velocity_field in repaired_files
+    assert missing_control_dict.exists()
+    assert missing_physical_properties.exists()
+    assert "movingWall" in velocity_field.read_text(encoding="utf-8")
+
+
+def test_project_service_syncs_fields_with_legacy_boundary_names(tmp_path: Path) -> None:
+    service = ProjectService(AppSettingsService(tmp_path))
+    project = service.create_project("legacy_boundary")
+    (project.case_dir / "system" / "blockMeshDict").write_text(
+        """
+boundary
+(
+    inlet
+    {
+        type patch;
+        faces ((0 1 2 3));
+    }
+    outlet
+    {
+        type patch;
+        faces ((4 5 6 7));
+    }
+    walls
+    {
+        type wall;
+        faces ((0 4 7 3));
+    }
+);
+""",
+        encoding="utf-8",
+    )
+
+    repaired_files = service.ensure_minimal_case_template(project)
+
+    velocity_field = (project.case_dir / "0" / "U").read_text(encoding="utf-8")
+    pressure_field = (project.case_dir / "0" / "p").read_text(encoding="utf-8")
+    assert project.case_dir / "0" / "U" in repaired_files
+    assert project.case_dir / "0" / "p" in repaired_files
+    assert "inlet" in velocity_field
+    assert "outlet" in velocity_field
+    assert "walls" in velocity_field
+    assert "value           uniform 0;" in pressure_field

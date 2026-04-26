@@ -658,6 +658,12 @@ class MainWindow(QMainWindow):
             self._show_error(f"OpenFOAM 环境不可用：{status.detail}")
             return
 
+        repaired_files = self._context.project_service.ensure_minimal_case_template(self._current_project)
+        if repaired_files:
+            relative_files = [str(path.relative_to(self._current_project.case_dir)) for path in repaired_files]
+            self._append_log("已补齐旧项目缺失的最小仿真文件：")
+            self._append_log("\n".join(f"- {path}" for path in relative_files))
+
         block_mesh_dict = self._current_project.case_dir / "system" / "blockMeshDict"
         if not block_mesh_dict.exists():
             self._show_error("当前 case 缺少 system/blockMeshDict。")
