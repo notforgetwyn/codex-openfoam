@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from foamdesk.app.bootstrap import ApplicationContext
-from foamdesk.domain.models import SimulationProject
+from foamdesk.domain.models import SimulationParameters, SimulationProject
 from foamdesk.ui.theme import THEMES, build_stylesheet
 
 
@@ -329,7 +329,7 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.setDocumentMode(True)
         self._workspace_tabs.setTabsClosable(False)
         self._workspace_tabs.addTab(self._build_project_home_tab(), "项目主页")
-        self._workspace_tabs.addTab(self._make_text_panel("参数配置区"), "参数配置")
+        self._workspace_tabs.addTab(self._build_parameter_tab(), "参数配置")
         self._workspace_tabs.addTab(self._make_text_panel("求解运行区"), "求解运行")
         self._workspace_tabs.addTab(self._build_environment_tab(), "环境检查")
         self._workspace_tabs.addTab(self._build_settings_tab(), "设置")
@@ -395,6 +395,63 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(title)
         layout.addWidget(summary)
+        return wrapper
+
+    def _build_parameter_tab(self) -> QWidget:
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        title = QLabel("参数配置")
+        title.setStyleSheet("font-size: 22px; font-weight: 600;")
+        description = QLabel("当前阶段接入 controlDict 与 physicalProperties 的基础参数。")
+        description.setWordWrap(True)
+
+        form = QFormLayout()
+        self._end_time_input = QLineEdit()
+        self._delta_t_input = QLineEdit()
+        self._write_interval_input = QSpinBox()
+        self._write_interval_input.setRange(1, 1000000)
+        self._viscosity_input = QLineEdit()
+        form.addRow("结束时间 endTime", self._end_time_input)
+        form.addRow("时间步长 deltaT", self._delta_t_input)
+        form.addRow("写出间隔 writeInterval", self._write_interval_input)
+        form.addRow("运动粘度 nu", self._viscosity_input)
+
+        button_row = QHBoxLayout()
+        load_button = QPushButton("加载当前项目参数")
+        save_button = QPushButton("保存参数到 Case")
+        default_button = QPushButton("恢复默认参数")
+        load_button.clicked.connect(lambda _checked=False: self._load_case_parameters())
+        save_button.clicked.connect(lambda _checked=False: self._save_case_parameters())
+        default_button.clicked.connect(lambda _checked=False: self._restore_default_parameters())
+        button_row.addWidget(load_button)
+        button_row.addWidget(save_button)
+        button_row.addWidget(default_button)
+        button_row.addStretch(1)
+
+        self._parameter_status_label = QLabel("请先新建或打开项目。")
+        self._parameter_status_label.setWordWrap(True)
+        help_text = QTextEdit()
+        help_text.setReadOnly(True)
+        help_text.setMaximumHeight(150)
+        help_text.setPlainText(
+            "参数说明：\n"
+            "- endTime：仿真结束时间，越大运行越久。\n"
+            "- deltaT：每一步的时间步长，越小越稳定但更慢。\n"
+            "- writeInterval：每隔多少步写一次结果。\n"
+            "- nu：运动粘度，当前最小算例默认 0.01。"
+        )
+
+        layout.addWidget(title)
+        layout.addWidget(description)
+        layout.addLayout(form)
+        layout.addLayout(button_row)
+        layout.addWidget(self._parameter_status_label)
+        layout.addWidget(help_text)
+        layout.addStretch(1)
+        self._set_parameter_inputs_enabled(False)
         return wrapper
 
     def _build_environment_tab(self) -> QWidget:
@@ -466,6 +523,77 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.setCurrentIndex(3)
         self._refresh_environment_panels()
         self._set_status("已打开环境检查页。")
+
+    def _set_parameter_inputs_enabled(self, enabled: bool) -> None:
+        if not hasattr(self, "_end_time_input"):
+            return
+        self._end_time_input.setEnabled(enabled)
+        self._delta_t_input.setEnabled(enabled)
+        self._write_interval_input.setEnabled(enabled)
+        self._viscosity_input.setEnabled(enabled)
+
+    def _show_parameters(self, parameters: SimulationParameters) -> None:
+        self._end_time_input.setText(f"{parameters.end_time:.12g}")
+        self._delta_t_input.setText(f"{parameters.delta_t:.12g}")
+        self._write_interval_input.setValue(parameters.write_interval)
+        self._viscosity_input.setText(f"{parameters.viscosity:.12g}")
+
+    def _read_parameter_inputs(self) -> SimulationParameters:
+        return SimulationParameters(
+            end_time=float(self._end_time_input.text().strip()),
+            delta_t=float(self._delta_t_input.text().strip()),
+            write_interval=self._write_interval_input.value(),
+            viscosity=float(self._viscosity_input.text().strip()),
+        )
+
+    def _load_case_parameters(self) -> None:
+        if self._current_project is None:
+            self._parameter_status_label.setText("请先新建或打开项目。")
+            self._set_parameter_inputs_enabled(False)
+            return
+
+        try:
+            self._context.project_service.ensure_minimal_case_template(self._current_project)
+            parameters = self._context.case_parameter_service.load(self._current_project)
+        except (OSError, ValueError) as error:
+            self._show_error(f"加载参数失败：{error}")
+            return
+
+        self._show_parameters(parameters)
+        self._set_parameter_inputs_enabled(True)
+        self._parameter_status_label.setText(f"已加载项目参数：{self._current_project.name}")
+        self._set_status("参数已加载。")
+
+    def _save_case_parameters(self) -> bool:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return False
+
+        try:
+            parameters = self._read_parameter_inputs()
+            self._context.project_service.ensure_minimal_case_template(self._current_project)
+            self._context.case_parameter_service.save(self._current_project, parameters)
+        except ValueError as error:
+            self._show_error(f"参数不合法：{error}")
+            return False
+        except OSError as error:
+            self._show_error(f"保存参数失败：{error}")
+            return False
+
+        self._parameter_status_label.setText(
+            f"参数已保存到 Case：endTime={parameters.end_time:g}, "
+            f"deltaT={parameters.delta_t:g}, writeInterval={parameters.write_interval}, "
+            f"nu={parameters.viscosity:g}"
+        )
+        self._append_log("参数已写入 system/controlDict 和 constant/physicalProperties。")
+        self._set_status("参数保存完成。")
+        return True
+
+    def _restore_default_parameters(self) -> None:
+        parameters = self._context.case_parameter_service.defaults()
+        self._show_parameters(parameters)
+        self._parameter_status_label.setText("已恢复默认参数，点击“保存参数到 Case”后生效。")
+        self._set_parameter_inputs_enabled(self._current_project is not None)
 
     def _apply_settings_theme(self) -> None:
         settings = self._context.settings_service.load()
@@ -576,6 +704,7 @@ class MainWindow(QMainWindow):
         self._refresh_project_tree()
         self._workspace_tabs.setCurrentIndex(0)
         self._case_label.setText(f"当前 Case: {project.name}")
+        self._load_case_parameters()
         self._append_log(f"已创建项目：{project.path}")
         self._set_status("项目创建完成。")
 
@@ -598,6 +727,7 @@ class MainWindow(QMainWindow):
         self._refresh_project_tree()
         self._workspace_tabs.setCurrentIndex(0)
         self._case_label.setText(f"当前 Case: {project.name}")
+        self._load_case_parameters()
         self._append_log(f"已打开项目：{project.path}")
         self._set_status("项目打开完成。")
 
@@ -631,6 +761,7 @@ class MainWindow(QMainWindow):
             self._show_error(str(error))
             return
         self._case_label.setText(f"当前 Case: {self._current_project.name}")
+        self._load_case_parameters()
         self._append_log(f"当前项目：{self._current_project.path}")
 
     def _search_projects(self) -> None:
@@ -656,6 +787,9 @@ class MainWindow(QMainWindow):
         status = self._context.environment_detector.detect()
         if not status.is_available or not status.env_script_path:
             self._show_error(f"OpenFOAM 环境不可用：{status.detail}")
+            return
+
+        if not self._save_case_parameters():
             return
 
         repaired_files = self._context.project_service.ensure_minimal_case_template(self._current_project)

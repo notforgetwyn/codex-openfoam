@@ -29,3 +29,11 @@ class SimulationProject:
     name: str
     path: Path
     case_dir: Path
+
+
+@dataclass(slots=True)
+class SimulationParameters:
+    end_time: float
+    delta_t: float
+    write_interval: int
+    viscosity: float
