@@ -38,6 +38,11 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
+from vtkmodules.vtkFiltersSources import vtkCubeSource
+from vtkmodules.vtkInteractionStyle import vtkInteractorStyleTrackballCamera
+from vtkmodules.vtkRenderingAnnotation import vtkAxesActor
+from vtkmodules.vtkRenderingCore import vtkActor, vtkPolyDataMapper, vtkRenderer
 
 from foamdesk.app.bootstrap import ApplicationContext
 from foamdesk.domain.models import SimulationParameters, SimulationProject
@@ -554,25 +559,36 @@ class MainWindow(QMainWindow):
         refresh_button = QPushButton("刷新结果索引")
         export_metrics_button = QPushButton("导出求解指标")
         plot_residual_button = QPushButton("绘制残差曲线")
+        show_3d_button = QPushButton("加载 3D 技术验证场景")
         refresh_button.clicked.connect(lambda _checked=False: self._refresh_results_panel())
         export_metrics_button.clicked.connect(lambda _checked=False: self._export_solver_metrics())
         plot_residual_button.clicked.connect(lambda _checked=False: self._plot_residual_curve())
+        show_3d_button.clicked.connect(lambda _checked=False: self._load_3d_preview_scene())
         button_row = QHBoxLayout()
         button_row.addWidget(refresh_button)
         button_row.addWidget(export_metrics_button)
         button_row.addWidget(plot_residual_button)
+        button_row.addWidget(show_3d_button)
         button_row.addStretch(1)
         self._results_text = QTextEdit()
         self._results_text.setReadOnly(True)
         self._results_text.setPlainText("请先新建或打开项目，然后运行最小仿真。")
         self._residual_figure = Figure(figsize=(6, 3), tight_layout=True)
         self._residual_canvas = FigureCanvas(self._residual_figure)
+        self._vtk_widget = QVTKRenderWindowInteractor(wrapper)
+        self._vtk_renderer = vtkRenderer()
+        self._vtk_renderer.SetBackground(0.12, 0.12, 0.12)
+        self._vtk_widget.GetRenderWindow().AddRenderer(self._vtk_renderer)
+        self._vtk_widget.GetRenderWindow().GetInteractor().SetInteractorStyle(
+            vtkInteractorStyleTrackballCamera()
+        )
 
         layout.addWidget(title)
         layout.addWidget(description)
         layout.addLayout(button_row)
         layout.addWidget(self._results_text, 1)
         layout.addWidget(self._residual_canvas, 2)
+        layout.addWidget(self._vtk_widget, 3)
         return wrapper
 
     def _build_settings_tab(self) -> QWidget:
@@ -822,6 +838,41 @@ class MainWindow(QMainWindow):
         self._residual_canvas.draw()
         self._append_log("残差曲线已绘制。")
         self._set_status("残差曲线已绘制。")
+
+    def _load_3d_preview_scene(self) -> None:
+        if not hasattr(self, "_vtk_renderer"):
+            return
+
+        self._vtk_renderer.RemoveAllViewProps()
+
+        cube_source = vtkCubeSource()
+        cube_source.SetXLength(1.0)
+        cube_source.SetYLength(1.0)
+        cube_source.SetZLength(1.0)
+        cube_source.SetCenter(0.5, 0.5, 0.5)
+        cube_source.Update()
+
+        mapper = vtkPolyDataMapper()
+        mapper.SetInputConnection(cube_source.GetOutputPort())
+
+        actor = vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetRepresentationToWireframe()
+        actor.GetProperty().SetColor(0.2, 0.65, 1.0)
+        actor.GetProperty().SetLineWidth(2.0)
+
+        axes = vtkAxesActor()
+        axes.SetTotalLength(1.2, 1.2, 1.2)
+        axes.SetShaftTypeToCylinder()
+        axes.SetCylinderRadius(0.02)
+
+        self._vtk_renderer.AddActor(actor)
+        self._vtk_renderer.AddActor(axes)
+        self._vtk_renderer.ResetCamera()
+        self._vtk_widget.GetRenderWindow().Render()
+        self._vtk_widget.Initialize()
+        self._append_log("3D 技术验证场景已加载：单位计算域 + 坐标轴。")
+        self._set_status("3D 技术验证场景已加载。")
 
     def _apply_settings_theme(self) -> None:
         settings = self._context.settings_service.load()
