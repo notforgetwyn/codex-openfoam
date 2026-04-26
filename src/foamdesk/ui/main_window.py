@@ -3,6 +3,8 @@ from __future__ import annotations
 import shlex
 from pathlib import Path
 
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtCore import QProcess, QTimer
 from PySide6.QtGui import QFont
@@ -551,20 +553,26 @@ class MainWindow(QMainWindow):
         description.setWordWrap(True)
         refresh_button = QPushButton("刷新结果索引")
         export_metrics_button = QPushButton("导出求解指标")
+        plot_residual_button = QPushButton("绘制残差曲线")
         refresh_button.clicked.connect(lambda _checked=False: self._refresh_results_panel())
         export_metrics_button.clicked.connect(lambda _checked=False: self._export_solver_metrics())
+        plot_residual_button.clicked.connect(lambda _checked=False: self._plot_residual_curve())
         button_row = QHBoxLayout()
         button_row.addWidget(refresh_button)
         button_row.addWidget(export_metrics_button)
+        button_row.addWidget(plot_residual_button)
         button_row.addStretch(1)
         self._results_text = QTextEdit()
         self._results_text.setReadOnly(True)
         self._results_text.setPlainText("请先新建或打开项目，然后运行最小仿真。")
+        self._residual_figure = Figure(figsize=(6, 3), tight_layout=True)
+        self._residual_canvas = FigureCanvas(self._residual_figure)
 
         layout.addWidget(title)
         layout.addWidget(description)
         layout.addLayout(button_row)
         layout.addWidget(self._results_text, 1)
+        layout.addWidget(self._residual_canvas, 2)
         return wrapper
 
     def _build_settings_tab(self) -> QWidget:
@@ -781,6 +789,39 @@ class MainWindow(QMainWindow):
         self._append_log(f"残差 CSV 已导出：{csv_path}")
         self._set_status("求解指标导出完成。")
         return True
+
+    def _plot_residual_curve(self) -> None:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return
+
+        try:
+            series = self._context.residual_plot_service.load_series(self._current_project)
+        except (OSError, ValueError) as error:
+            self._show_error(f"绘制残差曲线失败：{error}")
+            return
+
+        self._residual_figure.clear()
+        axes = self._residual_figure.add_subplot(111)
+        for field, points in series.items():
+            points = sorted(points, key=lambda item: item[0])
+            axes.plot(
+                [time for time, _residual in points],
+                [residual for _time, residual in points],
+                marker="o",
+                linewidth=1.4,
+                markersize=3,
+                label=field,
+            )
+        axes.set_title("Residual Curve")
+        axes.set_xlabel("Time")
+        axes.set_ylabel("Final residual")
+        axes.set_yscale("log")
+        axes.grid(True, which="both", linestyle="--", alpha=0.35)
+        axes.legend(loc="best")
+        self._residual_canvas.draw()
+        self._append_log("残差曲线已绘制。")
+        self._set_status("残差曲线已绘制。")
 
     def _apply_settings_theme(self) -> None:
         settings = self._context.settings_service.load()
@@ -1051,7 +1092,8 @@ class MainWindow(QMainWindow):
         if exit_code == 0:
             self._task_text.setPlainText("任务状态：最小仿真完成")
             self._last_diagnostic_summary = "本次任务正常完成，没有失败诊断。"
-            self._export_solver_metrics()
+            if self._export_solver_metrics():
+                self._plot_residual_curve()
             self._refresh_results_panel()
             self._refresh_solver_run_panel("最小仿真完成")
             self._set_status("最小仿真完成。")
