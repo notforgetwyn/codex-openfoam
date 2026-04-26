@@ -550,14 +550,20 @@ class MainWindow(QMainWindow):
         description = QLabel("当前阶段先索引 OpenFOAM 运行产物，后续再接入曲线和云图。")
         description.setWordWrap(True)
         refresh_button = QPushButton("刷新结果索引")
+        export_metrics_button = QPushButton("导出求解指标")
         refresh_button.clicked.connect(lambda _checked=False: self._refresh_results_panel())
+        export_metrics_button.clicked.connect(lambda _checked=False: self._export_solver_metrics())
+        button_row = QHBoxLayout()
+        button_row.addWidget(refresh_button)
+        button_row.addWidget(export_metrics_button)
+        button_row.addStretch(1)
         self._results_text = QTextEdit()
         self._results_text.setReadOnly(True)
         self._results_text.setPlainText("请先新建或打开项目，然后运行最小仿真。")
 
         layout.addWidget(title)
         layout.addWidget(description)
-        layout.addWidget(refresh_button)
+        layout.addLayout(button_row)
         layout.addWidget(self._results_text, 1)
         return wrapper
 
@@ -748,6 +754,33 @@ class MainWindow(QMainWindow):
         self._results_text.setPlainText(self._context.result_index_service.format_index(result_index))
         self._append_log("结果索引已刷新。")
         self._set_status("结果索引已刷新。")
+
+    def _export_solver_metrics(self) -> bool:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return False
+        if not self._current_process_output.strip():
+            self._show_error("当前没有可导出的求解日志指标，请先运行一次最小仿真。")
+            return False
+
+        metrics = self._context.log_metric_service.parse(self._current_process_output)
+        if not metrics.times and not metrics.residuals:
+            self._show_error("未从当前日志中识别到可导出的求解指标。")
+            return False
+
+        try:
+            json_path, csv_path = self._context.metric_export_service.export(
+                self._current_project,
+                metrics,
+            )
+        except OSError as error:
+            self._show_error(f"导出求解指标失败：{error}")
+            return False
+
+        self._append_log(f"求解指标已导出：{json_path}")
+        self._append_log(f"残差 CSV 已导出：{csv_path}")
+        self._set_status("求解指标导出完成。")
+        return True
 
     def _apply_settings_theme(self) -> None:
         settings = self._context.settings_service.load()
@@ -1018,6 +1051,7 @@ class MainWindow(QMainWindow):
         if exit_code == 0:
             self._task_text.setPlainText("任务状态：最小仿真完成")
             self._last_diagnostic_summary = "本次任务正常完成，没有失败诊断。"
+            self._export_solver_metrics()
             self._refresh_results_panel()
             self._refresh_solver_run_panel("最小仿真完成")
             self._set_status("最小仿真完成。")
