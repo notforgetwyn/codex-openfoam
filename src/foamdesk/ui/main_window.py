@@ -120,7 +120,7 @@ class TutorialOverlay(QFrame):
             "2. 左侧项目树会显示真实项目，点击项目设为当前 Case。\n"
             "3. 打开“设置”，确认工作区、字体、字号和 OpenFOAM 环境脚本。\n"
             "4. 打开“环境检查”，确认 OpenFOAM 环境是否可用。\n"
-            "5. 点击“运行”，当前阶段会尝试执行 blockMesh。\n"
+            "5. 点击“运行”，当前阶段会执行 blockMesh + icoFoam 最小仿真。\n"
             "6. 底部“日志 / 任务 / 问题”面板会显示运行信息。\n\n"
             "当前 Sprint：Sprint 2 UI 可用性与设置系统。\n"
             "下一阶段：Sprint 3 项目管理与 OpenFOAM 最小执行闭环。"
@@ -229,7 +229,7 @@ class MainWindow(QMainWindow):
         case_menu.addAction("打开当前 Case 目录", self._show_current_case_path)
 
         solver_menu = menu_bar.addMenu("求解器")
-        solver_menu.addAction("运行 blockMesh", self._run_block_mesh)
+        solver_menu.addAction("运行最小仿真", self._run_minimal_simulation)
         solver_menu.addAction("停止当前任务", self._stop_current_process)
 
         tools_menu = menu_bar.addMenu("工具")
@@ -251,7 +251,7 @@ class MainWindow(QMainWindow):
         toolbar.addAction("打开", self._open_project)
         toolbar.addAction("保存", self._save_current_state)
         toolbar.addSeparator()
-        toolbar.addAction("运行", self._run_block_mesh)
+        toolbar.addAction("运行", self._run_minimal_simulation)
         toolbar.addAction("停止", self._stop_current_process)
         toolbar.addSeparator()
         toolbar.addAction("设置", self._open_settings_tab)
@@ -390,7 +390,7 @@ class MainWindow(QMainWindow):
             "- 项目树和结果/日志面板占位\n\n"
             "下一步将接入：\n"
             "- 项目新建流程\n"
-            "- blockMesh 命令执行\n"
+            "- blockMesh + icoFoam 最小仿真\n"
             "- 实时日志和任务状态"
         )
         layout.addWidget(title)
@@ -645,7 +645,7 @@ class MainWindow(QMainWindow):
             item.setHidden(not visible)
         self._set_status("项目搜索已应用。")
 
-    def _run_block_mesh(self) -> None:
+    def _run_minimal_simulation(self) -> None:
         if self._foam_process and self._foam_process.state() != QProcess.ProcessState.NotRunning:
             self._show_error("已有任务正在运行，请先停止当前任务。")
             return
@@ -665,12 +665,13 @@ class MainWindow(QMainWindow):
 
         self._workspace_tabs.setCurrentIndex(2)
         self._bottom_tabs.setCurrentIndex(0)
-        self._task_text.setPlainText("任务状态：blockMesh 运行中")
-        self._set_status("blockMesh 运行中。")
+        self._task_text.setPlainText("任务状态：最小仿真运行中")
+        self._set_status("最小仿真运行中。")
 
         command = (
             f"source {shlex.quote(status.env_script_path)} >/dev/null 2>&1 && "
-            f"cd {shlex.quote(str(self._current_project.case_dir))} && blockMesh"
+            f"cd {shlex.quote(str(self._current_project.case_dir))} && "
+            "blockMesh && icoFoam"
         )
         self._foam_process = QProcess(self)
         self._foam_process.setProgram("bash")
@@ -679,7 +680,8 @@ class MainWindow(QMainWindow):
         self._foam_process.readyReadStandardError.connect(self._read_process_stderr)
         self._foam_process.finished.connect(self._on_process_finished)
         self._foam_process.start()
-        self._append_log(f"启动 blockMesh：{self._current_project.case_dir}")
+        self._append_log(f"启动最小仿真：{self._current_project.case_dir}")
+        self._append_log("执行流程：blockMesh -> icoFoam")
 
     def _stop_current_process(self) -> None:
         if not self._foam_process or self._foam_process.state() == QProcess.ProcessState.NotRunning:
@@ -702,11 +704,11 @@ class MainWindow(QMainWindow):
 
     def _on_process_finished(self, exit_code: int, _exit_status) -> None:
         if exit_code == 0:
-            self._task_text.setPlainText("任务状态：blockMesh 完成")
-            self._set_status("blockMesh 完成。")
+            self._task_text.setPlainText("任务状态：最小仿真完成")
+            self._set_status("最小仿真完成。")
         else:
-            self._task_text.setPlainText(f"任务状态：blockMesh 失败，退出码 {exit_code}")
-            self._set_status(f"blockMesh 失败，退出码 {exit_code}。")
+            self._task_text.setPlainText(f"任务状态：最小仿真失败，退出码 {exit_code}")
+            self._set_status(f"最小仿真失败，退出码 {exit_code}。")
 
     def _show_current_case_path(self) -> None:
         if self._current_project is None:

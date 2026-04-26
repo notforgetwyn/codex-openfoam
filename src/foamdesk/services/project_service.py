@@ -44,6 +44,28 @@ class ProjectService:
             self._default_block_mesh_dict(),
             encoding="utf-8",
         )
+        (case_dir / "0" / "U").write_text(self._default_velocity_field(), encoding="utf-8")
+        (case_dir / "0" / "p").write_text(self._default_pressure_field(), encoding="utf-8")
+        (case_dir / "constant" / "transportProperties").write_text(
+            self._default_transport_properties(),
+            encoding="utf-8",
+        )
+        (case_dir / "constant" / "physicalProperties").write_text(
+            self._default_physical_properties(),
+            encoding="utf-8",
+        )
+        (case_dir / "system" / "controlDict").write_text(
+            self._default_control_dict(),
+            encoding="utf-8",
+        )
+        (case_dir / "system" / "fvSchemes").write_text(
+            self._default_fv_schemes(),
+            encoding="utf-8",
+        )
+        (case_dir / "system" / "fvSolution").write_text(
+            self._default_fv_solution(),
+            encoding="utf-8",
+        )
         metadata = {
             "name": clean_name,
             "case_dir": "case",
@@ -113,23 +135,19 @@ edges
 
 boundary
 (
-    inlet
+    movingWall
     {
-        type patch;
-        faces ((0 4 7 3));
+        type wall;
+        faces ((3 7 6 2));
     }
-    outlet
-    {
-        type patch;
-        faces ((1 2 6 5));
-    }
-    walls
+    fixedWalls
     {
         type wall;
         faces
         (
+            (0 4 7 3)
+            (1 2 6 5)
             (0 1 5 4)
-            (3 7 6 2)
             (0 3 2 1)
             (4 5 6 7)
         );
@@ -139,4 +157,191 @@ boundary
 mergePatchPairs
 (
 );
+"""
+
+    def _default_velocity_field(self) -> str:
+        return """FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volVectorField;
+    object      U;
+}
+
+dimensions      [0 1 -1 0 0 0 0];
+internalField   uniform (0 0 0);
+
+boundaryField
+{
+    movingWall
+    {
+        type            fixedValue;
+        value           uniform (1 0 0);
+    }
+
+    fixedWalls
+    {
+        type            noSlip;
+    }
+}
+"""
+
+    def _default_pressure_field(self) -> str:
+        return """FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    object      p;
+}
+
+dimensions      [0 2 -2 0 0 0 0];
+internalField   uniform 0;
+
+boundaryField
+{
+    movingWall
+    {
+        type            zeroGradient;
+    }
+
+    fixedWalls
+    {
+        type            zeroGradient;
+    }
+}
+"""
+
+    def _default_transport_properties(self) -> str:
+        return """FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      transportProperties;
+}
+
+nu              [0 2 -1 0 0 0 0] 0.01;
+"""
+
+    def _default_physical_properties(self) -> str:
+        return """FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      physicalProperties;
+}
+
+nu              [0 2 -1 0 0 0 0] 0.01;
+"""
+
+    def _default_control_dict(self) -> str:
+        return """FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      controlDict;
+}
+
+application     icoFoam;
+startFrom       startTime;
+startTime       0;
+stopAt          endTime;
+endTime         0.5;
+deltaT          0.005;
+writeControl    timeStep;
+writeInterval   20;
+purgeWrite      0;
+writeFormat     ascii;
+writePrecision  6;
+writeCompression off;
+timeFormat      general;
+timePrecision   6;
+runTimeModifiable true;
+"""
+
+    def _default_fv_schemes(self) -> str:
+        return """FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      fvSchemes;
+}
+
+ddtSchemes
+{
+    default         Euler;
+}
+
+gradSchemes
+{
+    default         Gauss linear;
+}
+
+divSchemes
+{
+    default         none;
+    div(phi,U)      Gauss linear;
+}
+
+laplacianSchemes
+{
+    default         Gauss linear corrected;
+}
+
+interpolationSchemes
+{
+    default         linear;
+}
+
+snGradSchemes
+{
+    default         corrected;
+}
+"""
+
+    def _default_fv_solution(self) -> str:
+        return """FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      fvSolution;
+}
+
+solvers
+{
+    p
+    {
+        solver          PCG;
+        preconditioner  DIC;
+        tolerance       1e-06;
+        relTol          0.05;
+    }
+
+    pFinal
+    {
+        $p;
+        relTol          0;
+    }
+
+    U
+    {
+        solver          smoothSolver;
+        smoother        symGaussSeidel;
+        tolerance       1e-05;
+        relTol          0;
+    }
+}
+
+PISO
+{
+    nCorrectors     2;
+    nNonOrthogonalCorrectors 0;
+    pRefCell        0;
+    pRefValue       0;
+}
 """
