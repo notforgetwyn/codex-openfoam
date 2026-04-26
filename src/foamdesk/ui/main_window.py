@@ -172,6 +172,8 @@ class MainWindow(QMainWindow):
         self._theme_index = 0
         self._current_project: SimulationProject | None = None
         self._foam_process: QProcess | None = None
+        self._current_process_output = ""
+        self._last_diagnostic_summary = "暂无诊断。"
         self._tutorial_overlay: TutorialOverlay | None = None
         self.setWindowTitle("FoamDesk")
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
@@ -497,6 +499,10 @@ class MainWindow(QMainWindow):
             "4. 底部“日志”显示 OpenFOAM 实时输出。\n"
             "5. 底部“问题”显示失败原因。"
         )
+        self._solver_diagnostic_text = QTextEdit()
+        self._solver_diagnostic_text.setReadOnly(True)
+        self._solver_diagnostic_text.setMaximumHeight(170)
+        self._solver_diagnostic_text.setPlainText("最近诊断：暂无诊断。")
 
         layout.addWidget(title)
         layout.addWidget(description)
@@ -506,6 +512,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._solver_command_label)
         layout.addLayout(action_row)
         layout.addWidget(self._solver_parameter_summary)
+        layout.addWidget(self._solver_diagnostic_text)
         layout.addWidget(self._solver_hint_text, 1)
         return wrapper
 
@@ -658,6 +665,8 @@ class MainWindow(QMainWindow):
             return
 
         self._solver_status_label.setText(f"状态：{status_text or '空闲'}")
+        if hasattr(self, "_solver_diagnostic_text"):
+            self._solver_diagnostic_text.setPlainText(f"最近诊断：\n{self._last_diagnostic_summary}")
         if self._current_project is None:
             self._solver_project_label.setText("当前项目：未选择")
             self._solver_case_path_label.setText("Case 路径：未选择")
@@ -896,6 +905,8 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.setCurrentIndex(2)
         self._bottom_tabs.setCurrentIndex(0)
         self._task_text.setPlainText("任务状态：最小仿真运行中")
+        self._current_process_output = ""
+        self._last_diagnostic_summary = "本次任务正在运行，暂无失败诊断。"
         self._refresh_solver_run_panel("最小仿真运行中")
         self._set_status("最小仿真运行中。")
 
@@ -929,21 +940,35 @@ class MainWindow(QMainWindow):
 
     def _read_process_stdout(self) -> None:
         if self._foam_process:
-            self._append_log(bytes(self._foam_process.readAllStandardOutput()).decode(errors="replace"))
+            output = bytes(self._foam_process.readAllStandardOutput()).decode(errors="replace")
+            self._current_process_output += output
+            self._append_log(output)
 
     def _read_process_stderr(self) -> None:
         if self._foam_process:
-            self._append_log(bytes(self._foam_process.readAllStandardError()).decode(errors="replace"))
+            output = bytes(self._foam_process.readAllStandardError()).decode(errors="replace")
+            self._current_process_output += output
+            self._append_log(output)
 
     def _on_process_finished(self, exit_code: int, _exit_status) -> None:
         if exit_code == 0:
             self._task_text.setPlainText("任务状态：最小仿真完成")
+            self._last_diagnostic_summary = "本次任务正常完成，没有失败诊断。"
             self._refresh_solver_run_panel("最小仿真完成")
             self._set_status("最小仿真完成。")
         else:
+            self._update_diagnostics(exit_code)
             self._task_text.setPlainText(f"任务状态：最小仿真失败，退出码 {exit_code}")
             self._refresh_solver_run_panel(f"最小仿真失败，退出码 {exit_code}")
             self._set_status(f"最小仿真失败，退出码 {exit_code}。")
+
+    def _update_diagnostics(self, exit_code: int) -> None:
+        diagnostics = self._context.log_diagnostic_service.diagnose(self._current_process_output)
+        summary = self._context.log_diagnostic_service.format_diagnostics(diagnostics)
+        self._last_diagnostic_summary = f"退出码：{exit_code}\n\n{summary}"
+        self._problem_text.setPlainText(self._last_diagnostic_summary)
+        self._bottom_tabs.setCurrentIndex(2)
+        self._append_log("已生成失败诊断。")
 
     def _show_current_case_path(self) -> None:
         if self._current_project is None:

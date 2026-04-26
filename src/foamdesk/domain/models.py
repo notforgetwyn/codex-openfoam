@@ -37,3 +37,10 @@ class SimulationParameters:
     delta_t: float
     write_interval: int
     viscosity: float
+
+
+@dataclass(slots=True)
+class OpenFoamDiagnostic:
+    title: str
+    detail: str
+    suggestion: str
