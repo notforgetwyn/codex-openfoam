@@ -335,7 +335,7 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.addTab(self._build_solver_run_tab(), "求解运行")
         self._workspace_tabs.addTab(self._build_environment_tab(), "环境检查")
         self._workspace_tabs.addTab(self._build_settings_tab(), "设置")
-        self._workspace_tabs.addTab(self._make_text_panel("结果区"), "结果")
+        self._workspace_tabs.addTab(self._build_results_tab(), "结果")
         layout.addWidget(self._workspace_tabs)
         return container
 
@@ -533,6 +533,28 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._environment_text)
         return wrapper
 
+    def _build_results_tab(self) -> QWidget:
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        title = QLabel("结果")
+        title.setStyleSheet("font-size: 22px; font-weight: 600;")
+        description = QLabel("当前阶段先索引 OpenFOAM 运行产物，后续再接入曲线和云图。")
+        description.setWordWrap(True)
+        refresh_button = QPushButton("刷新结果索引")
+        refresh_button.clicked.connect(lambda _checked=False: self._refresh_results_panel())
+        self._results_text = QTextEdit()
+        self._results_text.setReadOnly(True)
+        self._results_text.setPlainText("请先新建或打开项目，然后运行最小仿真。")
+
+        layout.addWidget(title)
+        layout.addWidget(description)
+        layout.addWidget(refresh_button)
+        layout.addWidget(self._results_text, 1)
+        return wrapper
+
     def _build_settings_tab(self) -> QWidget:
         wrapper = QWidget()
         layout = QVBoxLayout(wrapper)
@@ -691,6 +713,24 @@ class MainWindow(QMainWindow):
             "输出位置：当前 Case 目录下的时间步目录、constant/polyMesh 和日志面板。"
         )
 
+    def _refresh_results_panel(self) -> None:
+        if not hasattr(self, "_results_text"):
+            return
+        if self._current_project is None:
+            self._results_text.setPlainText("请先新建或打开项目。")
+            self._set_status("结果索引刷新失败：未选择项目。")
+            return
+
+        try:
+            result_index = self._context.result_index_service.index(self._current_project)
+        except OSError as error:
+            self._show_error(f"刷新结果索引失败：{error}")
+            return
+
+        self._results_text.setPlainText(self._context.result_index_service.format_index(result_index))
+        self._append_log("结果索引已刷新。")
+        self._set_status("结果索引已刷新。")
+
     def _apply_settings_theme(self) -> None:
         settings = self._context.settings_service.load()
         self._theme_index = self._theme_names.index(settings.theme_name)
@@ -780,6 +820,7 @@ class MainWindow(QMainWindow):
             self._set_status("已切换到任务视图。")
         elif index == 3:
             self._workspace_tabs.setCurrentIndex(5)
+            self._refresh_results_panel()
             self._set_status("已切换到结果视图。")
 
     def _save_current_state(self) -> None:
@@ -802,6 +843,7 @@ class MainWindow(QMainWindow):
         self._case_label.setText(f"当前 Case: {project.name}")
         self._load_case_parameters()
         self._refresh_solver_run_panel()
+        self._refresh_results_panel()
         self._append_log(f"已创建项目：{project.path}")
         self._set_status("项目创建完成。")
 
@@ -826,6 +868,7 @@ class MainWindow(QMainWindow):
         self._case_label.setText(f"当前 Case: {project.name}")
         self._load_case_parameters()
         self._refresh_solver_run_panel()
+        self._refresh_results_panel()
         self._append_log(f"已打开项目：{project.path}")
         self._set_status("项目打开完成。")
 
@@ -861,6 +904,7 @@ class MainWindow(QMainWindow):
         self._case_label.setText(f"当前 Case: {self._current_project.name}")
         self._load_case_parameters()
         self._refresh_solver_run_panel()
+        self._refresh_results_panel()
         self._append_log(f"当前项目：{self._current_project.path}")
 
     def _search_projects(self) -> None:
@@ -954,6 +998,7 @@ class MainWindow(QMainWindow):
         if exit_code == 0:
             self._task_text.setPlainText("任务状态：最小仿真完成")
             self._last_diagnostic_summary = "本次任务正常完成，没有失败诊断。"
+            self._refresh_results_panel()
             self._refresh_solver_run_panel("最小仿真完成")
             self._set_status("最小仿真完成。")
         else:

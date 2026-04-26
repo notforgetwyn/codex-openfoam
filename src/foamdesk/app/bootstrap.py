@@ -6,6 +6,7 @@ from foamdesk.integrations.openfoam.environment import OpenFOAMEnvironmentDetect
 from foamdesk.services.case_parameter_service import OpenFoamCaseParameterService
 from foamdesk.services.log_diagnostic_service import OpenFoamLogDiagnosticService
 from foamdesk.services.project_service import ProjectService
+from foamdesk.services.result_index_service import ResultIndexService
 from foamdesk.services.settings_service import AppSettingsService
 
 
@@ -18,4 +19,5 @@ class ApplicationContext:
         self.project_service = ProjectService(self.settings_service)
         self.case_parameter_service = OpenFoamCaseParameterService()
         self.log_diagnostic_service = OpenFoamLogDiagnosticService()
+        self.result_index_service = ResultIndexService()
         self.environment_detector = OpenFOAMEnvironmentDetector(self.settings_service)

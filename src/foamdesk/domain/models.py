@@ -44,3 +44,12 @@ class OpenFoamDiagnostic:
     title: str
     detail: str
     suggestion: str
+
+
+@dataclass(slots=True)
+class CaseResultIndex:
+    time_directories: list[str]
+    latest_time: str | None
+    field_files: list[str]
+    has_mesh: bool
+    mesh_path: Path
