@@ -22,6 +22,7 @@ class AppSettings:
     font_family: str
     font_size: int
     show_tutorial_on_startup: bool
+    last_project_path: Path | None
 
 
 @dataclass(slots=True)

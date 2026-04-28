@@ -27,6 +27,7 @@ class AppSettingsService:
         font_family = payload.get("font_family", "Noto Sans CJK SC")
         font_size = int(payload.get("font_size", 15))
         show_tutorial_on_startup = bool(payload.get("show_tutorial_on_startup", True))
+        last_project_raw = payload.get("last_project_path")
         return AppSettings(
             workspace_dir=workspace_dir,
             openfoam_env_script=env_script,
@@ -35,6 +36,7 @@ class AppSettingsService:
             font_family=font_family,
             font_size=font_size,
             show_tutorial_on_startup=show_tutorial_on_startup,
+            last_project_path=Path(last_project_raw) if last_project_raw else None,
         )
 
     def save(self, settings: AppSettings) -> None:
@@ -47,6 +49,7 @@ class AppSettingsService:
             "font_family": settings.font_family,
             "font_size": settings.font_size,
             "show_tutorial_on_startup": settings.show_tutorial_on_startup,
+            "last_project_path": str(settings.last_project_path) if settings.last_project_path else None,
         }
         self._settings_file.write_text(
             yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
@@ -66,6 +69,7 @@ class AppSettingsService:
             "font_family": "Noto Sans CJK SC",
             "font_size": 15,
             "show_tutorial_on_startup": True,
+            "last_project_path": None,
         }
         self._settings_file.write_text(
             yaml.safe_dump(default_settings, allow_unicode=True, sort_keys=False),

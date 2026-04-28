@@ -22,6 +22,7 @@ def test_settings_service_creates_default_file(tmp_path: Path) -> None:
     assert settings.font_family == "Noto Sans CJK SC"
     assert settings.font_size == 15
     assert settings.show_tutorial_on_startup is True
+    assert settings.last_project_path is None
     assert (tmp_path / "config" / "settings.yaml").exists()
 
 
@@ -37,6 +38,7 @@ def test_settings_service_saves_roundtrip(tmp_path: Path) -> None:
             font_family="DejaVu Sans",
             font_size=18,
             show_tutorial_on_startup=False,
+            last_project_path=tmp_path / "workspace-alt" / "projects" / "demo",
         )
     )
 
@@ -49,3 +51,4 @@ def test_settings_service_saves_roundtrip(tmp_path: Path) -> None:
     assert settings.font_family == "DejaVu Sans"
     assert settings.font_size == 18
     assert settings.show_tutorial_on_startup is False
+    assert settings.last_project_path == tmp_path / "workspace-alt" / "projects" / "demo"

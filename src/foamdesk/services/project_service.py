@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 
 from foamdesk.domain.models import SimulationProject
@@ -64,6 +65,19 @@ class ProjectService:
         if not case_dir.exists():
             raise ValueError("项目 case 目录不存在。")
         return SimulationProject(name=name, path=project_dir, case_dir=case_dir)
+
+    def remember_project(self, project: SimulationProject) -> None:
+        settings = self._settings_service.load()
+        self._settings_service.save(replace(settings, last_project_path=project.path))
+
+    def open_last_project(self) -> SimulationProject | None:
+        last_project_path = self._settings_service.load().last_project_path
+        if last_project_path is None:
+            return None
+        try:
+            return self.open_project(last_project_path)
+        except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            return None
 
     def ensure_minimal_case_template(self, project: SimulationProject) -> list[Path]:
         """Backfill missing files for projects created by older templates."""

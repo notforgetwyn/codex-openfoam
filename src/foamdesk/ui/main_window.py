@@ -311,7 +311,7 @@ class VtkViewerDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, context: ApplicationContext) -> None:
+    def __init__(self, context: ApplicationContext, initial_project: SimulationProject | None = None) -> None:
         super().__init__()
         self._context = context
         self._theme_names = list(THEMES.keys())
@@ -328,6 +328,8 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._apply_settings_theme()
         self._refresh_status_bar()
+        if initial_project is not None:
+            self._activate_project(initial_project, "已恢复上次项目。")
         if self._context.settings_service.load().show_tutorial_on_startup:
             QTimer.singleShot(0, self._show_tutorial)
 
@@ -1136,6 +1138,7 @@ class MainWindow(QMainWindow):
             font_family=settings.font_family,
             font_size=settings.font_size,
             show_tutorial_on_startup=settings.show_tutorial_on_startup,
+            last_project_path=settings.last_project_path,
         )
         self._context.settings_service.save(updated_settings)
         self._apply_settings_theme()
@@ -1154,6 +1157,7 @@ class MainWindow(QMainWindow):
             font_family=self._font_combo.currentFont().family(),
             font_size=self._font_size_input.value(),
             show_tutorial_on_startup=self._show_tutorial_checkbox.isChecked(),
+            last_project_path=settings.last_project_path,
         )
         self._context.settings_service.save(updated_settings)
         self._apply_settings_theme()
@@ -1209,13 +1213,7 @@ class MainWindow(QMainWindow):
             self._show_error(str(error))
             return
 
-        self._current_project = project
-        self._refresh_project_tree()
-        self._workspace_tabs.setCurrentIndex(0)
-        self._case_label.setText(f"当前 Case: {project.name}")
-        self._load_case_parameters()
-        self._refresh_solver_run_panel()
-        self._refresh_results_panel()
+        self._activate_project(project, "项目创建完成。")
         self._append_log(f"已创建项目：{project.path}")
         self._set_status("项目创建完成。")
 
@@ -1234,15 +1232,21 @@ class MainWindow(QMainWindow):
             self._show_error(str(error))
             return
 
+        self._activate_project(project, "项目打开完成。")
+        self._append_log(f"已打开项目：{project.path}")
+        self._set_status("项目打开完成。")
+
+    def _activate_project(self, project: SimulationProject, status_text: str) -> None:
         self._current_project = project
+        self._context.project_service.remember_project(project)
         self._refresh_project_tree()
         self._workspace_tabs.setCurrentIndex(0)
         self._case_label.setText(f"当前 Case: {project.name}")
         self._load_case_parameters()
         self._refresh_solver_run_panel()
         self._refresh_results_panel()
-        self._append_log(f"已打开项目：{project.path}")
-        self._set_status("项目打开完成。")
+        self._append_log(f"当前项目：{project.path}")
+        self._set_status(status_text)
 
     def _refresh_project_tree(self) -> None:
         if not hasattr(self, "_project_tree"):
@@ -1269,15 +1273,11 @@ class MainWindow(QMainWindow):
         if not project_path:
             return
         try:
-            self._current_project = self._context.project_service.open_project(Path(project_path))
+            project = self._context.project_service.open_project(Path(project_path))
         except ValueError as error:
             self._show_error(str(error))
             return
-        self._case_label.setText(f"当前 Case: {self._current_project.name}")
-        self._load_case_parameters()
-        self._refresh_solver_run_panel()
-        self._refresh_results_panel()
-        self._append_log(f"当前项目：{self._current_project.path}")
+        self._activate_project(project, "项目已切换。")
 
     def _search_projects(self) -> None:
         keyword, ok = QInputDialog.getText(self, "搜索项目", "项目名称关键字")

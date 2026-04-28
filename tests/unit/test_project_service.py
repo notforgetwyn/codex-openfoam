@@ -43,6 +43,27 @@ def test_project_service_rejects_duplicate_project(tmp_path: Path) -> None:
         service.create_project("demo")
 
 
+def test_project_service_remembers_last_project(tmp_path: Path) -> None:
+    settings_service = AppSettingsService(tmp_path)
+    service = ProjectService(settings_service)
+    project = service.create_project("demo")
+
+    service.remember_project(project)
+
+    assert settings_service.load().last_project_path == project.path
+    assert service.open_last_project() == project
+
+
+def test_project_service_ignores_missing_last_project(tmp_path: Path) -> None:
+    settings_service = AppSettingsService(tmp_path)
+    service = ProjectService(settings_service)
+    project = service.create_project("demo")
+    service.remember_project(project)
+    (project.path / "project.json").unlink()
+
+    assert service.open_last_project() is None
+
+
 def test_project_service_backfills_missing_minimal_case_files(tmp_path: Path) -> None:
     service = ProjectService(AppSettingsService(tmp_path))
     project = service.create_project("legacy")
