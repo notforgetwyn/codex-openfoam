@@ -7,6 +7,7 @@ from foamdesk.services.case_parameter_service import OpenFoamCaseParameterServic
 from foamdesk.services.log_diagnostic_service import OpenFoamLogDiagnosticService
 from foamdesk.services.log_metric_service import OpenFoamLogMetricService
 from foamdesk.services.metric_export_service import MetricExportService
+from foamdesk.services.openfoam_vtk_service import OpenFoamVtkService
 from foamdesk.services.project_service import ProjectService
 from foamdesk.services.residual_plot_service import ResidualPlotService
 from foamdesk.services.result_index_service import ResultIndexService
@@ -24,6 +25,7 @@ class ApplicationContext:
         self.log_diagnostic_service = OpenFoamLogDiagnosticService()
         self.log_metric_service = OpenFoamLogMetricService()
         self.metric_export_service = MetricExportService()
+        self.openfoam_vtk_service = OpenFoamVtkService()
         self.residual_plot_service = ResidualPlotService()
         self.result_index_service = ResultIndexService()
         self.environment_detector = OpenFOAMEnvironmentDetector(self.settings_service)

@@ -70,3 +70,10 @@ class SolverMetrics:
     residuals: list[SolverResidual]
     courant_max: float | None
     latest_continuity_global: float | None
+
+
+@dataclass(slots=True)
+class OpenFoamVtkCaseInfo:
+    marker_file: Path
+    time_values: list[float]
+    block_count: int
