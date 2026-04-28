@@ -11,6 +11,7 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QComboBox,
     QCheckBox,
+    QDialog,
     QFileDialog,
     QFontComboBox,
     QFrame,
@@ -172,6 +173,34 @@ class TutorialOverlay(QFrame):
         super().mouseReleaseEvent(event)
 
 
+class VtkViewerDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("FoamDesk 3D 视图")
+        self.resize(920, 680)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.vtk_widget = QVTKRenderWindowInteractor(self)
+        self.renderer = vtkRenderer()
+        self.renderer.SetBackground(0.12, 0.12, 0.12)
+        self.vtk_widget.GetRenderWindow().AddRenderer(self.renderer)
+        self.vtk_widget.GetRenderWindow().GetInteractor().SetInteractorStyle(
+            vtkInteractorStyleTrackballCamera()
+        )
+        layout.addWidget(self.vtk_widget)
+        self.vtk_widget.Initialize()
+
+    def render_scene(self) -> None:
+        self.renderer.ResetCamera()
+        self.vtk_widget.GetRenderWindow().Render()
+        self.vtk_widget.update()
+        self.vtk_widget.repaint()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, context: ApplicationContext) -> None:
         super().__init__()
@@ -183,6 +212,7 @@ class MainWindow(QMainWindow):
         self._current_process_output = ""
         self._last_diagnostic_summary = "暂无诊断。"
         self._tutorial_overlay: TutorialOverlay | None = None
+        self._vtk_viewer: VtkViewerDialog | None = None
         self.setWindowTitle("FoamDesk")
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.resize(1400, 900)
@@ -580,22 +610,22 @@ class MainWindow(QMainWindow):
         self._results_text = QTextEdit()
         self._results_text.setReadOnly(True)
         self._results_text.setPlainText("请先新建或打开项目，然后运行最小仿真。")
+        self._results_text.setMaximumHeight(160)
         self._residual_figure = Figure(figsize=(6, 3), tight_layout=True)
         self._residual_canvas = FigureCanvas(self._residual_figure)
-        self._vtk_widget = QVTKRenderWindowInteractor(wrapper)
-        self._vtk_renderer = vtkRenderer()
-        self._vtk_renderer.SetBackground(0.12, 0.12, 0.12)
-        self._vtk_widget.GetRenderWindow().AddRenderer(self._vtk_renderer)
-        self._vtk_widget.GetRenderWindow().GetInteractor().SetInteractorStyle(
-            vtkInteractorStyleTrackballCamera()
+        self._residual_canvas.setMaximumHeight(220)
+        self._vtk_hint_label = QLabel(
+            "三维视图将以独立窗口打开，避免 WSL 下 VTK 原生控件覆盖 Qt 页面。"
         )
+        self._vtk_hint_label.setWordWrap(True)
+        self._vtk_hint_label.setObjectName("sectionHint")
 
         layout.addWidget(title)
         layout.addWidget(description)
         layout.addLayout(button_row)
         layout.addWidget(self._results_text, 1)
         layout.addWidget(self._residual_canvas, 2)
-        layout.addWidget(self._vtk_widget, 3)
+        layout.addWidget(self._vtk_hint_label)
         return wrapper
 
     def _build_settings_tab(self) -> QWidget:
@@ -847,9 +877,12 @@ class MainWindow(QMainWindow):
         self._set_status("残差曲线已绘制。")
 
     def _load_3d_preview_scene(self) -> None:
-        if not hasattr(self, "_vtk_renderer"):
-            return
+        self._ensure_vtk_viewer()
 
+        self._show_visualization_feedback(
+            "正在加载 3D 技术验证场景",
+            "该场景不依赖 OpenFOAM 项目，用于验证内嵌 VTK 三维窗口是否能正常渲染。",
+        )
         self._vtk_renderer.RemoveAllViewProps()
 
         cube_source = vtkCubeSource()
@@ -875,19 +908,24 @@ class MainWindow(QMainWindow):
 
         self._vtk_renderer.AddActor(actor)
         self._vtk_renderer.AddActor(axes)
-        self._vtk_renderer.ResetCamera()
-        self._vtk_widget.GetRenderWindow().Render()
-        self._vtk_widget.Initialize()
+        self._finalize_vtk_render()
         self._append_log("3D 技术验证场景已加载：单位计算域 + 坐标轴。")
+        self._show_visualization_feedback(
+            "3D 技术验证场景已加载",
+            "你应该能在下方三维视图区看到蓝色线框立方体和坐标轴。"
+        )
         self._set_status("3D 技术验证场景已加载。")
 
     def _load_openfoam_3d_case(self) -> None:
         if self._current_project is None:
             self._show_error("请先新建或打开项目。")
             return
-        if not hasattr(self, "_vtk_renderer"):
-            return
+        self._ensure_vtk_viewer()
 
+        self._show_visualization_feedback(
+            "正在加载真实 OpenFOAM 3D Case",
+            f"当前项目：{self._current_project.name}\nCase 路径：{self._current_project.case_dir}",
+        )
         try:
             case_info = self._context.openfoam_vtk_service.inspect(self._current_project)
             geometry = self._context.openfoam_vtk_service.build_geometry_filter(self._current_project)
@@ -910,14 +948,20 @@ class MainWindow(QMainWindow):
 
         self._vtk_renderer.AddActor(actor)
         self._vtk_renderer.AddActor(axes)
-        self._vtk_renderer.ResetCamera()
-        self._vtk_widget.GetRenderWindow().Render()
-        self._vtk_widget.Initialize()
+        self._finalize_vtk_render()
         self._append_log(
             "真实 OpenFOAM 3D Case 已加载："
             f"blocks={case_info.block_count}, times={len(case_info.time_values)}, "
             f"pointArrays={case_info.point_arrays}, cellArrays={case_info.cell_arrays}, "
             f"marker={case_info.marker_file}"
+        )
+        self._show_visualization_feedback(
+            "真实 OpenFOAM 3D Case 已加载",
+            "下方三维视图区显示当前 case 的网格几何。\n"
+            f"blocks：{case_info.block_count}\n"
+            f"时间步数量：{len(case_info.time_values)}\n"
+            f"点字段：{case_info.point_arrays}\n"
+            f"单元字段：{case_info.cell_arrays}",
         )
         self._set_status("真实 OpenFOAM 3D Case 已加载。")
 
@@ -925,9 +969,12 @@ class MainWindow(QMainWindow):
         if self._current_project is None:
             self._show_error("请先新建或打开项目。")
             return
-        if not hasattr(self, "_vtk_renderer"):
-            return
+        self._ensure_vtk_viewer()
 
+        self._show_visualization_feedback(
+            "正在加载压力云图",
+            f"当前项目：{self._current_project.name}\n目标字段：p\nCase 路径：{self._current_project.case_dir}",
+        )
         try:
             case_info = self._context.openfoam_vtk_service.inspect(self._current_project)
             geometry = self._context.openfoam_vtk_service.build_geometry_filter(self._current_project)
@@ -966,6 +1013,7 @@ class MainWindow(QMainWindow):
         actor = vtkActor()
         actor.SetMapper(mapper)
         actor.GetProperty().SetOpacity(0.95)
+        actor.GetProperty().EdgeVisibilityOn()
 
         scalar_bar = vtkScalarBarActor()
         scalar_bar.SetLookupTable(mapper.GetLookupTable())
@@ -978,15 +1026,41 @@ class MainWindow(QMainWindow):
         self._vtk_renderer.AddActor(actor)
         self._vtk_renderer.AddActor(axes)
         self._vtk_renderer.AddActor2D(scalar_bar)
-        self._vtk_renderer.ResetCamera()
-        self._vtk_widget.GetRenderWindow().Render()
-        self._vtk_widget.Initialize()
+        self._finalize_vtk_render()
         self._append_log(
             "压力云图已加载："
             f"pRange=({scalar_range[0]:.6g}, {scalar_range[1]:.6g}), "
             f"times={case_info.time_values}"
         )
+        self._show_visualization_feedback(
+            "压力云图已加载",
+            "下方三维视图区显示字段 p 的标量着色结果。\n"
+            f"pRange：({scalar_range[0]:.6g}, {scalar_range[1]:.6g})\n"
+            f"时间步：{case_info.time_values}\n"
+            "如果画面几乎是单色，通常表示当前最小算例的压力场变化很小或为常量。",
+        )
         self._set_status("压力云图已加载。")
+
+    def _show_visualization_feedback(self, title: str, detail: str) -> None:
+        self._workspace_tabs.setCurrentIndex(5)
+        if hasattr(self, "_results_text"):
+            self._results_text.setPlainText(f"{title}\n\n{detail}")
+
+    def _ensure_vtk_viewer(self) -> None:
+        if self._vtk_viewer is None:
+            self._vtk_viewer = VtkViewerDialog(self)
+        self._vtk_renderer = self._vtk_viewer.renderer
+        self._vtk_widget = self._vtk_viewer.vtk_widget
+        self._vtk_viewer.show()
+        self._vtk_viewer.raise_()
+        self._vtk_viewer.activateWindow()
+
+    def _finalize_vtk_render(self) -> None:
+        if self._vtk_viewer is not None:
+            self._vtk_viewer.render_scene()
+            return
+        self._vtk_renderer.ResetCamera()
+        self._vtk_widget.GetRenderWindow().Render()
 
     def _apply_settings_theme(self) -> None:
         settings = self._context.settings_service.load()
