@@ -3,6 +3,7 @@ from __future__ import annotations
 import shlex
 from pathlib import Path
 
+import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from PySide6.QtCore import QPoint, Qt
@@ -39,12 +40,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
-from vtkmodules.vtkFiltersSources import vtkCubeSource
-from vtkmodules.vtkInteractionStyle import vtkInteractorStyleTrackballCamera
-from vtkmodules.vtkRenderingAnnotation import vtkAxesActor
-from vtkmodules.vtkRenderingAnnotation import vtkScalarBarActor
-from vtkmodules.vtkRenderingCore import vtkActor, vtkPolyDataMapper, vtkRenderer
+from vtkmodules.util.numpy_support import vtk_to_numpy
 
 from foamdesk.app.bootstrap import ApplicationContext
 from foamdesk.domain.models import SimulationParameters, SimulationProject
@@ -180,25 +176,138 @@ class VtkViewerDialog(QDialog):
         self.resize(920, 680)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        self.vtk_widget = QVTKRenderWindowInteractor(self)
-        self.renderer = vtkRenderer()
-        self.renderer.SetBackground(0.12, 0.12, 0.12)
-        self.vtk_widget.GetRenderWindow().AddRenderer(self.renderer)
-        self.vtk_widget.GetRenderWindow().GetInteractor().SetInteractorStyle(
-            vtkInteractorStyleTrackballCamera()
-        )
-        layout.addWidget(self.vtk_widget)
-        self.vtk_widget.Initialize()
+        layout.setContentsMargins(8, 8, 8, 8)
+        self.figure = Figure(figsize=(8, 6), facecolor="#1e1e1e", tight_layout=True)
+        self.canvas = FigureCanvas(self.figure)
+        layout.addWidget(self.canvas)
 
-    def render_scene(self) -> None:
-        self.renderer.ResetCamera()
-        self.vtk_widget.GetRenderWindow().Render()
-        self.vtk_widget.update()
-        self.vtk_widget.repaint()
+    def plot_cube(self) -> None:
+        axes = self._reset_axes("3D 技术验证场景")
+        corners = np.array(
+            [
+                [0, 0, 0],
+                [1, 0, 0],
+                [1, 1, 0],
+                [0, 1, 0],
+                [0, 0, 1],
+                [1, 0, 1],
+                [1, 1, 1],
+                [0, 1, 1],
+            ],
+            dtype=float,
+        )
+        edges = [
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 0),
+            (4, 5),
+            (5, 6),
+            (6, 7),
+            (7, 4),
+            (0, 4),
+            (1, 5),
+            (2, 6),
+            (3, 7),
+        ]
+        for start, end in edges:
+            axes.plot(
+                corners[[start, end], 0],
+                corners[[start, end], 1],
+                corners[[start, end], 2],
+                color="#4fc3ff",
+                linewidth=2.0,
+            )
+        self._finish_axes(axes, corners)
+
+    def plot_polydata_points(self, poly_data, title: str) -> None:
+        points = self._points(poly_data)
+        axes = self._reset_axes(title)
+        if points.size == 0:
+            axes.text2D(0.08, 0.5, "当前 case 没有可显示点数据。", color="#d4d4d4")
+            self._show()
+            return
+        points = self._sample_points(points)
+        axes.scatter(points[:, 0], points[:, 1], points[:, 2], s=6, c="#4fc3ff", alpha=0.85)
+        self._finish_axes(axes, points)
+
+    def plot_pressure_points(self, poly_data, pressure_array, scalar_range: tuple[float, float]) -> None:
+        points = self._points(poly_data)
+        pressure = vtk_to_numpy(pressure_array)
+        axes = self._reset_axes("压力 p 云图")
+        if points.size == 0 or pressure.size == 0:
+            axes.text2D(0.08, 0.5, "当前 case 没有可显示压力点数据。", color="#d4d4d4")
+            self._show()
+            return
+        count = min(len(points), len(pressure))
+        points = points[:count]
+        pressure = pressure[:count]
+        points, pressure = self._sample_points(points, pressure)
+        scatter = axes.scatter(
+            points[:, 0],
+            points[:, 1],
+            points[:, 2],
+            c=pressure,
+            cmap="turbo",
+            s=8,
+            alpha=0.92,
+            vmin=scalar_range[0],
+            vmax=scalar_range[1],
+        )
+        colorbar = self.figure.colorbar(scatter, ax=axes, shrink=0.72, pad=0.08)
+        colorbar.set_label("p", color="#d4d4d4")
+        colorbar.ax.yaxis.set_tick_params(color="#d4d4d4")
+        for label in colorbar.ax.get_yticklabels():
+            label.set_color("#d4d4d4")
+        self._finish_axes(axes, points)
+
+    def _reset_axes(self, title: str):
+        self.figure.clear()
+        axes = self.figure.add_subplot(111, projection="3d", facecolor="#1e1e1e")
+        axes.set_title(title, color="#d4d4d4", pad=14)
+        axes.set_xlabel("X", color="#d4d4d4")
+        axes.set_ylabel("Y", color="#d4d4d4")
+        axes.set_zlabel("Z", color="#d4d4d4")
+        axes.tick_params(colors="#d4d4d4")
+        axes.grid(True, color="#333333", linestyle="--", linewidth=0.6)
+        return axes
+
+    def _finish_axes(self, axes, points) -> None:
+        if points.size:
+            mins = points.min(axis=0)
+            maxs = points.max(axis=0)
+            center = (mins + maxs) / 2.0
+            radius = max((maxs - mins).max() / 2.0, 0.5)
+            axes.set_xlim(center[0] - radius, center[0] + radius)
+            axes.set_ylim(center[1] - radius, center[1] + radius)
+            axes.set_zlim(center[2] - radius, center[2] + radius)
+        axes.view_init(elev=24, azim=-55)
+        self._show()
+
+    def _show(self) -> None:
+        self.canvas.draw()
         self.show()
         self.raise_()
         self.activateWindow()
+
+    def _points(self, poly_data) -> np.ndarray:
+        vtk_points = poly_data.GetPoints()
+        if vtk_points is None:
+            return np.empty((0, 3), dtype=float)
+        return vtk_to_numpy(vtk_points.GetData())
+
+    def _sample_points(
+        self,
+        points: np.ndarray,
+        values: np.ndarray | None = None,
+        limit: int = 12000,
+    ):
+        if len(points) <= limit:
+            return (points, values) if values is not None else points
+        indices = np.linspace(0, len(points) - 1, limit, dtype=int)
+        if values is not None:
+            return points[indices], values[indices]
+        return points[indices]
 
 
 class MainWindow(QMainWindow):
@@ -881,38 +990,13 @@ class MainWindow(QMainWindow):
 
         self._show_visualization_feedback(
             "正在加载 3D 技术验证场景",
-            "该场景不依赖 OpenFOAM 项目，用于验证内嵌 VTK 三维窗口是否能正常渲染。",
+            "该场景不依赖 OpenFOAM 项目，用于验证三维窗口是否能正常渲染。",
         )
-        self._vtk_renderer.RemoveAllViewProps()
-
-        cube_source = vtkCubeSource()
-        cube_source.SetXLength(1.0)
-        cube_source.SetYLength(1.0)
-        cube_source.SetZLength(1.0)
-        cube_source.SetCenter(0.5, 0.5, 0.5)
-        cube_source.Update()
-
-        mapper = vtkPolyDataMapper()
-        mapper.SetInputConnection(cube_source.GetOutputPort())
-
-        actor = vtkActor()
-        actor.SetMapper(mapper)
-        actor.GetProperty().SetRepresentationToWireframe()
-        actor.GetProperty().SetColor(0.2, 0.65, 1.0)
-        actor.GetProperty().SetLineWidth(2.0)
-
-        axes = vtkAxesActor()
-        axes.SetTotalLength(1.2, 1.2, 1.2)
-        axes.SetShaftTypeToCylinder()
-        axes.SetCylinderRadius(0.02)
-
-        self._vtk_renderer.AddActor(actor)
-        self._vtk_renderer.AddActor(axes)
-        self._finalize_vtk_render()
+        self._vtk_viewer.plot_cube()
         self._append_log("3D 技术验证场景已加载：单位计算域 + 坐标轴。")
         self._show_visualization_feedback(
             "3D 技术验证场景已加载",
-            "你应该能在下方三维视图区看到蓝色线框立方体和坐标轴。"
+            "你应该能在独立 3D 视图窗口中看到蓝色线框立方体和坐标轴。"
         )
         self._set_status("3D 技术验证场景已加载。")
 
@@ -933,22 +1017,7 @@ class MainWindow(QMainWindow):
             self._show_error(f"加载 OpenFOAM 3D Case 失败：{error}")
             return
 
-        self._vtk_renderer.RemoveAllViewProps()
-
-        mapper = vtkPolyDataMapper()
-        mapper.SetInputConnection(geometry.GetOutputPort())
-
-        actor = vtkActor()
-        actor.SetMapper(mapper)
-        actor.GetProperty().SetColor(0.2, 0.72, 0.95)
-        actor.GetProperty().SetOpacity(0.85)
-
-        axes = vtkAxesActor()
-        axes.SetTotalLength(1.2, 1.2, 1.2)
-
-        self._vtk_renderer.AddActor(actor)
-        self._vtk_renderer.AddActor(axes)
-        self._finalize_vtk_render()
+        self._vtk_viewer.plot_polydata_points(geometry.GetOutput(), "真实 OpenFOAM Case 点云")
         self._append_log(
             "真实 OpenFOAM 3D Case 已加载："
             f"blocks={case_info.block_count}, times={len(case_info.time_values)}, "
@@ -957,7 +1026,7 @@ class MainWindow(QMainWindow):
         )
         self._show_visualization_feedback(
             "真实 OpenFOAM 3D Case 已加载",
-            "下方三维视图区显示当前 case 的网格几何。\n"
+            "独立 3D 视图窗口显示当前 case 的采样点云。\n"
             f"blocks：{case_info.block_count}\n"
             f"时间步数量：{len(case_info.time_values)}\n"
             f"点字段：{case_info.point_arrays}\n"
@@ -992,41 +1061,16 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self._vtk_renderer.RemoveAllViewProps()
-
-        mapper = vtkPolyDataMapper()
-        mapper.SetInputConnection(geometry.GetOutputPort())
-        mapper.ScalarVisibilityOn()
-        mapper.SetColorModeToMapScalars()
         if point_pressure is not None:
-            mapper.SetScalarModeToUsePointFieldData()
-            mapper.SelectColorArray("p")
             scalar_range = point_pressure.GetRange()
         else:
-            mapper.SetScalarModeToUseCellFieldData()
-            mapper.SelectColorArray("p")
             scalar_range = cell_pressure.GetRange()
         if scalar_range[0] == scalar_range[1]:
             scalar_range = (scalar_range[0] - 1.0, scalar_range[1] + 1.0)
-        mapper.SetScalarRange(*scalar_range)
-
-        actor = vtkActor()
-        actor.SetMapper(mapper)
-        actor.GetProperty().SetOpacity(0.95)
-        actor.GetProperty().EdgeVisibilityOn()
-
-        scalar_bar = vtkScalarBarActor()
-        scalar_bar.SetLookupTable(mapper.GetLookupTable())
-        scalar_bar.SetTitle("p")
-        scalar_bar.SetNumberOfLabels(5)
-
-        axes = vtkAxesActor()
-        axes.SetTotalLength(1.2, 1.2, 1.2)
-
-        self._vtk_renderer.AddActor(actor)
-        self._vtk_renderer.AddActor(axes)
-        self._vtk_renderer.AddActor2D(scalar_bar)
-        self._finalize_vtk_render()
+        if point_pressure is None:
+            self._show_error("当前阶段的稳定 3D 视图先支持点字段压力云图，单元字段压力云图后续接入。")
+            return
+        self._vtk_viewer.plot_pressure_points(geometry.GetOutput(), point_pressure, scalar_range)
         self._append_log(
             "压力云图已加载："
             f"pRange=({scalar_range[0]:.6g}, {scalar_range[1]:.6g}), "
@@ -1034,7 +1078,7 @@ class MainWindow(QMainWindow):
         )
         self._show_visualization_feedback(
             "压力云图已加载",
-            "下方三维视图区显示字段 p 的标量着色结果。\n"
+            "独立 3D 视图窗口显示字段 p 的点云标量着色结果。\n"
             f"pRange：({scalar_range[0]:.6g}, {scalar_range[1]:.6g})\n"
             f"时间步：{case_info.time_values}\n"
             "如果画面几乎是单色，通常表示当前最小算例的压力场变化很小或为常量。",
@@ -1049,18 +1093,15 @@ class MainWindow(QMainWindow):
     def _ensure_vtk_viewer(self) -> None:
         if self._vtk_viewer is None:
             self._vtk_viewer = VtkViewerDialog(self)
-        self._vtk_renderer = self._vtk_viewer.renderer
-        self._vtk_widget = self._vtk_viewer.vtk_widget
         self._vtk_viewer.show()
         self._vtk_viewer.raise_()
         self._vtk_viewer.activateWindow()
 
     def _finalize_vtk_render(self) -> None:
         if self._vtk_viewer is not None:
-            self._vtk_viewer.render_scene()
-            return
-        self._vtk_renderer.ResetCamera()
-        self._vtk_widget.GetRenderWindow().Render()
+            self._vtk_viewer.show()
+            self._vtk_viewer.raise_()
+            self._vtk_viewer.activateWindow()
 
     def _apply_settings_theme(self) -> None:
         settings = self._context.settings_service.load()
