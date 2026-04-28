@@ -77,3 +77,5 @@ class OpenFoamVtkCaseInfo:
     marker_file: Path
     time_values: list[float]
     block_count: int
+    point_arrays: list[str]
+    cell_arrays: list[str]

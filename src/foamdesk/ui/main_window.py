@@ -42,6 +42,7 @@ from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 from vtkmodules.vtkFiltersSources import vtkCubeSource
 from vtkmodules.vtkInteractionStyle import vtkInteractorStyleTrackballCamera
 from vtkmodules.vtkRenderingAnnotation import vtkAxesActor
+from vtkmodules.vtkRenderingAnnotation import vtkScalarBarActor
 from vtkmodules.vtkRenderingCore import vtkActor, vtkPolyDataMapper, vtkRenderer
 
 from foamdesk.app.bootstrap import ApplicationContext
@@ -561,17 +562,20 @@ class MainWindow(QMainWindow):
         plot_residual_button = QPushButton("绘制残差曲线")
         show_3d_button = QPushButton("加载 3D 技术验证场景")
         load_openfoam_3d_button = QPushButton("加载真实 OpenFOAM 3D Case")
+        load_pressure_cloud_button = QPushButton("加载压力云图")
         refresh_button.clicked.connect(lambda _checked=False: self._refresh_results_panel())
         export_metrics_button.clicked.connect(lambda _checked=False: self._export_solver_metrics())
         plot_residual_button.clicked.connect(lambda _checked=False: self._plot_residual_curve())
         show_3d_button.clicked.connect(lambda _checked=False: self._load_3d_preview_scene())
         load_openfoam_3d_button.clicked.connect(lambda _checked=False: self._load_openfoam_3d_case())
+        load_pressure_cloud_button.clicked.connect(lambda _checked=False: self._load_pressure_cloud())
         button_row = QHBoxLayout()
         button_row.addWidget(refresh_button)
         button_row.addWidget(export_metrics_button)
         button_row.addWidget(plot_residual_button)
         button_row.addWidget(show_3d_button)
         button_row.addWidget(load_openfoam_3d_button)
+        button_row.addWidget(load_pressure_cloud_button)
         button_row.addStretch(1)
         self._results_text = QTextEdit()
         self._results_text.setReadOnly(True)
@@ -912,9 +916,77 @@ class MainWindow(QMainWindow):
         self._append_log(
             "真实 OpenFOAM 3D Case 已加载："
             f"blocks={case_info.block_count}, times={len(case_info.time_values)}, "
+            f"pointArrays={case_info.point_arrays}, cellArrays={case_info.cell_arrays}, "
             f"marker={case_info.marker_file}"
         )
         self._set_status("真实 OpenFOAM 3D Case 已加载。")
+
+    def _load_pressure_cloud(self) -> None:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return
+        if not hasattr(self, "_vtk_renderer"):
+            return
+
+        try:
+            case_info = self._context.openfoam_vtk_service.inspect(self._current_project)
+            geometry = self._context.openfoam_vtk_service.build_geometry_filter(self._current_project)
+        except (OSError, RuntimeError) as error:
+            self._show_error(f"加载压力云图失败：{error}")
+            return
+
+        output = geometry.GetOutput()
+        point_pressure = output.GetPointData().GetArray("p")
+        cell_pressure = output.GetCellData().GetArray("p")
+        if point_pressure is None and cell_pressure is None:
+            self._show_error(
+                "当前 VTK 输出中没有压力字段 p。"
+                f"可用点字段：{case_info.point_arrays}；可用单元字段：{case_info.cell_arrays}"
+            )
+            return
+
+        self._vtk_renderer.RemoveAllViewProps()
+
+        mapper = vtkPolyDataMapper()
+        mapper.SetInputConnection(geometry.GetOutputPort())
+        mapper.ScalarVisibilityOn()
+        mapper.SetColorModeToMapScalars()
+        if point_pressure is not None:
+            mapper.SetScalarModeToUsePointFieldData()
+            mapper.SelectColorArray("p")
+            scalar_range = point_pressure.GetRange()
+        else:
+            mapper.SetScalarModeToUseCellFieldData()
+            mapper.SelectColorArray("p")
+            scalar_range = cell_pressure.GetRange()
+        if scalar_range[0] == scalar_range[1]:
+            scalar_range = (scalar_range[0] - 1.0, scalar_range[1] + 1.0)
+        mapper.SetScalarRange(*scalar_range)
+
+        actor = vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetOpacity(0.95)
+
+        scalar_bar = vtkScalarBarActor()
+        scalar_bar.SetLookupTable(mapper.GetLookupTable())
+        scalar_bar.SetTitle("p")
+        scalar_bar.SetNumberOfLabels(5)
+
+        axes = vtkAxesActor()
+        axes.SetTotalLength(1.2, 1.2, 1.2)
+
+        self._vtk_renderer.AddActor(actor)
+        self._vtk_renderer.AddActor(axes)
+        self._vtk_renderer.AddActor2D(scalar_bar)
+        self._vtk_renderer.ResetCamera()
+        self._vtk_widget.GetRenderWindow().Render()
+        self._vtk_widget.Initialize()
+        self._append_log(
+            "压力云图已加载："
+            f"pRange=({scalar_range[0]:.6g}, {scalar_range[1]:.6g}), "
+            f"times={case_info.time_values}"
+        )
+        self._set_status("压力云图已加载。")
 
     def _apply_settings_theme(self) -> None:
         settings = self._context.settings_service.load()
