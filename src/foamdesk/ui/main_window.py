@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QApplication,
     QMainWindow,
     QMenu,
     QMenuBar,
@@ -458,7 +459,12 @@ class MainWindow(QMainWindow):
         tools_menu = menu_bar.addMenu("工具")
         tools_menu.addAction("环境检查", self._open_environment_tab)
         tools_menu.addAction("设置", self._open_settings_tab)
-        tools_menu.addAction("切换主题", self._cycle_theme)
+
+        theme_menu = menu_bar.addMenu("主题")
+        for theme_name in self._theme_names:
+            theme_menu.addAction(theme_name, lambda _checked=False, name=theme_name: self._set_theme(name))
+        theme_menu.addSeparator()
+        theme_menu.addAction("循环切换主题", self._cycle_theme)
 
         help_menu = menu_bar.addMenu("帮助")
         help_menu.addAction("新手教程", self._show_tutorial)
@@ -1248,7 +1254,9 @@ class MainWindow(QMainWindow):
 
     def _cycle_theme(self) -> None:
         self._theme_index = (self._theme_index + 1) % len(self._theme_names)
-        theme_name = self._theme_names[self._theme_index]
+        self._set_theme(self._theme_names[self._theme_index])
+
+    def _set_theme(self, theme_name: str) -> None:
         palette = THEMES[theme_name]
         settings = self._context.settings_service.load()
         updated_settings = type(settings)(
@@ -1372,6 +1380,7 @@ class MainWindow(QMainWindow):
 
     def _return_to_project_selection(self) -> None:
         self.hide()
+        QApplication.processEvents()
         startup_window = StartupWindow(self._context)
         if startup_window.exec() != 1 or startup_window.selected_project is None:
             self.show()
