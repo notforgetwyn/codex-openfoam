@@ -127,7 +127,7 @@ class TutorialOverlay(QFrame):
 
         body = QLabel(
             "1. 点击“新建项目”，输入项目名称。\n"
-            "2. 左侧项目树会显示真实项目，点击项目设为当前 Case。\n"
+            "2. 左侧 Case 树会显示真实项目，点击项目设为当前 Case。\n"
             "3. 打开“设置”，确认工作区、字体、字号和 OpenFOAM 环境脚本。\n"
             "4. 打开“环境检查”，确认 OpenFOAM 环境是否可用。\n"
             "5. 点击“运行”，当前阶段会执行 blockMesh + icoFoam 最小仿真。\n"
@@ -446,7 +446,7 @@ class MainWindow(QMainWindow):
 
         project_menu = menu_bar.addMenu("项目")
         project_menu.addAction("返回项目选择", self._return_to_project_selection)
-        project_menu.addAction("刷新项目树", self._refresh_project_tree)
+        project_menu.addAction("刷新 Case 树", self._refresh_project_tree)
         project_menu.addAction("搜索项目", self._search_projects)
 
         case_menu = menu_bar.addMenu("Case")
@@ -530,7 +530,7 @@ class MainWindow(QMainWindow):
 
     def _build_project_tree(self) -> QWidget:
         self._project_tree = QTreeWidget()
-        self._project_tree.setHeaderLabel("项目树")
+        self._project_tree.setHeaderLabel("Case 树")
         self._project_tree.itemClicked.connect(self._on_project_tree_item_clicked)
         self._refresh_project_tree()
         return self._project_tree
@@ -617,7 +617,7 @@ class MainWindow(QMainWindow):
             "- VS Code 风格工作台\n"
             "- 基础主题切换\n"
             "- OpenFOAM 环境探测骨架\n"
-            "- 项目树和结果/日志面板占位\n\n"
+            "- Case 树和结果/日志面板占位\n\n"
             "下一步将接入：\n"
             "- 项目新建流程\n"
             "- blockMesh + icoFoam 最小仿真\n"
@@ -1379,19 +1379,33 @@ class MainWindow(QMainWindow):
         self._set_status(status_text)
 
     def _return_to_project_selection(self) -> None:
+        app = QApplication.instance()
+        old_quit_on_close = app.quitOnLastWindowClosed() if app else True
+        if app:
+            app.setQuitOnLastWindowClosed(False)
+        self.setWindowOpacity(0.0)
         self.hide()
         QApplication.processEvents()
         startup_window = StartupWindow(self._context)
         if startup_window.exec() != 1 or startup_window.selected_project is None:
+            self.setWindowOpacity(1.0)
             self.show()
             self.raise_()
             self.activateWindow()
+            if app:
+                app.setQuitOnLastWindowClosed(old_quit_on_close)
             self._set_status("已取消项目选择。")
             return
-        self._activate_project(startup_window.selected_project, "已从项目选择页切换项目。")
-        self.show()
-        self.raise_()
-        self.activateWindow()
+
+        new_window = MainWindow(self._context, initial_project=startup_window.selected_project)
+        if app:
+            app._foamdesk_main_window = new_window
+        new_window.show()
+        new_window.raise_()
+        new_window.activateWindow()
+        self.close()
+        if app:
+            app.setQuitOnLastWindowClosed(old_quit_on_close)
 
     def _restore_project_result_state(self) -> None:
         if self._current_project is None:
