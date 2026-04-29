@@ -1383,27 +1383,28 @@ class MainWindow(QMainWindow):
         old_quit_on_close = app.quitOnLastWindowClosed() if app else True
         if app:
             app.setQuitOnLastWindowClosed(False)
-        self.setWindowOpacity(0.0)
-        self.hide()
+        current_project = self._current_project
+        self.close()
         QApplication.processEvents()
         startup_window = StartupWindow(self._context)
-        if startup_window.exec() != 1 or startup_window.selected_project is None:
-            self.setWindowOpacity(1.0)
-            self.show()
-            self.raise_()
-            self.activateWindow()
+        selected_project = current_project
+        status_text = "已取消项目选择。"
+        if startup_window.exec() == 1 and startup_window.selected_project is not None:
+            selected_project = startup_window.selected_project
+            status_text = "已从项目选择页切换项目。"
+
+        if selected_project is None:
             if app:
                 app.setQuitOnLastWindowClosed(old_quit_on_close)
-            self._set_status("已取消项目选择。")
             return
 
-        new_window = MainWindow(self._context, initial_project=startup_window.selected_project)
+        new_window = MainWindow(self._context, initial_project=selected_project)
         if app:
             app._foamdesk_main_window = new_window
         new_window.show()
         new_window.raise_()
         new_window.activateWindow()
-        self.close()
+        new_window._set_status(status_text)
         if app:
             app.setQuitOnLastWindowClosed(old_quit_on_close)
 
@@ -1443,32 +1444,28 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "_project_tree"):
             return
         self._project_tree.clear()
-        projects = self._context.project_service.list_projects()
-        if not projects:
-            empty_item = QTreeWidgetItem(["暂无项目"])
+        if self._current_project is None:
+            empty_item = QTreeWidgetItem(["未选择项目"])
             empty_item.setDisabled(True)
             self._project_tree.addTopLevelItem(empty_item)
             return
 
-        for project in projects:
-            project_item = QTreeWidgetItem([project.name])
-            project_item.setData(0, Qt.ItemDataRole.UserRole, str(project.path))
-            case_item = QTreeWidgetItem(["case"])
-            case_item.setData(0, Qt.ItemDataRole.UserRole, str(project.path))
-            project_item.addChild(case_item)
-            self._project_tree.addTopLevelItem(project_item)
+        project_item = QTreeWidgetItem([self._current_project.name])
+        project_item.setData(0, Qt.ItemDataRole.UserRole, str(self._current_project.case_dir))
+        case_item = QTreeWidgetItem(["case"])
+        case_item.setData(0, Qt.ItemDataRole.UserRole, str(self._current_project.case_dir))
+        project_item.addChild(case_item)
+        self._project_tree.addTopLevelItem(project_item)
         self._project_tree.expandAll()
 
     def _on_project_tree_item_clicked(self, item: QTreeWidgetItem) -> None:
-        project_path = item.data(0, Qt.ItemDataRole.UserRole)
-        if not project_path:
+        case_path = item.data(0, Qt.ItemDataRole.UserRole)
+        if not case_path or self._current_project is None:
             return
-        try:
-            project = self._context.project_service.open_project(Path(project_path))
-        except ValueError as error:
-            self._show_error(str(error))
-            return
-        self._activate_project(project, "项目已切换。")
+        self._case_label.setText(f"当前 Case: {self._current_project.name}")
+        self._workspace_tabs.setCurrentIndex(0)
+        self._append_log(f"当前 Case 目录：{case_path}")
+        self._set_status("Case 已选中。")
 
     def _search_projects(self) -> None:
         keyword, ok = QInputDialog.getText(self, "搜索项目", "项目名称关键字")
