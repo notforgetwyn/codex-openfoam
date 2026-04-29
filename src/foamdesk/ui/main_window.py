@@ -4,8 +4,11 @@ import shlex
 from pathlib import Path
 
 import numpy as np
+from matplotlib import colormaps
+from matplotlib.colors import Normalize
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtCore import QProcess, QTimer
 from PySide6.QtGui import QFont
@@ -182,7 +185,7 @@ class VtkViewerDialog(QDialog):
         layout.addWidget(self.canvas)
 
     def plot_cube(self) -> None:
-        axes = self._reset_axes("3D 技术验证场景")
+        axes = self._reset_axes("3D Preview")
         corners = np.array(
             [
                 [0, 0, 0],
@@ -231,10 +234,50 @@ class VtkViewerDialog(QDialog):
         axes.scatter(points[:, 0], points[:, 1], points[:, 2], s=6, c="#4fc3ff", alpha=0.85)
         self._finish_axes(axes, points)
 
+    def plot_pressure_surface(self, poly_data, pressure_array, scalar_range: tuple[float, float]) -> int:
+        points = self._points(poly_data)
+        faces = self._faces(poly_data)
+        pressure = vtk_to_numpy(pressure_array)
+        axes = self._reset_axes("Pressure Surface")
+        if points.size == 0 or faces.size == 0 or pressure.size == 0:
+            axes.text2D(0.08, 0.5, "No surface data to display.", color="#d4d4d4")
+            self._show()
+            return 0
+
+        faces = self._sample_faces(faces)
+        face_values = np.array(
+            [pressure[np.asarray(face, dtype=int)].mean() for face in faces],
+            dtype=float,
+        )
+        polygons = [points[np.asarray(face, dtype=int)] for face in faces]
+        normalizer = Normalize(vmin=scalar_range[0], vmax=scalar_range[1])
+        cmap = colormaps["turbo"]
+        collection = Poly3DCollection(
+            polygons,
+            facecolors=cmap(normalizer(face_values)),
+            edgecolors=(0.18, 0.18, 0.18, 0.35),
+            linewidths=0.35,
+            alpha=0.96,
+        )
+        axes.add_collection3d(collection)
+        scalar_mappable = colormaps["turbo"]
+        colorbar = self.figure.colorbar(
+            self._scalar_mappable(scalar_range, scalar_mappable),
+            ax=axes,
+            shrink=0.72,
+            pad=0.08,
+        )
+        colorbar.set_label("p", color="#d4d4d4")
+        colorbar.ax.yaxis.set_tick_params(color="#d4d4d4")
+        for label in colorbar.ax.get_yticklabels():
+            label.set_color("#d4d4d4")
+        self._finish_axes(axes, points)
+        return len(faces)
+
     def plot_pressure_points(self, poly_data, pressure_array, scalar_range: tuple[float, float]) -> None:
         points = self._points(poly_data)
         pressure = vtk_to_numpy(pressure_array)
-        axes = self._reset_axes("压力 p 云图")
+        axes = self._reset_axes("Pressure Point Cloud")
         if points.size == 0 or pressure.size == 0:
             axes.text2D(0.08, 0.5, "当前 case 没有可显示压力点数据。", color="#d4d4d4")
             self._show()
@@ -295,6 +338,34 @@ class VtkViewerDialog(QDialog):
         if vtk_points is None:
             return np.empty((0, 3), dtype=float)
         return vtk_to_numpy(vtk_points.GetData())
+
+    def _faces(self, poly_data) -> np.ndarray:
+        polygons = poly_data.GetPolys()
+        if polygons is None:
+            return np.empty((0,), dtype=object)
+        raw = vtk_to_numpy(polygons.GetData())
+        faces: list[np.ndarray] = []
+        index = 0
+        while index < len(raw):
+            count = int(raw[index])
+            index += 1
+            if count >= 3:
+                faces.append(raw[index : index + count].astype(int))
+            index += count
+        return np.array(faces, dtype=object)
+
+    def _sample_faces(self, faces: np.ndarray, limit: int = 8000) -> np.ndarray:
+        if len(faces) <= limit:
+            return faces
+        indices = np.linspace(0, len(faces) - 1, limit, dtype=int)
+        return faces[indices]
+
+    def _scalar_mappable(self, scalar_range: tuple[float, float], cmap):
+        from matplotlib.cm import ScalarMappable
+
+        mappable = ScalarMappable(norm=Normalize(vmin=scalar_range[0], vmax=scalar_range[1]), cmap=cmap)
+        mappable.set_array([])
+        return mappable
 
     def _sample_points(
         self,
@@ -704,12 +775,14 @@ class MainWindow(QMainWindow):
         show_3d_button = QPushButton("加载 3D 技术验证场景")
         load_openfoam_3d_button = QPushButton("加载真实 OpenFOAM 3D Case")
         load_pressure_cloud_button = QPushButton("加载压力云图")
+        load_pressure_surface_button = QPushButton("加载压力表面云图")
         refresh_button.clicked.connect(lambda _checked=False: self._refresh_results_panel())
         export_metrics_button.clicked.connect(lambda _checked=False: self._export_solver_metrics())
         plot_residual_button.clicked.connect(lambda _checked=False: self._plot_residual_curve())
         show_3d_button.clicked.connect(lambda _checked=False: self._load_3d_preview_scene())
         load_openfoam_3d_button.clicked.connect(lambda _checked=False: self._load_openfoam_3d_case())
         load_pressure_cloud_button.clicked.connect(lambda _checked=False: self._load_pressure_cloud())
+        load_pressure_surface_button.clicked.connect(lambda _checked=False: self._load_pressure_surface_cloud())
         button_row = QHBoxLayout()
         button_row.addWidget(refresh_button)
         button_row.addWidget(export_metrics_button)
@@ -717,6 +790,7 @@ class MainWindow(QMainWindow):
         button_row.addWidget(show_3d_button)
         button_row.addWidget(load_openfoam_3d_button)
         button_row.addWidget(load_pressure_cloud_button)
+        button_row.addWidget(load_pressure_surface_button)
         button_row.addStretch(1)
         self._results_text = QTextEdit()
         self._results_text.setReadOnly(True)
@@ -1086,6 +1160,51 @@ class MainWindow(QMainWindow):
             "如果画面几乎是单色，通常表示当前最小算例的压力场变化很小或为常量。",
         )
         self._set_status("压力云图已加载。")
+
+    def _load_pressure_surface_cloud(self) -> None:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return
+        self._ensure_vtk_viewer()
+
+        self._show_visualization_feedback(
+            "正在加载压力表面云图",
+            f"当前项目：{self._current_project.name}\n目标字段：p\nCase 路径：{self._current_project.case_dir}",
+        )
+        try:
+            case_info = self._context.openfoam_vtk_service.inspect(self._current_project)
+            geometry = self._context.openfoam_vtk_service.build_geometry_filter(self._current_project)
+        except (OSError, RuntimeError) as error:
+            self._show_error(f"加载压力表面云图失败：{error}")
+            return
+
+        output = geometry.GetOutput()
+        point_pressure = output.GetPointData().GetArray("p")
+        if point_pressure is None:
+            self._show_error(
+                "当前稳定表面云图 v1 需要点字段 p。"
+                f"可用点字段：{case_info.point_arrays}；可用单元字段：{case_info.cell_arrays}"
+            )
+            return
+
+        scalar_range = point_pressure.GetRange()
+        if scalar_range[0] == scalar_range[1]:
+            scalar_range = (scalar_range[0] - 1.0, scalar_range[1] + 1.0)
+        face_count = self._vtk_viewer.plot_pressure_surface(output, point_pressure, scalar_range)
+        self._append_log(
+            "压力表面云图已加载："
+            f"faces={face_count}, pRange=({scalar_range[0]:.6g}, {scalar_range[1]:.6g}), "
+            f"times={case_info.time_values}"
+        )
+        self._show_visualization_feedback(
+            "压力表面云图已加载",
+            "独立 3D 视图窗口显示外表面面片，并按字段 p 进行连续表面着色。\n"
+            f"面片数量：{face_count}\n"
+            f"pRange：({scalar_range[0]:.6g}, {scalar_range[1]:.6g})\n"
+            f"时间步：{case_info.time_values}\n"
+            "当前最小方盒子算例压力接近常量，所以颜色变化可能仍然不明显。",
+        )
+        self._set_status("压力表面云图已加载。")
 
     def _show_visualization_feedback(self, title: str, detail: str) -> None:
         self._workspace_tabs.setCurrentIndex(5)
