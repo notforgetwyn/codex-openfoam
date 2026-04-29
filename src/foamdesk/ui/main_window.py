@@ -450,6 +450,7 @@ class MainWindow(QMainWindow):
         project_menu.addAction("搜索项目", self._search_projects)
 
         case_menu = menu_bar.addMenu("Case")
+        case_menu.addAction("新增 Case", self._create_case)
         case_menu.addAction("打开当前 Case 目录", self._show_current_case_path)
 
         solver_menu = menu_bar.addMenu("求解器")
@@ -1370,13 +1371,28 @@ class MainWindow(QMainWindow):
         self._context.project_service.remember_project(project)
         self._refresh_project_tree()
         self._workspace_tabs.setCurrentIndex(0)
-        self._case_label.setText(f"当前 Case: {project.name}")
+        self._case_label.setText(f"当前 Case: {project.name}/{project.case_name}")
         self._load_case_parameters()
         self._refresh_solver_run_panel()
         self._refresh_results_panel()
         self._restore_project_result_state()
         self._append_log(f"当前项目：{project.path}")
         self._set_status(status_text)
+
+    def _create_case(self) -> None:
+        if self._current_project is None:
+            self._show_error("请先选择项目。")
+            return
+        name, ok = QInputDialog.getText(self, "新增 Case", "Case 名称")
+        if not ok:
+            return
+        try:
+            project = self._context.project_service.create_case(self._current_project, name)
+        except ValueError as error:
+            self._show_error(str(error))
+            return
+        self._activate_project(project, "Case 创建完成。")
+        self._append_log(f"已创建 Case：{project.case_dir}")
 
     def _return_to_project_selection(self) -> None:
         app = QApplication.instance()
@@ -1451,21 +1467,27 @@ class MainWindow(QMainWindow):
             return
 
         project_item = QTreeWidgetItem([self._current_project.name])
-        project_item.setData(0, Qt.ItemDataRole.UserRole, str(self._current_project.case_dir))
-        case_item = QTreeWidgetItem(["case"])
-        case_item.setData(0, Qt.ItemDataRole.UserRole, str(self._current_project.case_dir))
-        project_item.addChild(case_item)
+        project_item.setData(0, Qt.ItemDataRole.UserRole, "")
+        for case_name in self._context.project_service.list_cases(self._current_project):
+            case_item = QTreeWidgetItem([case_name])
+            case_item.setData(0, Qt.ItemDataRole.UserRole, case_name)
+            if case_name == self._current_project.case_name:
+                case_item.setText(0, f"{case_name}  ✓")
+            project_item.addChild(case_item)
         self._project_tree.addTopLevelItem(project_item)
         self._project_tree.expandAll()
 
     def _on_project_tree_item_clicked(self, item: QTreeWidgetItem) -> None:
-        case_path = item.data(0, Qt.ItemDataRole.UserRole)
-        if not case_path or self._current_project is None:
+        case_name = item.data(0, Qt.ItemDataRole.UserRole)
+        if not case_name or self._current_project is None:
             return
-        self._case_label.setText(f"当前 Case: {self._current_project.name}")
-        self._workspace_tabs.setCurrentIndex(0)
-        self._append_log(f"当前 Case 目录：{case_path}")
-        self._set_status("Case 已选中。")
+        try:
+            project = self._context.project_service.switch_case(self._current_project, str(case_name))
+        except ValueError as error:
+            self._show_error(str(error))
+            return
+        self._activate_project(project, "Case 已切换。")
+        self._append_log(f"当前 Case 目录：{project.case_dir}")
 
     def _search_projects(self) -> None:
         keyword, ok = QInputDialog.getText(self, "搜索项目", "项目名称关键字")

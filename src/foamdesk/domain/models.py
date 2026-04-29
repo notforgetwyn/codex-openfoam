@@ -30,6 +30,7 @@ class SimulationProject:
     name: str
     path: Path
     case_dir: Path
+    case_name: str = "case"
 
 
 @dataclass(slots=True)

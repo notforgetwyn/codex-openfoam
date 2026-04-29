@@ -54,6 +54,24 @@ def test_project_service_remembers_last_project(tmp_path: Path) -> None:
     assert service.open_last_project() == project
 
 
+def test_project_service_creates_and_switches_cases(tmp_path: Path) -> None:
+    service = ProjectService(AppSettingsService(tmp_path))
+    project = service.create_project("demo")
+
+    new_case_project = service.create_case(project, "case_2")
+
+    assert new_case_project.name == "demo"
+    assert new_case_project.case_name == "case_2"
+    assert new_case_project.case_dir == project.path / "case_2"
+    assert (new_case_project.case_dir / "system" / "controlDict").exists()
+    assert service.list_cases(project) == ["case", "case_2"]
+
+    switched_project = service.switch_case(project, "case_2")
+
+    assert switched_project.case_name == "case_2"
+    assert switched_project.case_dir == project.path / "case_2"
+
+
 def test_project_service_ignores_missing_last_project(tmp_path: Path) -> None:
     settings_service = AppSettingsService(tmp_path)
     service = ProjectService(settings_service)

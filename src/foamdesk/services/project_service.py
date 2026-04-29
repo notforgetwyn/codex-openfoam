@@ -64,7 +64,47 @@ class ProjectService:
         case_dir = project_dir / str(payload.get("case_dir", "case"))
         if not case_dir.exists():
             raise ValueError("项目 case 目录不存在。")
-        return SimulationProject(name=name, path=project_dir, case_dir=case_dir)
+        return SimulationProject(name=name, path=project_dir, case_dir=case_dir, case_name=case_dir.name)
+
+    def list_cases(self, project: SimulationProject) -> list[str]:
+        case_names: list[str] = []
+        for path in sorted(project.path.iterdir()):
+            if path.is_dir() and (path / "system").exists() and (path / "constant").exists():
+                case_names.append(path.name)
+        return case_names
+
+    def create_case(self, project: SimulationProject, name: str) -> SimulationProject:
+        clean_name = self._normalize_project_name(name)
+        case_dir = project.path / clean_name
+        if case_dir.exists():
+            raise ValueError(f"Case 已存在：{clean_name}")
+        for path in (
+            case_dir / "0",
+            case_dir / "constant",
+            case_dir / "system",
+        ):
+            path.mkdir(parents=True, exist_ok=True)
+        self._write_minimal_case_template(case_dir, overwrite=True)
+        return SimulationProject(
+            name=project.name,
+            path=project.path,
+            case_dir=case_dir,
+            case_name=clean_name,
+        )
+
+    def switch_case(self, project: SimulationProject, case_name: str) -> SimulationProject:
+        clean_name = self._normalize_project_name(case_name)
+        case_dir = project.path / clean_name
+        if not case_dir.exists():
+            raise ValueError(f"Case 不存在：{clean_name}")
+        if not (case_dir / "system").exists() or not (case_dir / "constant").exists():
+            raise ValueError(f"所选目录不是有效 Case：{clean_name}")
+        return SimulationProject(
+            name=project.name,
+            path=project.path,
+            case_dir=case_dir,
+            case_name=clean_name,
+        )
 
     def remember_project(self, project: SimulationProject) -> None:
         settings = self._settings_service.load()
