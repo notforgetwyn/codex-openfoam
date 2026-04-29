@@ -47,6 +47,7 @@ from vtkmodules.util.numpy_support import vtk_to_numpy
 
 from foamdesk.app.bootstrap import ApplicationContext
 from foamdesk.domain.models import SimulationParameters, SimulationProject
+from foamdesk.ui.startup_window import StartupWindow
 from foamdesk.ui.theme import THEMES, build_stylesheet
 
 
@@ -439,11 +440,13 @@ class MainWindow(QMainWindow):
         file_menu = menu_bar.addMenu("文件")
         file_menu.addAction("新建项目", self._create_project)
         file_menu.addAction("打开项目", self._open_project)
+        file_menu.addAction("返回项目选择", self._return_to_project_selection)
         file_menu.addAction("保存设置", self._save_current_state)
         file_menu.addSeparator()
         file_menu.addAction("退出", self.close)
 
         project_menu = menu_bar.addMenu("项目")
+        project_menu.addAction("返回项目选择", self._return_to_project_selection)
         project_menu.addAction("刷新项目树", self._refresh_project_tree)
         project_menu.addAction("搜索项目", self._search_projects)
 
@@ -471,6 +474,7 @@ class MainWindow(QMainWindow):
         toolbar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         toolbar.addAction("新建项目", self._create_project)
         toolbar.addAction("打开", self._open_project)
+        toolbar.addAction("项目选择", self._return_to_project_selection)
         toolbar.addAction("保存", self._save_current_state)
         toolbar.addSeparator()
         toolbar.addAction("运行", self._run_minimal_simulation)
@@ -1364,8 +1368,48 @@ class MainWindow(QMainWindow):
         self._load_case_parameters()
         self._refresh_solver_run_panel()
         self._refresh_results_panel()
+        self._restore_project_result_state()
         self._append_log(f"当前项目：{project.path}")
         self._set_status(status_text)
+
+    def _return_to_project_selection(self) -> None:
+        startup_window = StartupWindow(self._context)
+        if startup_window.exec() != 1 or startup_window.selected_project is None:
+            self._set_status("已取消项目选择。")
+            return
+        self._activate_project(startup_window.selected_project, "已从项目选择页切换项目。")
+
+    def _restore_project_result_state(self) -> None:
+        if self._current_project is None:
+            return
+        try:
+            result_index = self._context.result_index_service.index(self._current_project)
+        except OSError:
+            return
+
+        residuals_csv = self._current_project.path / "results" / "residuals.csv"
+        metrics_json = self._current_project.path / "results" / "metrics.json"
+        if result_index.latest_time is None and not residuals_csv.exists():
+            self._task_text.setPlainText("任务状态：当前项目暂无求解结果")
+            self._refresh_solver_run_panel("暂无求解结果")
+            return
+
+        lines = [
+            "任务状态：已加载项目已有结果",
+            f"最新时间步：{result_index.latest_time or '无'}",
+            f"网格目录：{'已生成' if result_index.has_mesh else '未生成'}",
+            f"残差 CSV：{'已存在' if residuals_csv.exists() else '未生成'}",
+            f"指标 JSON：{'已存在' if metrics_json.exists() else '未生成'}",
+            "",
+            "说明：打开项目只读取已有文件，不会自动重新求解；只有点击“运行”才会重新执行 OpenFOAM。",
+        ]
+        self._task_text.setPlainText("\n".join(lines))
+        self._refresh_solver_run_panel("已加载已有结果")
+        if residuals_csv.exists():
+            try:
+                self._plot_residual_curve()
+            except (OSError, ValueError):
+                pass
 
     def _refresh_project_tree(self) -> None:
         if not hasattr(self, "_project_tree"):
