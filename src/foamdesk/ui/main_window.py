@@ -409,10 +409,9 @@ class MainWindow(QMainWindow):
         self._build_status_bar()
 
         workbench = QSplitter(Qt.Orientation.Horizontal)
-        workbench.addWidget(self._build_activity_bar())
         workbench.addWidget(self._build_sidebar())
         workbench.addWidget(self._build_editor_panel())
-        workbench.setSizes([72, 300, 1028])
+        workbench.setSizes([300, 1100])
         workbench.setChildrenCollapsible(False)
 
         shell = QWidget()
@@ -422,7 +421,6 @@ class MainWindow(QMainWindow):
         shell_layout.setSpacing(0)
         shell_layout.addWidget(WindowTitleBar(self))
         shell_layout.addWidget(self._build_menu_bar())
-        shell_layout.addWidget(self._build_toolbar())
         shell_layout.addWidget(workbench, 1)
         self._tutorial_overlay = TutorialOverlay(shell)
         self.setCentralWidget(shell)
