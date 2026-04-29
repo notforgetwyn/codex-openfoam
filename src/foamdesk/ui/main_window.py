@@ -1373,11 +1373,18 @@ class MainWindow(QMainWindow):
         self._set_status(status_text)
 
     def _return_to_project_selection(self) -> None:
+        self.hide()
         startup_window = StartupWindow(self._context)
         if startup_window.exec() != 1 or startup_window.selected_project is None:
+            self.show()
+            self.raise_()
+            self.activateWindow()
             self._set_status("已取消项目选择。")
             return
         self._activate_project(startup_window.selected_project, "已从项目选择页切换项目。")
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
     def _restore_project_result_state(self) -> None:
         if self._current_project is None:
