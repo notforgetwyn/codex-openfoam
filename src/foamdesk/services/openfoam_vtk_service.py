@@ -33,14 +33,23 @@ class OpenFoamVtkService:
             cell_arrays=self._array_names(poly_data.GetCellData()),
         )
 
-    def build_geometry_filter(self, project: SimulationProject) -> vtkCompositeDataGeometryFilter:
+    def build_geometry_filter(
+        self,
+        project: SimulationProject,
+        time_value: float | None = None,
+    ) -> vtkCompositeDataGeometryFilter:
         marker_file = self.ensure_marker_file(project)
         reader = self._build_reader(marker_file)
         reader.UpdateInformation()
         self._enable_all_arrays(reader)
+        if time_value is not None:
+            reader.SetTimeValue(time_value)
         geometry = vtkCompositeDataGeometryFilter()
         geometry.SetInputConnection(reader.GetOutputPort())
-        geometry.Update()
+        if time_value is not None:
+            geometry.UpdateTimeStep(time_value)
+        else:
+            geometry.Update()
         return geometry
 
     def ensure_marker_file(self, project: SimulationProject) -> Path:

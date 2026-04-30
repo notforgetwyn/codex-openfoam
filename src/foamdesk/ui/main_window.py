@@ -1287,6 +1287,7 @@ class MainWindow(QMainWindow):
             return
         self._ensure_vtk_viewer()
         selected_time = self._visual_time_combo.currentText().strip() or "默认"
+        time_value = self._selected_visualization_time()
 
         self._show_visualization_feedback(
             "正在加载所选字段表面图",
@@ -1294,7 +1295,10 @@ class MainWindow(QMainWindow):
         )
         try:
             case_info = self._context.openfoam_vtk_service.inspect(self._current_project)
-            geometry = self._context.openfoam_vtk_service.build_geometry_filter(self._current_project)
+            geometry = self._context.openfoam_vtk_service.build_geometry_filter(
+                self._current_project,
+                time_value=time_value,
+            )
         except (OSError, RuntimeError) as error:
             self._show_error(f"加载所选字段表面图失败：{error}")
             return
@@ -1333,9 +1337,20 @@ class MainWindow(QMainWindow):
             f"时间步：{selected_time}\n"
             f"面片数量：{face_count}\n"
             f"范围：({scalar_range[0]:.6g}, {scalar_range[1]:.6g})\n"
-            "说明：当前版本已提供时间步选择控件，但 VTK Reader 时间步切换将在下一小步接入。",
+            "说明：当前图像已按所选时间步请求 VTK Reader 读取。",
         )
         self._set_status("所选字段表面图已加载。")
+
+    def _selected_visualization_time(self) -> float | None:
+        if not hasattr(self, "_visual_time_combo"):
+            return None
+        text = self._visual_time_combo.currentText().strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
 
     def _show_visualization_feedback(self, title: str, detail: str) -> None:
         self._workspace_tabs.setCurrentIndex(5)

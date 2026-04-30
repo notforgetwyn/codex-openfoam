@@ -34,3 +34,13 @@ def test_openfoam_vtk_service_reads_vtk_array_names() -> None:
 
     assert service._array_names(poly_data.GetPointData()) == ["p"]
     assert service._array_names(poly_data.GetCellData()) == ["U"]
+
+
+def test_openfoam_vtk_service_builds_geometry_filter_with_time_value(tmp_path: Path) -> None:
+    project = ProjectService(AppSettingsService(tmp_path)).create_project("demo")
+    service = OpenFoamVtkService()
+
+    geometry = service.build_geometry_filter(project, time_value=0.0)
+
+    assert geometry is not None
+    assert service.ensure_marker_file(project).exists()
