@@ -410,6 +410,8 @@ class MainWindow(QMainWindow):
         self._last_diagnostic_summary = "暂无诊断。"
         self._tutorial_overlay: TutorialOverlay | None = None
         self._vtk_viewer: VtkViewerDialog | None = None
+        self._visual_animation_timer = QTimer(self)
+        self._visual_animation_timer.timeout.connect(self._advance_visualization_frame)
         self.setWindowTitle("FoamDesk")
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.resize(1400, 900)
@@ -802,6 +804,10 @@ class MainWindow(QMainWindow):
         load_pressure_surface_button = QPushButton("加载压力表面云图")
         refresh_visual_fields_button = QPushButton("刷新可视化字段")
         load_selected_surface_button = QPushButton("加载所选字段表面图")
+        play_visual_animation_button = QPushButton("播放动画")
+        stop_visual_animation_button = QPushButton("暂停动画")
+        previous_frame_button = QPushButton("上一帧")
+        next_frame_button = QPushButton("下一帧")
         refresh_button.clicked.connect(lambda _checked=False: self._refresh_results_panel())
         export_metrics_button.clicked.connect(lambda _checked=False: self._export_solver_metrics())
         plot_residual_button.clicked.connect(lambda _checked=False: self._plot_residual_curve())
@@ -811,6 +817,10 @@ class MainWindow(QMainWindow):
         load_pressure_surface_button.clicked.connect(lambda _checked=False: self._load_pressure_surface_cloud())
         refresh_visual_fields_button.clicked.connect(lambda _checked=False: self._refresh_visualization_selectors())
         load_selected_surface_button.clicked.connect(lambda _checked=False: self._load_selected_field_surface())
+        play_visual_animation_button.clicked.connect(lambda _checked=False: self._play_visualization_animation())
+        stop_visual_animation_button.clicked.connect(lambda _checked=False: self._stop_visualization_animation())
+        previous_frame_button.clicked.connect(lambda _checked=False: self._step_visualization_frame(-1))
+        next_frame_button.clicked.connect(lambda _checked=False: self._step_visualization_frame(1))
         button_row = QHBoxLayout()
         button_row.addWidget(refresh_button)
         button_row.addWidget(export_metrics_button)
@@ -823,6 +833,10 @@ class MainWindow(QMainWindow):
         selector_row = QHBoxLayout()
         self._visual_field_combo = QComboBox()
         self._visual_time_combo = QComboBox()
+        self._visual_frame_interval_input = QSpinBox()
+        self._visual_frame_interval_input.setRange(100, 5000)
+        self._visual_frame_interval_input.setValue(800)
+        self._visual_frame_interval_input.setSuffix(" ms")
         self._visual_field_combo.setMinimumWidth(160)
         self._visual_time_combo.setMinimumWidth(160)
         selector_row.addWidget(QLabel("字段"))
@@ -831,6 +845,12 @@ class MainWindow(QMainWindow):
         selector_row.addWidget(self._visual_time_combo)
         selector_row.addWidget(refresh_visual_fields_button)
         selector_row.addWidget(load_selected_surface_button)
+        selector_row.addWidget(previous_frame_button)
+        selector_row.addWidget(next_frame_button)
+        selector_row.addWidget(QLabel("帧间隔"))
+        selector_row.addWidget(self._visual_frame_interval_input)
+        selector_row.addWidget(play_visual_animation_button)
+        selector_row.addWidget(stop_visual_animation_button)
         selector_row.addStretch(1)
         self._results_text = QTextEdit()
         self._results_text.setReadOnly(True)
@@ -1285,7 +1305,6 @@ class MainWindow(QMainWindow):
         if not field_name:
             self._show_error("请先刷新并选择可视化字段。")
             return
-        self._ensure_vtk_viewer()
         selected_time = self._visual_time_combo.currentText().strip() or "默认"
         time_value = self._selected_visualization_time()
 
@@ -1293,6 +1312,18 @@ class MainWindow(QMainWindow):
             "正在加载所选字段表面图",
             f"字段：{field_name}\n时间步：{selected_time}\nCase 路径：{self._current_project.case_dir}",
         )
+        if not self._render_selected_field_surface(field_name, time_value, selected_time):
+            return
+
+    def _render_selected_field_surface(
+        self,
+        field_name: str,
+        time_value: float | None,
+        selected_time: str,
+    ) -> bool:
+        if self._current_project is None:
+            return False
+        self._ensure_vtk_viewer()
         try:
             case_info = self._context.openfoam_vtk_service.inspect(self._current_project)
             geometry = self._context.openfoam_vtk_service.build_geometry_filter(
@@ -1310,12 +1341,12 @@ class MainWindow(QMainWindow):
                 f"当前稳定表面图 v1 需要点字段 {field_name}。"
                 f"可用点字段：{case_info.point_arrays}；可用单元字段：{case_info.cell_arrays}"
             )
-            return
+            return False
 
         values = self._vtk_viewer._scalar_values(field_array)
         if values.size == 0:
             self._show_error(f"字段 {field_name} 没有可显示数据。")
-            return
+            return False
         scalar_range = (float(values.min()), float(values.max()))
         if scalar_range[0] == scalar_range[1]:
             scalar_range = (scalar_range[0] - 1.0, scalar_range[1] + 1.0)
@@ -1340,6 +1371,51 @@ class MainWindow(QMainWindow):
             "说明：当前图像已按所选时间步请求 VTK Reader 读取。",
         )
         self._set_status("所选字段表面图已加载。")
+        return True
+
+    def _play_visualization_animation(self) -> None:
+        if not hasattr(self, "_visual_time_combo") or self._visual_time_combo.count() == 0:
+            self._show_error("请先刷新可视化字段和时间步。")
+            return
+        if not self._visual_field_combo.currentText().strip():
+            self._show_error("请先选择字段。")
+            return
+        self._visual_animation_timer.start(self._visual_frame_interval_input.value())
+        self._append_log("时间步动画已开始播放。")
+        self._set_status("时间步动画播放中。")
+
+    def _stop_visualization_animation(self) -> None:
+        self._visual_animation_timer.stop()
+        self._append_log("时间步动画已暂停。")
+        self._set_status("时间步动画已暂停。")
+
+    def _advance_visualization_frame(self) -> None:
+        self._step_visualization_frame(1)
+
+    def _step_visualization_frame(self, step: int) -> None:
+        if not hasattr(self, "_visual_time_combo") or self._visual_time_combo.count() == 0:
+            self._show_error("请先刷新可视化字段和时间步。")
+            return
+        current_index = self._visual_time_combo.currentIndex()
+        next_index = (current_index + step) % self._visual_time_combo.count()
+        self._visual_time_combo.setCurrentIndex(next_index)
+        field_name = self._visual_field_combo.currentText().strip()
+        selected_time = self._visual_time_combo.currentText().strip()
+        if not field_name:
+            self._show_error("请先选择字段。")
+            return
+        self._show_visualization_feedback(
+            "正在播放时间步动画",
+            f"字段：{field_name}\n当前时间步：{selected_time}\n"
+            f"帧：{next_index + 1}/{self._visual_time_combo.count()}",
+        )
+        ok = self._render_selected_field_surface(
+            field_name,
+            self._selected_visualization_time(),
+            selected_time,
+        )
+        if not ok:
+            self._visual_animation_timer.stop()
 
     def _selected_visualization_time(self) -> float | None:
         if not hasattr(self, "_visual_time_combo"):
