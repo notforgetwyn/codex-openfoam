@@ -1040,32 +1040,53 @@ class MainWindow(QMainWindow):
         title.setStyleSheet("font-size: 22px; font-weight: 600;")
         description = QLabel("当前阶段先索引 OpenFOAM 运行产物，后续再接入曲线和云图。")
         description.setWordWrap(True)
-        refresh_button = QPushButton("刷新结果索引")
-        export_metrics_button = QPushButton("导出求解指标")
-        plot_residual_button = QPushButton("绘制残差曲线")
-        show_3d_button = QPushButton("加载 3D 技术验证场景")
-        load_openfoam_3d_button = QPushButton("加载真实 OpenFOAM 3D Case")
-        load_pressure_cloud_button = QPushButton("加载压力云图")
-        load_pressure_surface_button = QPushButton("加载压力表面云图")
-        load_velocity_vectors_button = QPushButton("加载速度箭头")
-        load_velocity_slice_button = QPushButton("加载速度切面")
-        load_velocity_streamlines_button = QPushButton("加载速度流线")
         refresh_visual_fields_button = QPushButton("刷新可视化字段")
         load_selected_surface_button = QPushButton("加载所选字段表面图")
         play_visual_animation_button = QPushButton("播放动画")
         stop_visual_animation_button = QPushButton("暂停动画")
         previous_frame_button = QPushButton("上一帧")
         next_frame_button = QPushButton("下一帧")
-        refresh_button.clicked.connect(lambda _checked=False: self._refresh_results_panel())
-        export_metrics_button.clicked.connect(lambda _checked=False: self._export_solver_metrics())
-        plot_residual_button.clicked.connect(lambda _checked=False: self._plot_residual_curve())
-        show_3d_button.clicked.connect(lambda _checked=False: self._load_3d_preview_scene())
-        load_openfoam_3d_button.clicked.connect(lambda _checked=False: self._load_openfoam_3d_case())
-        load_pressure_cloud_button.clicked.connect(lambda _checked=False: self._load_pressure_cloud())
-        load_pressure_surface_button.clicked.connect(lambda _checked=False: self._load_pressure_surface_cloud())
-        load_velocity_vectors_button.clicked.connect(lambda _checked=False: self._load_velocity_vectors())
-        load_velocity_slice_button.clicked.connect(lambda _checked=False: self._load_velocity_slice())
-        load_velocity_streamlines_button.clicked.connect(lambda _checked=False: self._load_velocity_streamlines())
+
+        def make_menu_button(title: str, actions: list[tuple[str, object]]) -> QPushButton:
+            button = QPushButton(title)
+            menu = QMenu(button)
+            for label, callback in actions:
+                action = menu.addAction(label)
+                action.triggered.connect(lambda _checked=False, callback=callback: callback())
+            button.setMenu(menu)
+            return button
+
+        result_data_button = make_menu_button(
+            "结果数据",
+            [
+                ("刷新结果索引", self._refresh_results_panel),
+                ("导出求解指标", self._export_solver_metrics),
+                ("绘制残差曲线", self._plot_residual_curve),
+            ],
+        )
+        three_d_button = make_menu_button(
+            "3D 视图",
+            [
+                ("加载 3D 技术验证场景", self._load_3d_preview_scene),
+                ("加载真实 OpenFOAM 3D Case", self._load_openfoam_3d_case),
+            ],
+        )
+        contour_button = make_menu_button(
+            "云图",
+            [
+                ("加载压力云图", self._load_pressure_cloud),
+                ("加载压力表面云图", self._load_pressure_surface_cloud),
+                ("加载所选字段表面图", self._load_selected_field_surface),
+            ],
+        )
+        velocity_button = make_menu_button(
+            "速度场",
+            [
+                ("加载速度箭头", self._load_velocity_vectors),
+                ("加载速度切面", self._load_velocity_slice),
+                ("加载速度流线", self._load_velocity_streamlines),
+            ],
+        )
         refresh_visual_fields_button.clicked.connect(lambda _checked=False: self._refresh_visualization_selectors())
         load_selected_surface_button.clicked.connect(lambda _checked=False: self._load_selected_field_surface())
         play_visual_animation_button.clicked.connect(lambda _checked=False: self._play_visualization_animation())
@@ -1073,16 +1094,10 @@ class MainWindow(QMainWindow):
         previous_frame_button.clicked.connect(lambda _checked=False: self._step_visualization_frame(-1))
         next_frame_button.clicked.connect(lambda _checked=False: self._step_visualization_frame(1))
         button_row = QHBoxLayout()
-        button_row.addWidget(refresh_button)
-        button_row.addWidget(export_metrics_button)
-        button_row.addWidget(plot_residual_button)
-        button_row.addWidget(show_3d_button)
-        button_row.addWidget(load_openfoam_3d_button)
-        button_row.addWidget(load_pressure_cloud_button)
-        button_row.addWidget(load_pressure_surface_button)
-        button_row.addWidget(load_velocity_vectors_button)
-        button_row.addWidget(load_velocity_slice_button)
-        button_row.addWidget(load_velocity_streamlines_button)
+        button_row.addWidget(result_data_button)
+        button_row.addWidget(three_d_button)
+        button_row.addWidget(contour_button)
+        button_row.addWidget(velocity_button)
         button_row.addStretch(1)
         selector_row = QHBoxLayout()
         self._visual_field_combo = QComboBox()
