@@ -403,6 +403,99 @@ class VtkViewerDialog(QDialog):
         self._finish_axes(axes, points)
         return len(slice_points), axis_name, center, speed_range
 
+    def plot_velocity_streamlines(
+        self,
+        poly_data,
+        vector_array,
+        seed_limit: int = 18,
+        step_limit: int = 90,
+    ) -> tuple[int, int, str, tuple[float, float]]:
+        points = self._points(poly_data)
+        vectors = vtk_to_numpy(vector_array)
+        axes = self._reset_axes("Velocity Streamlines |U|")
+        if points.size == 0 or vectors.size == 0 or vectors.ndim != 2 or vectors.shape[1] < 3:
+            axes.text2D(0.08, 0.5, "No velocity streamline data to display.", color="#d4d4d4")
+            self._show()
+            return 0, 0, "X", (0.0, 0.0)
+
+        count = min(len(points), len(vectors))
+        points = points[:count]
+        vectors = vectors[:count, :3]
+        speeds = np.linalg.norm(vectors, axis=1)
+        usable = speeds > 1e-12
+        if not np.any(usable):
+            axes.text2D(0.08, 0.5, "Velocity field is zero everywhere.", color="#d4d4d4")
+            self._show()
+            return 0, 0, "X", (0.0, 0.0)
+
+        mean_vector = vectors[usable].mean(axis=0)
+        axis = int(np.argmax(np.abs(mean_vector)))
+        axis_name = "XYZ"[axis]
+        bounds_min = points.min(axis=0)
+        bounds_max = points.max(axis=0)
+        domain_size = max(float((bounds_max - bounds_min).max()), 1e-9)
+        step_length = domain_size * 0.025
+        direction_sign = 1.0 if mean_vector[axis] >= 0 else -1.0
+        seed_plane = bounds_min[axis] if direction_sign >= 0 else bounds_max[axis]
+        plane_tolerance = max(float(bounds_max[axis] - bounds_min[axis]) * 0.08, 1e-9)
+        seed_mask = np.abs(points[:, axis] - seed_plane) <= plane_tolerance
+        seed_points = points[seed_mask & usable]
+        if len(seed_points) == 0:
+            seed_indices = np.argsort(np.abs(points[:, axis] - seed_plane))[:seed_limit]
+            seed_points = points[seed_indices]
+        if len(seed_points) > seed_limit:
+            indices = np.linspace(0, len(seed_points) - 1, seed_limit, dtype=int)
+            seed_points = seed_points[indices]
+
+        cmap = colormaps["turbo"]
+        normalizer = Normalize(vmin=float(speeds[usable].min()), vmax=float(speeds[usable].max()))
+        line_count = 0
+        total_line_points = 0
+        for seed in seed_points:
+            line = [seed.astype(float)]
+            current = seed.astype(float).copy()
+            line_speeds: list[float] = []
+            for _ in range(step_limit):
+                distances = np.linalg.norm(points - current, axis=1)
+                nearest = int(np.argmin(distances))
+                velocity = vectors[nearest]
+                speed = float(np.linalg.norm(velocity))
+                if speed <= 1e-12:
+                    break
+                line_speeds.append(speed)
+                current = current + (velocity / speed) * step_length * direction_sign
+                if np.any(current < bounds_min - step_length) or np.any(current > bounds_max + step_length):
+                    break
+                line.append(current.copy())
+            if len(line) < 2:
+                continue
+            line_array = np.asarray(line)
+            average_speed = float(np.mean(line_speeds)) if line_speeds else 0.0
+            axes.plot(
+                line_array[:, 0],
+                line_array[:, 1],
+                line_array[:, 2],
+                color=cmap(normalizer(average_speed)),
+                linewidth=2.0,
+                alpha=0.95,
+            )
+            axes.scatter(line_array[0, 0], line_array[0, 1], line_array[0, 2], s=18, c="#ffffff", alpha=0.85)
+            line_count += 1
+            total_line_points += len(line)
+
+        colorbar = self.figure.colorbar(
+            self._scalar_mappable((float(speeds[usable].min()), float(speeds[usable].max())), cmap),
+            ax=axes,
+            shrink=0.72,
+            pad=0.08,
+        )
+        colorbar.set_label("|U|", color="#d4d4d4")
+        colorbar.ax.yaxis.set_tick_params(color="#d4d4d4")
+        for label in colorbar.ax.get_yticklabels():
+            label.set_color("#d4d4d4")
+        self._finish_axes(axes, points)
+        return line_count, total_line_points, axis_name, (float(speeds[usable].min()), float(speeds[usable].max()))
+
     def plot_pressure_points(self, poly_data, pressure_array, scalar_range: tuple[float, float]) -> None:
         points = self._points(poly_data)
         pressure = vtk_to_numpy(pressure_array)
@@ -922,6 +1015,7 @@ class MainWindow(QMainWindow):
         load_pressure_surface_button = QPushButton("加载压力表面云图")
         load_velocity_vectors_button = QPushButton("加载速度箭头")
         load_velocity_slice_button = QPushButton("加载速度切面")
+        load_velocity_streamlines_button = QPushButton("加载速度流线")
         refresh_visual_fields_button = QPushButton("刷新可视化字段")
         load_selected_surface_button = QPushButton("加载所选字段表面图")
         play_visual_animation_button = QPushButton("播放动画")
@@ -937,6 +1031,7 @@ class MainWindow(QMainWindow):
         load_pressure_surface_button.clicked.connect(lambda _checked=False: self._load_pressure_surface_cloud())
         load_velocity_vectors_button.clicked.connect(lambda _checked=False: self._load_velocity_vectors())
         load_velocity_slice_button.clicked.connect(lambda _checked=False: self._load_velocity_slice())
+        load_velocity_streamlines_button.clicked.connect(lambda _checked=False: self._load_velocity_streamlines())
         refresh_visual_fields_button.clicked.connect(lambda _checked=False: self._refresh_visualization_selectors())
         load_selected_surface_button.clicked.connect(lambda _checked=False: self._load_selected_field_surface())
         play_visual_animation_button.clicked.connect(lambda _checked=False: self._play_visualization_animation())
@@ -953,6 +1048,7 @@ class MainWindow(QMainWindow):
         button_row.addWidget(load_pressure_surface_button)
         button_row.addWidget(load_velocity_vectors_button)
         button_row.addWidget(load_velocity_slice_button)
+        button_row.addWidget(load_velocity_streamlines_button)
         button_row.addStretch(1)
         selector_row = QHBoxLayout()
         self._visual_field_combo = QComboBox()
@@ -1488,6 +1584,57 @@ class MainWindow(QMainWindow):
         )
         self._set_status("速度切面已加载。")
 
+    def _load_velocity_streamlines(self) -> None:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return
+        selected_time = self._visual_time_combo.currentText().strip() or "默认"
+        time_value = self._selected_visualization_time()
+        self._ensure_vtk_viewer()
+        self._show_visualization_feedback(
+            "正在加载速度流线",
+            f"字段：U\n时间步：{selected_time}\nCase 路径：{self._current_project.case_dir}",
+        )
+        try:
+            case_info = self._context.openfoam_vtk_service.inspect(self._current_project)
+            geometry = self._context.openfoam_vtk_service.build_geometry_filter(
+                self._current_project,
+                time_value=time_value,
+            )
+        except (OSError, RuntimeError) as error:
+            self._show_error(f"加载速度流线失败：{error}")
+            return
+
+        output = geometry.GetOutput()
+        velocity_array = output.GetPointData().GetArray("U")
+        if velocity_array is None:
+            self._show_error(
+                "当前速度流线 v1 需要点字段 U。"
+                f"可用点字段：{case_info.point_arrays}；可用单元字段：{case_info.cell_arrays}"
+            )
+            return
+
+        line_count, line_point_count, main_axis, speed_range = self._vtk_viewer.plot_velocity_streamlines(
+            output,
+            velocity_array,
+        )
+        self._append_log(
+            "速度流线已加载："
+            f"time={selected_time}, mainAxis={main_axis}, lines={line_count}, "
+            f"linePoints={line_point_count}, speedRange=({speed_range[0]:.6g}, {speed_range[1]:.6g})"
+        )
+        self._show_visualization_feedback(
+            "速度流线已加载",
+            "独立 3D 视图窗口显示基于真实 U 字段追踪出的流线。\n"
+            "流线可以理解成：把小纸屑放进流体里，它可能走过的路径。\n"
+            f"主流向轴：{main_axis}\n"
+            f"时间步：{selected_time}\n"
+            f"流线数量：{line_count}\n"
+            f"流线点数：{line_point_count}\n"
+            f"速度范围：({speed_range[0]:.6g}, {speed_range[1]:.6g})\n"
+            "说明：当前 v1 使用最近邻积分追踪，后续会升级为 VTK StreamTracer 和可调种子点。",
+        )
+        self._set_status("速度流线已加载。")
     def _refresh_visualization_selectors(self, show_errors: bool = True) -> None:
         if not hasattr(self, "_visual_field_combo"):
             return
