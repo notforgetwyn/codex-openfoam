@@ -1368,6 +1368,7 @@ class MainWindow(QMainWindow):
 
     def _activate_project(self, project: SimulationProject, status_text: str) -> None:
         self._current_project = project
+        self._clear_case_runtime_state()
         self._context.project_service.remember_project(project)
         self._refresh_project_tree()
         self._workspace_tabs.setCurrentIndex(0)
@@ -1378,6 +1379,28 @@ class MainWindow(QMainWindow):
         self._restore_project_result_state()
         self._append_log(f"当前项目：{project.path}")
         self._set_status(status_text)
+
+    def _clear_case_runtime_state(self) -> None:
+        self._current_process_output = ""
+        self._last_diagnostic_summary = "暂无诊断。"
+        if hasattr(self, "_solver_metric_summary"):
+            self._solver_metric_summary.setPlainText("关键指标摘要：尚未运行。")
+        if hasattr(self, "_solver_diagnostic_text"):
+            self._solver_diagnostic_text.setPlainText("最近诊断：\n暂无诊断。")
+        if hasattr(self, "_residual_figure"):
+            self._residual_figure.clear()
+            axes = self._residual_figure.add_subplot(111)
+            axes.set_title("Residual Curve")
+            axes.text(
+                0.5,
+                0.5,
+                "Current case has no residual data.",
+                ha="center",
+                va="center",
+                transform=axes.transAxes,
+            )
+            axes.set_axis_off()
+            self._residual_canvas.draw()
 
     def _create_case(self) -> None:
         if self._current_project is None:
@@ -1437,6 +1460,7 @@ class MainWindow(QMainWindow):
         if result_index.latest_time is None and not residuals_csv.exists():
             self._task_text.setPlainText("任务状态：当前项目暂无求解结果")
             self._refresh_solver_run_panel("暂无求解结果")
+            self._clear_case_runtime_state()
             return
 
         lines = [
