@@ -345,6 +345,64 @@ class VtkViewerDialog(QDialog):
         self._finish_axes(axes, points)
         return len(points), (float(speeds.min()), max_speed)
 
+    def plot_velocity_slice(self, poly_data, vector_array) -> tuple[int, str, float, tuple[float, float]]:
+        points = self._points(poly_data)
+        vectors = vtk_to_numpy(vector_array)
+        axes = self._reset_axes("Velocity Slice |U|")
+        if points.size == 0 or vectors.size == 0 or vectors.ndim != 2 or vectors.shape[1] < 3:
+            axes.text2D(0.08, 0.5, "No velocity slice data to display.", color="#d4d4d4")
+            self._show()
+            return 0, "X", 0.0, (0.0, 0.0)
+
+        count = min(len(points), len(vectors))
+        points = points[:count]
+        vectors = vectors[:count, :3]
+        speeds = np.linalg.norm(vectors, axis=1)
+        candidates: list[tuple[float, int, float, np.ndarray]] = []
+        for axis in range(3):
+            center = float((points[:, axis].min() + points[:, axis].max()) / 2.0)
+            span = float(points[:, axis].max() - points[:, axis].min())
+            tolerance = max(span * 0.055, 1e-9)
+            mask = np.abs(points[:, axis] - center) <= tolerance
+            if mask.sum() < 8:
+                nearest = np.argsort(np.abs(points[:, axis] - center))[: min(200, len(points))]
+                mask = np.zeros(len(points), dtype=bool)
+                mask[nearest] = True
+            slice_speeds = speeds[mask]
+            score = float(slice_speeds.max() - slice_speeds.min()) if slice_speeds.size else -1.0
+            candidates.append((score, axis, center, mask))
+
+        _, axis, center, mask = max(candidates, key=lambda item: item[0])
+        axis_name = "XYZ"[axis]
+        slice_points = points[mask]
+        slice_speeds = speeds[mask]
+        if len(slice_points) == 0:
+            axes.text2D(0.08, 0.5, "No points near the middle slice.", color="#d4d4d4")
+            self._show()
+            return 0, axis_name, center, (0.0, 0.0)
+
+        speed_range = (float(slice_speeds.min()), float(slice_speeds.max()))
+        if speed_range[0] == speed_range[1]:
+            speed_range = (speed_range[0] - 1.0, speed_range[1] + 1.0)
+        scatter = axes.scatter(
+            slice_points[:, 0],
+            slice_points[:, 1],
+            slice_points[:, 2],
+            c=slice_speeds,
+            cmap="turbo",
+            s=28,
+            alpha=0.96,
+            vmin=speed_range[0],
+            vmax=speed_range[1],
+        )
+        colorbar = self.figure.colorbar(scatter, ax=axes, shrink=0.72, pad=0.08)
+        colorbar.set_label("|U|", color="#d4d4d4")
+        colorbar.ax.yaxis.set_tick_params(color="#d4d4d4")
+        for label in colorbar.ax.get_yticklabels():
+            label.set_color("#d4d4d4")
+        self._finish_axes(axes, points)
+        return len(slice_points), axis_name, center, speed_range
+
     def plot_pressure_points(self, poly_data, pressure_array, scalar_range: tuple[float, float]) -> None:
         points = self._points(poly_data)
         pressure = vtk_to_numpy(pressure_array)
@@ -863,6 +921,7 @@ class MainWindow(QMainWindow):
         load_pressure_cloud_button = QPushButton("加载压力云图")
         load_pressure_surface_button = QPushButton("加载压力表面云图")
         load_velocity_vectors_button = QPushButton("加载速度箭头")
+        load_velocity_slice_button = QPushButton("加载速度切面")
         refresh_visual_fields_button = QPushButton("刷新可视化字段")
         load_selected_surface_button = QPushButton("加载所选字段表面图")
         play_visual_animation_button = QPushButton("播放动画")
@@ -877,6 +936,7 @@ class MainWindow(QMainWindow):
         load_pressure_cloud_button.clicked.connect(lambda _checked=False: self._load_pressure_cloud())
         load_pressure_surface_button.clicked.connect(lambda _checked=False: self._load_pressure_surface_cloud())
         load_velocity_vectors_button.clicked.connect(lambda _checked=False: self._load_velocity_vectors())
+        load_velocity_slice_button.clicked.connect(lambda _checked=False: self._load_velocity_slice())
         refresh_visual_fields_button.clicked.connect(lambda _checked=False: self._refresh_visualization_selectors())
         load_selected_surface_button.clicked.connect(lambda _checked=False: self._load_selected_field_surface())
         play_visual_animation_button.clicked.connect(lambda _checked=False: self._play_visualization_animation())
@@ -892,6 +952,7 @@ class MainWindow(QMainWindow):
         button_row.addWidget(load_pressure_cloud_button)
         button_row.addWidget(load_pressure_surface_button)
         button_row.addWidget(load_velocity_vectors_button)
+        button_row.addWidget(load_velocity_slice_button)
         button_row.addStretch(1)
         selector_row = QHBoxLayout()
         self._visual_field_combo = QComboBox()
@@ -1377,6 +1438,56 @@ class MainWindow(QMainWindow):
             "说明：为避免界面卡顿，当前会对速度点做采样显示。",
         )
         self._set_status("速度箭头已加载。")
+
+    def _load_velocity_slice(self) -> None:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return
+        selected_time = self._visual_time_combo.currentText().strip() or "默认"
+        time_value = self._selected_visualization_time()
+        self._ensure_vtk_viewer()
+        self._show_visualization_feedback(
+            "正在加载速度切面",
+            f"字段：U\n切面：自动选择 X/Y/Z 中速度变化最明显的中间截面\n时间步：{selected_time}\nCase 路径：{self._current_project.case_dir}",
+        )
+        try:
+            case_info = self._context.openfoam_vtk_service.inspect(self._current_project)
+            geometry = self._context.openfoam_vtk_service.build_geometry_filter(
+                self._current_project,
+                time_value=time_value,
+            )
+        except (OSError, RuntimeError) as error:
+            self._show_error(f"加载速度切面失败：{error}")
+            return
+
+        output = geometry.GetOutput()
+        velocity_array = output.GetPointData().GetArray("U")
+        if velocity_array is None:
+            self._show_error(
+                "当前速度切面 v1 需要点字段 U。"
+                f"可用点字段：{case_info.point_arrays}；可用单元字段：{case_info.cell_arrays}"
+            )
+            return
+
+        point_count, slice_axis, slice_center, speed_range = self._vtk_viewer.plot_velocity_slice(output, velocity_array)
+        self._append_log(
+            "速度切面已加载："
+            f"time={selected_time}, axis={slice_axis}, center={slice_center:.6g}, points={point_count}, "
+            f"speedRange=({speed_range[0]:.6g}, {speed_range[1]:.6g})"
+        )
+        self._show_visualization_feedback(
+            "速度切面已加载",
+            "独立 3D 视图窗口显示速度大小 |U| 的中间切面。\n"
+            "可以把它理解成：用一把刀从计算区域中间切开，只看切面附近的流速分布。\n"
+            f"切面方向：{slice_axis} 方向中间截面\n"
+            f"切面位置：{slice_axis}={slice_center:.6g}\n"
+            f"时间步：{selected_time}\n"
+            f"切面点数：{point_count}\n"
+            f"速度范围：({speed_range[0]:.6g}, {speed_range[1]:.6g})\n"
+            "说明：当前 v1 是点采样切面，后续会升级为真正连续面片切面。",
+        )
+        self._set_status("速度切面已加载。")
+
     def _refresh_visualization_selectors(self, show_errors: bool = True) -> None:
         if not hasattr(self, "_visual_field_combo"):
             return
