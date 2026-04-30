@@ -182,6 +182,16 @@ class VtkViewerDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        action_row = QHBoxLayout()
+        action_row.addStretch(1)
+        export_button = QPushButton("导出 PNG")
+        export_button.clicked.connect(self._export_png)
+        action_row.addWidget(export_button)
+        layout.addLayout(action_row)
+
+        self._last_plot_title = "foamdesk_visualization"
         self.figure = Figure(figsize=(8, 6), facecolor="#1e1e1e", tight_layout=True)
         self.canvas = FigureCanvas(self.figure)
         layout.addWidget(self.canvas)
@@ -527,6 +537,7 @@ class VtkViewerDialog(QDialog):
         self._finish_axes(axes, points)
 
     def _reset_axes(self, title: str):
+        self._last_plot_title = title
         self.figure.clear()
         axes = self.figure.add_subplot(111, projection="3d", facecolor="#1e1e1e")
         axes.set_title(title, color="#d4d4d4", pad=14)
@@ -554,6 +565,29 @@ class VtkViewerDialog(QDialog):
         self.show()
         self.raise_()
         self.activateWindow()
+
+    def _export_png(self) -> None:
+        safe_title = "".join(
+            character if character.isalnum() or character in ("-", "_") else "_"
+            for character in self._last_plot_title.strip().lower()
+        ).strip("_") or "foamdesk_visualization"
+        default_name = f"{safe_title}.png"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出当前 3D 图像",
+            default_name,
+            "PNG 图片 (*.png)",
+        )
+        if not file_path:
+            return
+        if not file_path.lower().endswith(".png"):
+            file_path = f"{file_path}.png"
+        try:
+            self.figure.savefig(file_path, dpi=180, facecolor=self.figure.get_facecolor(), bbox_inches="tight")
+        except OSError as error:
+            QMessageBox.warning(self, "导出失败", f"PNG 导出失败：{error}")
+            return
+        QMessageBox.information(self, "导出完成", f"已导出 PNG：\n{file_path}")
 
     def _points(self, poly_data) -> np.ndarray:
         vtk_points = poly_data.GetPoints()
