@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import shlex
 from pathlib import Path
@@ -284,6 +284,66 @@ class VtkViewerDialog(QDialog):
 
     def plot_pressure_surface(self, poly_data, pressure_array, scalar_range: tuple[float, float]) -> int:
         return self.plot_field_surface(poly_data, pressure_array, scalar_range, "p")
+
+    def plot_velocity_vectors(self, poly_data, vector_array, limit: int = 700) -> tuple[int, tuple[float, float]]:
+        points = self._points(poly_data)
+        vectors = vtk_to_numpy(vector_array)
+        axes = self._reset_axes("Velocity Vectors |U|")
+        if points.size == 0 or vectors.size == 0 or vectors.ndim != 2 or vectors.shape[1] < 3:
+            axes.text2D(0.08, 0.5, "No velocity vector data to display.", color="#d4d4d4")
+            self._show()
+            return 0, (0.0, 0.0)
+
+        count = min(len(points), len(vectors))
+        points = points[:count]
+        vectors = vectors[:count, :3]
+        speeds = np.linalg.norm(vectors, axis=1)
+        non_zero = speeds > 1e-12
+        if np.any(non_zero):
+            points = points[non_zero]
+            vectors = vectors[non_zero]
+            speeds = speeds[non_zero]
+        if len(points) == 0:
+            axes.text2D(0.08, 0.5, "Velocity field is zero everywhere.", color="#d4d4d4")
+            self._show()
+            return 0, (0.0, 0.0)
+
+        if len(points) > limit:
+            indices = np.linspace(0, len(points) - 1, limit, dtype=int)
+            points = points[indices]
+            vectors = vectors[indices]
+            speeds = speeds[indices]
+
+        max_speed = float(speeds.max()) if speeds.size else 1.0
+        domain_size = float(np.ptp(points, axis=0).max()) if len(points) else 1.0
+        arrow_length = max(domain_size * 0.075 / max(max_speed, 1e-12), 1e-6)
+        normalizer = Normalize(vmin=float(speeds.min()), vmax=max_speed)
+        cmap = colormaps["turbo"]
+        axes.quiver(
+            points[:, 0],
+            points[:, 1],
+            points[:, 2],
+            vectors[:, 0],
+            vectors[:, 1],
+            vectors[:, 2],
+            length=arrow_length,
+            normalize=False,
+            colors=cmap(normalizer(speeds)),
+            linewidths=0.8,
+            arrow_length_ratio=0.35,
+        )
+        colorbar = self.figure.colorbar(
+            self._scalar_mappable((float(speeds.min()), max_speed), cmap),
+            ax=axes,
+            shrink=0.72,
+            pad=0.08,
+        )
+        colorbar.set_label("|U|", color="#d4d4d4")
+        colorbar.ax.yaxis.set_tick_params(color="#d4d4d4")
+        for label in colorbar.ax.get_yticklabels():
+            label.set_color("#d4d4d4")
+        self._finish_axes(axes, points)
+        return len(points), (float(speeds.min()), max_speed)
 
     def plot_pressure_points(self, poly_data, pressure_array, scalar_range: tuple[float, float]) -> None:
         points = self._points(poly_data)
@@ -802,6 +862,7 @@ class MainWindow(QMainWindow):
         load_openfoam_3d_button = QPushButton("加载真实 OpenFOAM 3D Case")
         load_pressure_cloud_button = QPushButton("加载压力云图")
         load_pressure_surface_button = QPushButton("加载压力表面云图")
+        load_velocity_vectors_button = QPushButton("加载速度箭头")
         refresh_visual_fields_button = QPushButton("刷新可视化字段")
         load_selected_surface_button = QPushButton("加载所选字段表面图")
         play_visual_animation_button = QPushButton("播放动画")
@@ -815,6 +876,7 @@ class MainWindow(QMainWindow):
         load_openfoam_3d_button.clicked.connect(lambda _checked=False: self._load_openfoam_3d_case())
         load_pressure_cloud_button.clicked.connect(lambda _checked=False: self._load_pressure_cloud())
         load_pressure_surface_button.clicked.connect(lambda _checked=False: self._load_pressure_surface_cloud())
+        load_velocity_vectors_button.clicked.connect(lambda _checked=False: self._load_velocity_vectors())
         refresh_visual_fields_button.clicked.connect(lambda _checked=False: self._refresh_visualization_selectors())
         load_selected_surface_button.clicked.connect(lambda _checked=False: self._load_selected_field_surface())
         play_visual_animation_button.clicked.connect(lambda _checked=False: self._play_visualization_animation())
@@ -829,6 +891,7 @@ class MainWindow(QMainWindow):
         button_row.addWidget(load_openfoam_3d_button)
         button_row.addWidget(load_pressure_cloud_button)
         button_row.addWidget(load_pressure_surface_button)
+        button_row.addWidget(load_velocity_vectors_button)
         button_row.addStretch(1)
         selector_row = QHBoxLayout()
         self._visual_field_combo = QComboBox()
@@ -1268,6 +1331,52 @@ class MainWindow(QMainWindow):
         )
         self._set_status("压力表面云图已加载。")
 
+    def _load_velocity_vectors(self) -> None:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return
+        selected_time = self._visual_time_combo.currentText().strip() or "默认"
+        time_value = self._selected_visualization_time()
+        self._ensure_vtk_viewer()
+        self._show_visualization_feedback(
+            "正在加载速度箭头",
+            f"字段：U\n时间步：{selected_time}\nCase 路径：{self._current_project.case_dir}",
+        )
+        try:
+            case_info = self._context.openfoam_vtk_service.inspect(self._current_project)
+            geometry = self._context.openfoam_vtk_service.build_geometry_filter(
+                self._current_project,
+                time_value=time_value,
+            )
+        except (OSError, RuntimeError) as error:
+            self._show_error(f"加载速度箭头失败：{error}")
+            return
+
+        output = geometry.GetOutput()
+        velocity_array = output.GetPointData().GetArray("U")
+        if velocity_array is None:
+            self._show_error(
+                "当前速度箭头 v1 需要点字段 U。"
+                f"可用点字段：{case_info.point_arrays}；可用单元字段：{case_info.cell_arrays}"
+            )
+            return
+
+        arrow_count, speed_range = self._vtk_viewer.plot_velocity_vectors(output, velocity_array)
+        self._append_log(
+            "速度箭头已加载："
+            f"time={selected_time}, arrows={arrow_count}, "
+            f"speedRange=({speed_range[0]:.6g}, {speed_range[1]:.6g})"
+        )
+        self._show_visualization_feedback(
+            "速度箭头已加载",
+            "独立 3D 视图窗口显示字段 U 的方向箭头。\n"
+            "箭头方向表示流体速度方向，箭头颜色表示速度大小 |U|。\n"
+            f"时间步：{selected_time}\n"
+            f"箭头数量：{arrow_count}\n"
+            f"速度范围：({speed_range[0]:.6g}, {speed_range[1]:.6g})\n"
+            "说明：为避免界面卡顿，当前会对速度点做采样显示。",
+        )
+        self._set_status("速度箭头已加载。")
     def _refresh_visualization_selectors(self, show_errors: bool = True) -> None:
         if not hasattr(self, "_visual_field_combo"):
             return
