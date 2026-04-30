@@ -11,7 +11,7 @@ class MetricExportService:
     """Persists solver metrics for later plotting and external analysis."""
 
     def export(self, project: SimulationProject, metrics: SolverMetrics) -> tuple[Path, Path]:
-        results_dir = project.path / "results"
+        results_dir = project.case_dir / "foamdesk_results"
         results_dir.mkdir(parents=True, exist_ok=True)
         json_path = results_dir / "metrics.json"
         csv_path = results_dir / "residuals.csv"

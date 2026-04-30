@@ -24,6 +24,8 @@ def test_metric_export_service_writes_json_and_csv(tmp_path: Path) -> None:
 
     json_path, csv_path = MetricExportService().export(project, metrics)
 
+    assert json_path.parent == project.case_dir / "foamdesk_results"
+    assert csv_path.parent == project.case_dir / "foamdesk_results"
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     rows = list(csv.reader(csv_path.read_text(encoding="utf-8").splitlines()))
     assert payload["times"] == [0.005, 0.01]

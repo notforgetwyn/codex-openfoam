@@ -11,7 +11,7 @@ from foamdesk.services.settings_service import AppSettingsService
 
 def test_residual_plot_service_loads_series_from_csv(tmp_path: Path) -> None:
     project = ProjectService(AppSettingsService(tmp_path)).create_project("demo")
-    results_dir = project.path / "results"
+    results_dir = project.case_dir / "foamdesk_results"
     results_dir.mkdir(exist_ok=True)
     (results_dir / "residuals.csv").write_text(
         "time,field,initial,final,iterations\n"

@@ -1432,8 +1432,8 @@ class MainWindow(QMainWindow):
         except OSError:
             return
 
-        residuals_csv = self._current_project.path / "results" / "residuals.csv"
-        metrics_json = self._current_project.path / "results" / "metrics.json"
+        residuals_csv = self._current_project.case_dir / "foamdesk_results" / "residuals.csv"
+        metrics_json = self._current_project.case_dir / "foamdesk_results" / "metrics.json"
         if result_index.latest_time is None and not residuals_csv.exists():
             self._task_text.setPlainText("任务状态：当前项目暂无求解结果")
             self._refresh_solver_run_panel("暂无求解结果")

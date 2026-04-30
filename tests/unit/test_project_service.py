@@ -70,6 +70,7 @@ def test_project_service_creates_and_switches_cases(tmp_path: Path) -> None:
 
     assert switched_project.case_name == "case_2"
     assert switched_project.case_dir == project.path / "case_2"
+    assert service.open_project(project.path).case_name == "case_2"
 
 
 def test_project_service_ignores_missing_last_project(tmp_path: Path) -> None:

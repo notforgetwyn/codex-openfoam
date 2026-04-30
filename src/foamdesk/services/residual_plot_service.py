@@ -10,7 +10,7 @@ class ResidualPlotService:
     """Loads residual CSV data for in-client Python visualization."""
 
     def load_series(self, project: SimulationProject) -> dict[str, list[tuple[float, float]]]:
-        csv_path = project.path / "results" / "residuals.csv"
+        csv_path = project.case_dir / "foamdesk_results" / "residuals.csv"
         if not csv_path.exists():
             raise FileNotFoundError(f"未找到残差文件：{csv_path}")
 

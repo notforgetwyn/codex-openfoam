@@ -46,6 +46,7 @@ class ProjectService:
         metadata = {
             "name": clean_name,
             "case_dir": "case",
+            "current_case": "case",
         }
         (project_dir / "project.json").write_text(
             json.dumps(metadata, ensure_ascii=False, indent=2),
@@ -61,7 +62,8 @@ class ProjectService:
 
         payload = json.loads(metadata_file.read_text(encoding="utf-8"))
         name = str(payload["name"])
-        case_dir = project_dir / str(payload.get("case_dir", "case"))
+        case_name = str(payload.get("current_case") or payload.get("case_dir", "case"))
+        case_dir = project_dir / case_name
         if not case_dir.exists():
             raise ValueError("项目 case 目录不存在。")
         return SimulationProject(name=name, path=project_dir, case_dir=case_dir, case_name=case_dir.name)
@@ -85,12 +87,14 @@ class ProjectService:
         ):
             path.mkdir(parents=True, exist_ok=True)
         self._write_minimal_case_template(case_dir, overwrite=True)
-        return SimulationProject(
+        new_project = SimulationProject(
             name=project.name,
             path=project.path,
             case_dir=case_dir,
             case_name=clean_name,
         )
+        self._write_current_case(new_project)
+        return new_project
 
     def switch_case(self, project: SimulationProject, case_name: str) -> SimulationProject:
         clean_name = self._normalize_project_name(case_name)
@@ -99,14 +103,17 @@ class ProjectService:
             raise ValueError(f"Case 不存在：{clean_name}")
         if not (case_dir / "system").exists() or not (case_dir / "constant").exists():
             raise ValueError(f"所选目录不是有效 Case：{clean_name}")
-        return SimulationProject(
+        switched_project = SimulationProject(
             name=project.name,
             path=project.path,
             case_dir=case_dir,
             case_name=clean_name,
         )
+        self._write_current_case(switched_project)
+        return switched_project
 
     def remember_project(self, project: SimulationProject) -> None:
+        self._write_current_case(project)
         settings = self._settings_service.load()
         self._settings_service.save(replace(settings, last_project_path=project.path))
 
@@ -127,6 +134,16 @@ class ProjectService:
 
     def _projects_dir(self) -> Path:
         return self._settings_service.load().workspace_dir / "projects"
+
+    def _write_current_case(self, project: SimulationProject) -> None:
+        metadata_file = project.path / "project.json"
+        payload = json.loads(metadata_file.read_text(encoding="utf-8"))
+        payload["current_case"] = project.case_name
+        payload.setdefault("case_dir", "case")
+        metadata_file.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     def _normalize_project_name(self, name: str) -> str:
         clean_name = name.strip().replace(" ", "_")
