@@ -4,6 +4,7 @@ from pathlib import Path
 
 from foamdesk.integrations.openfoam.environment import OpenFOAMEnvironmentDetector
 from foamdesk.services.case_parameter_service import OpenFoamCaseParameterService
+from foamdesk.services.geometry_import_service import GeometryImportService
 from foamdesk.services.log_diagnostic_service import OpenFoamLogDiagnosticService
 from foamdesk.services.log_metric_service import OpenFoamLogMetricService
 from foamdesk.services.metric_export_service import MetricExportService
@@ -23,6 +24,7 @@ class ApplicationContext:
         self.settings_service = AppSettingsService(project_root)
         self.project_service = ProjectService(self.settings_service)
         self.case_parameter_service = OpenFoamCaseParameterService()
+        self.geometry_import_service = GeometryImportService()
         self.log_diagnostic_service = OpenFoamLogDiagnosticService()
         self.log_metric_service = OpenFoamLogMetricService()
         self.metric_export_service = MetricExportService()

@@ -17,6 +17,7 @@ from vtkmodules.vtkCommonCore import vtkPoints
 from vtkmodules.vtkCommonDataModel import vtkPolyData
 from vtkmodules.vtkCommonMath import vtkRungeKutta4
 from vtkmodules.vtkFiltersFlowPaths import vtkStreamTracer
+from vtkmodules.vtkIOGeometry import vtkSTLReader
 from PySide6.QtWidgets import (
     QComboBox,
     QCheckBox,
@@ -264,6 +265,30 @@ class VtkViewerDialog(QDialog):
         points = self._sample_points(points)
         axes.scatter(points[:, 0], points[:, 1], points[:, 2], s=6, c="#4fc3ff", alpha=0.85)
         self._finish_axes(axes, points)
+
+    def plot_stl_file(self, path: Path) -> tuple[int, int]:
+        reader = vtkSTLReader()
+        reader.SetFileName(str(path))
+        reader.Update()
+        poly_data = reader.GetOutput()
+        points = self._points(poly_data)
+        faces = self._faces(poly_data)
+        axes = self._reset_axes(f"STL {path.name}")
+        if points.size == 0 or faces.size == 0:
+            axes.text2D(0.08, 0.5, "No STL surface data to display.", color="#d4d4d4")
+            self._show()
+            return 0, 0
+        faces = self._sample_faces(faces)
+        polygons = [points[np.asarray(face, dtype=int)] for face in faces]
+        collection = Poly3DCollection(
+            polygons,
+            facecolors=(0.58, 0.62, 0.66, 0.92),
+            edgecolors=(0.12, 0.12, 0.12, 0.35),
+            linewidths=0.25,
+        )
+        axes.add_collection3d(collection)
+        self._finish_axes(axes, points)
+        return len(points), len(faces)
 
     def plot_field_surface(
         self,
@@ -885,6 +910,11 @@ class MainWindow(QMainWindow):
         case_menu.addAction("新增 Case", self._create_case)
         case_menu.addAction("打开当前 Case 目录", self._show_current_case_path)
 
+        geometry_menu = menu_bar.addMenu("几何/CAD")
+        geometry_menu.addAction("打开几何/CAD 页", self._open_geometry_tab)
+        geometry_menu.addAction("导入 STL 几何", self._import_stl_geometry)
+        geometry_menu.addAction("预览已导入 STL", self._preview_imported_stl)
+
         solver_menu = menu_bar.addMenu("求解器")
         solver_menu.addAction("运行最小仿真", self._run_minimal_simulation)
         solver_menu.addAction("停止当前任务", self._stop_current_process)
@@ -997,6 +1027,7 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.addTab(self._build_environment_tab(), "环境检查")
         self._workspace_tabs.addTab(self._build_settings_tab(), "设置")
         self._workspace_tabs.addTab(self._build_results_tab(), "结果")
+        self._workspace_tabs.addTab(self._build_geometry_tab(), "几何/CAD")
         layout.addWidget(self._workspace_tabs)
         return container
 
@@ -1115,6 +1146,45 @@ class MainWindow(QMainWindow):
         layout.addWidget(help_text)
         layout.addStretch(1)
         self._set_parameter_inputs_enabled(False)
+        return wrapper
+
+    def _build_geometry_tab(self) -> QWidget:
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        title = QLabel("几何/CAD")
+        title.setStyleSheet("font-size: 22px; font-weight: 600;")
+        description = QLabel(
+            "当前 MVP 先支持 STL 导入到 OpenFOAM case 的 constant/triSurface，"
+            "STEP/IGES/CATIA/SolidWorks 后续需要接入 CAD 内核。"
+        )
+        description.setWordWrap(True)
+
+        action_row = QHBoxLayout()
+        import_button = QPushButton("导入 STL")
+        refresh_button = QPushButton("刷新几何清单")
+        preview_button = QPushButton("预览已导入 STL")
+        limitation_button = QPushButton("STEP/IGES 支持说明")
+        import_button.clicked.connect(lambda _checked=False: self._import_stl_geometry())
+        refresh_button.clicked.connect(lambda _checked=False: self._refresh_geometry_panel())
+        preview_button.clicked.connect(lambda _checked=False: self._preview_imported_stl())
+        limitation_button.clicked.connect(lambda _checked=False: self._show_cad_import_limitations())
+        action_row.addWidget(import_button)
+        action_row.addWidget(refresh_button)
+        action_row.addWidget(preview_button)
+        action_row.addWidget(limitation_button)
+        action_row.addStretch(1)
+
+        self._geometry_text = QTextEdit()
+        self._geometry_text.setReadOnly(True)
+        self._geometry_text.setPlainText("请先新建或打开项目，然后导入 STL 几何。")
+
+        layout.addWidget(title)
+        layout.addWidget(description)
+        layout.addLayout(action_row)
+        layout.addWidget(self._geometry_text, 1)
         return wrapper
 
     def _build_solver_run_tab(self) -> QWidget:
@@ -1478,6 +1548,79 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.setCurrentIndex(3)
         self._refresh_environment_panels()
         self._set_status("已打开环境检查页。")
+
+    def _open_geometry_tab(self) -> None:
+        self._workspace_tabs.setCurrentIndex(6)
+        self._refresh_geometry_panel()
+        self._set_status("已打开几何/CAD 页。")
+
+    def _import_stl_geometry(self) -> None:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "导入 STL 几何",
+            str(self._current_project.path),
+            "STL 几何 (*.stl *.STL)",
+        )
+        if not file_path:
+            return
+        try:
+            asset = self._context.geometry_import_service.import_stl(
+                self._current_project,
+                Path(file_path),
+            )
+        except (OSError, ValueError) as error:
+            self._show_error(f"导入 STL 失败：{error}")
+            return
+        self._append_log(f"STL 几何已导入：{asset.stored_path}")
+        self._refresh_geometry_panel()
+        self._workspace_tabs.setCurrentIndex(6)
+        self._set_status("STL 几何导入完成。")
+
+    def _refresh_geometry_panel(self) -> None:
+        if not hasattr(self, "_geometry_text"):
+            return
+        if self._current_project is None:
+            self._geometry_text.setPlainText("请先新建或打开项目，然后导入 STL 几何。")
+            return
+        self._geometry_text.setPlainText(self._context.geometry_import_service.format_assets(self._current_project))
+
+    def _preview_imported_stl(self) -> None:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return
+        assets = self._context.geometry_import_service.list_assets(self._current_project)
+        stl_assets = [asset for asset in assets if asset.format.upper() == "STL" and asset.stored_path.exists()]
+        if not stl_assets:
+            self._show_error("当前 Case 没有可预览的 STL，请先导入 STL。")
+            return
+        names = [asset.name for asset in stl_assets]
+        selected_name, ok = QInputDialog.getItem(self, "预览 STL", "选择 STL", names, 0, False)
+        if not ok or not selected_name:
+            return
+        selected_asset = next(asset for asset in stl_assets if asset.name == selected_name)
+        self._ensure_vtk_viewer()
+        try:
+            point_count, face_count = self._vtk_viewer.plot_stl_file(selected_asset.stored_path)
+        except RuntimeError as error:
+            self._show_error(f"预览 STL 失败：{error}")
+            return
+        self._append_log(
+            f"STL 预览已加载：name={selected_asset.name}, points={point_count}, faces={face_count}"
+        )
+        self._set_status("STL 预览已加载。")
+
+    def _show_cad_import_limitations(self) -> None:
+        QMessageBox.information(
+            self,
+            "STEP/IGES 支持说明",
+            "当前 Sprint 28 先完成 STL 导入 MVP。\n\n"
+            "原因：STL 是 OpenFOAM triSurface 最直接支持的几何格式，适合先打通流程。\n\n"
+            "STEP、IGES、CATIA、SolidWorks 属于 CAD B-Rep/装配模型，"
+            "需要后续接入 OCCT/CAD 内核做读取、修复、三角化和单位处理。",
+        )
 
     def _set_parameter_inputs_enabled(self, enabled: bool) -> None:
         if not hasattr(self, "_end_time_input"):
@@ -2524,6 +2667,7 @@ class MainWindow(QMainWindow):
         self._load_case_parameters()
         self._refresh_solver_run_panel()
         self._refresh_results_panel()
+        self._refresh_geometry_panel()
         self._restore_project_result_state()
         self._append_log(f"当前项目：{project.path}")
         self._set_status(status_text)
