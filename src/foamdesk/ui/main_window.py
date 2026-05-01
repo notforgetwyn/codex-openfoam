@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QCheckBox,
     QDialog,
+    QDoubleSpinBox,
     QFileDialog,
     QFontComboBox,
     QFrame,
@@ -355,7 +356,13 @@ class VtkViewerDialog(QDialog):
         self._finish_axes(axes, points)
         return len(points), (float(speeds.min()), max_speed)
 
-    def plot_velocity_slice(self, poly_data, vector_array) -> tuple[int, str, float, tuple[float, float]]:
+    def plot_velocity_slice(
+        self,
+        poly_data,
+        vector_array,
+        axis_name: str | None = None,
+        normalized_position: float = 0.5,
+    ) -> tuple[int, str, float, tuple[float, float]]:
         points = self._points(poly_data)
         vectors = vtk_to_numpy(vector_array)
         axes = self._reset_axes("Velocity Slice |U|")
@@ -368,28 +375,41 @@ class VtkViewerDialog(QDialog):
         points = points[:count]
         vectors = vectors[:count, :3]
         speeds = np.linalg.norm(vectors, axis=1)
-        candidates: list[tuple[float, int, float, np.ndarray]] = []
-        for axis in range(3):
-            center = float((points[:, axis].min() + points[:, axis].max()) / 2.0)
-            span = float(points[:, axis].max() - points[:, axis].min())
+        normalized_position = min(max(float(normalized_position), 0.0), 1.0)
+
+        def build_mask(axis: int) -> tuple[float, np.ndarray]:
+            axis_min = float(points[:, axis].min())
+            axis_max = float(points[:, axis].max())
+            center = axis_min + (axis_max - axis_min) * normalized_position
+            span = float(axis_max - axis_min)
             tolerance = max(span * 0.055, 1e-9)
             mask = np.abs(points[:, axis] - center) <= tolerance
             if mask.sum() < 8:
                 nearest = np.argsort(np.abs(points[:, axis] - center))[: min(200, len(points))]
                 mask = np.zeros(len(points), dtype=bool)
                 mask[nearest] = True
-            slice_speeds = speeds[mask]
-            score = float(slice_speeds.max() - slice_speeds.min()) if slice_speeds.size else -1.0
-            candidates.append((score, axis, center, mask))
+            return center, mask
 
-        _, axis, center, mask = max(candidates, key=lambda item: item[0])
-        axis_name = "XYZ"[axis]
+        requested_axis = None if not axis_name or axis_name == "自动" else "XYZ".find(axis_name)
+        if requested_axis is not None and requested_axis >= 0:
+            axis = requested_axis
+            center, mask = build_mask(axis)
+        else:
+            candidates: list[tuple[float, int, float, np.ndarray]] = []
+            for candidate_axis in range(3):
+                center, mask = build_mask(candidate_axis)
+                slice_speeds = speeds[mask]
+                score = float(slice_speeds.max() - slice_speeds.min()) if slice_speeds.size else -1.0
+                candidates.append((score, candidate_axis, center, mask))
+            _, axis, center, mask = max(candidates, key=lambda item: item[0])
+
+        resolved_axis_name = "XYZ"[axis]
         slice_points = points[mask]
         slice_speeds = speeds[mask]
         if len(slice_points) == 0:
-            axes.text2D(0.08, 0.5, "No points near the middle slice.", color="#d4d4d4")
+            axes.text2D(0.08, 0.5, "No points near the selected slice.", color="#d4d4d4")
             self._show()
-            return 0, axis_name, center, (0.0, 0.0)
+            return 0, resolved_axis_name, center, (0.0, 0.0)
 
         speed_range = (float(slice_speeds.min()), float(slice_speeds.max()))
         if speed_range[0] == speed_range[1]:
@@ -411,8 +431,7 @@ class VtkViewerDialog(QDialog):
         for label in colorbar.ax.get_yticklabels():
             label.set_color("#d4d4d4")
         self._finish_axes(axes, points)
-        return len(slice_points), axis_name, center, speed_range
-
+        return len(slice_points), resolved_axis_name, center, speed_range
     def plot_velocity_streamlines(
         self,
         poly_data,
@@ -1102,18 +1121,31 @@ class MainWindow(QMainWindow):
         selector_row = QHBoxLayout()
         self._visual_field_combo = QComboBox()
         self._visual_time_combo = QComboBox()
+        self._slice_axis_combo = QComboBox()
+        self._slice_axis_combo.addItems(["自动", "X", "Y", "Z"])
+        self._slice_position_input = QDoubleSpinBox()
+        self._slice_position_input.setRange(0.0, 1.0)
+        self._slice_position_input.setSingleStep(0.05)
+        self._slice_position_input.setDecimals(2)
+        self._slice_position_input.setValue(0.5)
         self._visual_frame_interval_input = QSpinBox()
         self._visual_frame_interval_input.setRange(100, 5000)
         self._visual_frame_interval_input.setValue(800)
         self._visual_frame_interval_input.setSuffix(" ms")
         self._visual_field_combo.setMinimumWidth(160)
         self._visual_time_combo.setMinimumWidth(160)
+        self._slice_axis_combo.setMinimumWidth(86)
+        self._slice_position_input.setMaximumWidth(92)
         selector_row.addWidget(QLabel("字段"))
         selector_row.addWidget(self._visual_field_combo)
         selector_row.addWidget(QLabel("时间步"))
         selector_row.addWidget(self._visual_time_combo)
         selector_row.addWidget(refresh_visual_fields_button)
         selector_row.addWidget(load_selected_surface_button)
+        selector_row.addWidget(QLabel("切面"))
+        selector_row.addWidget(self._slice_axis_combo)
+        selector_row.addWidget(QLabel("位置"))
+        selector_row.addWidget(self._slice_position_input)
         selector_row.addWidget(previous_frame_button)
         selector_row.addWidget(next_frame_button)
         selector_row.addWidget(QLabel("帧间隔"))
@@ -1590,10 +1622,13 @@ class MainWindow(QMainWindow):
             return
         selected_time = self._visual_time_combo.currentText().strip() or "默认"
         time_value = self._selected_visualization_time()
+        requested_axis = self._slice_axis_combo.currentText().strip() if hasattr(self, "_slice_axis_combo") else "自动"
+        requested_position = self._slice_position_input.value() if hasattr(self, "_slice_position_input") else 0.5
+        slice_mode = "自动选择速度变化最明显的切面" if requested_axis == "自动" else f"{requested_axis} 方向切面"
         self._ensure_vtk_viewer()
         self._show_visualization_feedback(
             "正在加载速度切面",
-            f"字段：U\n切面：自动选择 X/Y/Z 中速度变化最明显的中间截面\n时间步：{selected_time}\nCase 路径：{self._current_project.case_dir}",
+            f"字段：U\n切面：{slice_mode}\n位置：{requested_position:.2f}\n时间步：{selected_time}\nCase 路径：{self._current_project.case_dir}",
         )
         try:
             case_info = self._context.openfoam_vtk_service.inspect(self._current_project)
@@ -1614,22 +1649,30 @@ class MainWindow(QMainWindow):
             )
             return
 
-        point_count, slice_axis, slice_center, speed_range = self._vtk_viewer.plot_velocity_slice(output, velocity_array)
+        point_count, slice_axis, slice_center, speed_range = self._vtk_viewer.plot_velocity_slice(
+            output,
+            velocity_array,
+            None if requested_axis == "自动" else requested_axis,
+            requested_position,
+        )
         self._append_log(
             "速度切面已加载："
-            f"time={selected_time}, axis={slice_axis}, center={slice_center:.6g}, points={point_count}, "
+            f"time={selected_time}, requestedAxis={requested_axis}, position={requested_position:.2f}, "
+            f"resolvedAxis={slice_axis}, center={slice_center:.6g}, points={point_count}, "
             f"speedRange=({speed_range[0]:.6g}, {speed_range[1]:.6g})"
         )
         self._show_visualization_feedback(
             "速度切面已加载",
-            "独立 3D 视图窗口显示速度大小 |U| 的中间切面。\n"
+            "独立 3D 视图窗口显示速度大小 |U| 的指定切面。\n"
             "可以把它理解成：用一把刀从计算区域中间切开，只看切面附近的流速分布。\n"
-            f"切面方向：{slice_axis} 方向中间截面\n"
+            f"请求方向：{requested_axis}\n"
+            f"实际方向：{slice_axis}\n"
+            f"归一化位置：{requested_position:.2f}\n"
             f"切面位置：{slice_axis}={slice_center:.6g}\n"
             f"时间步：{selected_time}\n"
             f"切面点数：{point_count}\n"
             f"速度范围：({speed_range[0]:.6g}, {speed_range[1]:.6g})\n"
-            "说明：当前 v1 是点采样切面，后续会升级为真正连续面片切面。",
+            "说明：位置 0.00 表示该方向最小坐标侧，1.00 表示最大坐标侧；当前仍是点采样切面。",
         )
         self._set_status("速度切面已加载。")
 
