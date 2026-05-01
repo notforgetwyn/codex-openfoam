@@ -15,12 +15,13 @@ class ReportExportService:
         project: SimulationProject,
         result_index: CaseResultIndex,
         vtk_info: OpenFoamVtkCaseInfo | None,
+        asset_paths: list[Path] | None = None,
     ) -> Path:
         results_dir = project.case_dir / "foamdesk_results"
         results_dir.mkdir(parents=True, exist_ok=True)
         report_path = results_dir / "report.md"
         report_path.write_text(
-            self._build_markdown(project, result_index, vtk_info),
+            self._build_markdown(project, result_index, vtk_info, asset_paths or []),
             encoding="utf-8",
         )
         return report_path
@@ -30,11 +31,12 @@ class ReportExportService:
         project: SimulationProject,
         result_index: CaseResultIndex,
         vtk_info: OpenFoamVtkCaseInfo | None,
+        asset_paths: list[Path],
     ) -> str:
         metrics = self._load_metrics(project.case_dir / "foamdesk_results" / "metrics.json")
         residual_csv_path = project.case_dir / "foamdesk_results" / "residuals.csv"
         lines = [
-            "# FoamDesk 仿真报告 v1",
+            "# FoamDesk 仿真报告 v2",
             "",
             f"生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             "",
@@ -110,7 +112,27 @@ class ReportExportService:
             "",
             f"- 残差 CSV：`{residual_csv_path}`" if residual_csv_path.exists() else "- 未发现残差 CSV。",
             "",
-            "## 6. 当前可视化能力",
+            "## 6. 报告图片",
+            "",
+        ])
+        if asset_paths:
+            lines.append("以下图片由 FoamDesk 在导出报告时自动生成。")
+            lines.append("")
+            for asset_path in asset_paths:
+                relative_path = self._relative_markdown_path(asset_path, project.case_dir / "foamdesk_results")
+                title = asset_path.stem.replace("_", " ")
+                lines.extend([
+                    f"### {title}",
+                    "",
+                    f"![{title}]({relative_path})",
+                    "",
+                ])
+        else:
+            lines.append("- 未生成报告图片。请先绘制残差曲线或打开 3D 可视化标签页。")
+
+        lines.extend([
+            "",
+            "## 7. 当前可视化能力",
             "",
             "- 压力点云图：结果 -> 云图 -> 加载压力云图",
             "- 压力表面云图：结果 -> 云图 -> 加载压力表面云图",
@@ -119,9 +141,9 @@ class ReportExportService:
             "- 速度流线：结果 -> 速度场 -> 加载速度流线",
             "- PNG 导出：3D 视图窗口 -> 导出 PNG",
             "",
-            "## 7. 说明",
+            "## 8. 说明",
             "",
-            "本报告是 FoamDesk v1 Markdown 报告，当前先汇总项目、Case、字段、时间步、残差和可视化能力。后续可扩展为自动嵌入图片、导出 PDF、生成工程结论。",
+            "本报告是 FoamDesk v2 Markdown 报告，当前已汇总项目、Case、字段、时间步、残差、可视化能力，并自动嵌入报告图片。后续可扩展为导出 PDF、生成工程结论和对比多个 Case。",
             "",
         ])
         return "\n".join(lines)
@@ -133,3 +155,10 @@ class ReportExportService:
             return json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
+
+    def _relative_markdown_path(self, path: Path, base_dir: Path) -> str:
+        try:
+            relative = path.relative_to(base_dir)
+        except ValueError:
+            relative = path
+        return relative.as_posix()

@@ -705,6 +705,32 @@ class VtkViewerDialog(QDialog):
             return
         QMessageBox.information(self, "导出完成", f"已导出 PNG：\n{file_path}")
 
+    def export_all_pngs(self, output_dir: Path) -> list[Path]:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        paths: list[Path] = []
+        used_names: set[str] = set()
+        for index in range(self._tabs.count()):
+            canvas = self._tabs.widget(index)
+            if not isinstance(canvas, FigureCanvas):
+                continue
+            title = self._tabs.tabText(index) or f"3d_view_{index + 1}"
+            base_name = self._safe_file_stem(title)
+            file_name = f"{base_name}.png"
+            suffix = 2
+            while file_name in used_names:
+                file_name = f"{base_name}_{suffix}.png"
+                suffix += 1
+            used_names.add(file_name)
+            path = output_dir / file_name
+            canvas.figure.savefig(
+                path,
+                dpi=180,
+                facecolor=canvas.figure.get_facecolor(),
+                bbox_inches="tight",
+            )
+            paths.append(path)
+        return paths
+
     def _tab_title(self, title: str) -> str:
         base = title.strip() or "3D View"
         existing_titles = {self._tabs.tabText(index) for index in range(self._tabs.count())}
@@ -714,6 +740,12 @@ class VtkViewerDialog(QDialog):
         while f"{base} {suffix}" in existing_titles:
             suffix += 1
         return f"{base} {suffix}"
+
+    def _safe_file_stem(self, title: str) -> str:
+        return "".join(
+            character if character.isalnum() or character in ("-", "_") else "_"
+            for character in title.strip().lower()
+        ).strip("_") or "foamdesk_visualization"
 
     def _close_tab(self, index: int) -> None:
         widget = self._tabs.widget(index)
@@ -1620,10 +1652,12 @@ class MainWindow(QMainWindow):
                 vtk_info = self._context.openfoam_vtk_service.inspect(self._current_project)
             except (OSError, RuntimeError):
                 vtk_info = None
+            asset_paths = self._export_report_assets()
             report_path = self._context.report_export_service.export_markdown(
                 self._current_project,
                 result_index,
                 vtk_info,
+                asset_paths,
             )
         except OSError as error:
             self._show_error(f"导出 Markdown 报告失败：{error}")
@@ -1632,9 +1666,54 @@ class MainWindow(QMainWindow):
         self._results_text.setPlainText(
             "Markdown 报告已导出\n\n"
             f"路径：{report_path}\n\n"
-            "当前报告包含：项目/Case、结果索引、VTK 字段、求解指标、残差数据和可视化能力说明。"
+            "当前报告包含：项目/Case、结果索引、VTK 字段、求解指标、残差数据、可视化能力说明和自动嵌入图片。"
         )
         self._set_status("Markdown 报告导出完成。")
+
+    def _export_report_assets(self) -> list[Path]:
+        if self._current_project is None:
+            return []
+        assets_dir = self._current_project.case_dir / "foamdesk_results" / "report_assets"
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        asset_paths: list[Path] = []
+        residual_path = self._export_residual_report_asset(assets_dir)
+        if residual_path is not None:
+            asset_paths.append(residual_path)
+        if self._vtk_viewer is not None:
+            asset_paths.extend(self._vtk_viewer.export_all_pngs(assets_dir))
+        if asset_paths:
+            self._append_log(f"报告图片已导出：{len(asset_paths)} 个")
+        return asset_paths
+
+    def _export_residual_report_asset(self, assets_dir: Path) -> Path | None:
+        if self._current_project is None:
+            return None
+        try:
+            series = self._context.residual_plot_service.load_series(self._current_project)
+        except (OSError, ValueError):
+            return None
+        figure = Figure(figsize=(8, 3.6), tight_layout=True)
+        axes = figure.add_subplot(111)
+        for field, points in series.items():
+            points = sorted(points, key=lambda item: item[0])
+            axes.plot(
+                [time for time, _residual in points],
+                [residual for _time, residual in points],
+                marker="o",
+                linewidth=1.4,
+                markersize=3,
+                label=field,
+            )
+        axes.set_title("Residual Curve")
+        axes.set_xlabel("Time")
+        axes.set_ylabel("Final residual")
+        axes.set_yscale("log")
+        axes.grid(True, which="both", linestyle="--", alpha=0.35)
+        axes.legend(loc="best")
+        path = assets_dir / "residual_curve.png"
+        figure.savefig(path, dpi=180, bbox_inches="tight")
+        return path
+
     def _plot_residual_curve(self) -> None:
         if self._current_project is None:
             self._show_error("请先新建或打开项目。")
