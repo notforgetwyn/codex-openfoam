@@ -1214,10 +1214,29 @@ class MainWindow(QMainWindow):
         self._visual_frame_interval_input.setRange(100, 5000)
         self._visual_frame_interval_input.setValue(800)
         self._visual_frame_interval_input.setSuffix(" ms")
+        self._streamline_seed_count_input = QSpinBox()
+        self._streamline_seed_count_input.setRange(4, 96)
+        self._streamline_seed_count_input.setSingleStep(4)
+        self._streamline_seed_count_input.setValue(24)
+        self._streamline_length_factor_input = QDoubleSpinBox()
+        self._streamline_length_factor_input.setRange(0.5, 10.0)
+        self._streamline_length_factor_input.setSingleStep(0.25)
+        self._streamline_length_factor_input.setDecimals(2)
+        self._streamline_length_factor_input.setValue(2.5)
+        self._streamline_length_factor_input.setSuffix(" x")
+        self._streamline_step_percent_input = QDoubleSpinBox()
+        self._streamline_step_percent_input.setRange(0.2, 10.0)
+        self._streamline_step_percent_input.setSingleStep(0.2)
+        self._streamline_step_percent_input.setDecimals(1)
+        self._streamline_step_percent_input.setValue(2.0)
+        self._streamline_step_percent_input.setSuffix(" %")
         self._visual_field_combo.setMinimumWidth(160)
         self._visual_time_combo.setMinimumWidth(160)
         self._slice_axis_combo.setMinimumWidth(86)
         self._slice_position_input.setMaximumWidth(92)
+        self._streamline_seed_count_input.setMaximumWidth(92)
+        self._streamline_length_factor_input.setMaximumWidth(92)
+        self._streamline_step_percent_input.setMaximumWidth(92)
         field_time_panel = QWidget()
         field_time_layout = QVBoxLayout(field_time_panel)
         field_time_layout.setContentsMargins(10, 10, 10, 10)
@@ -1251,6 +1270,27 @@ class MainWindow(QMainWindow):
         slice_layout.addLayout(slice_position_row)
         slice_layout.addWidget(slice_hint)
 
+        streamline_panel = QWidget()
+        streamline_layout = QVBoxLayout(streamline_panel)
+        streamline_layout.setContentsMargins(10, 10, 10, 10)
+        streamline_layout.setSpacing(8)
+        seed_row = QHBoxLayout()
+        seed_row.addWidget(QLabel("种子点"))
+        seed_row.addWidget(self._streamline_seed_count_input)
+        length_row = QHBoxLayout()
+        length_row.addWidget(QLabel("追踪长度"))
+        length_row.addWidget(self._streamline_length_factor_input)
+        step_row = QHBoxLayout()
+        step_row.addWidget(QLabel("积分步长"))
+        step_row.addWidget(self._streamline_step_percent_input)
+        streamline_hint = QLabel("种子点越多线越密；追踪长度越大线越长；步长越小越细但更慢。")
+        streamline_hint.setWordWrap(True)
+        streamline_hint.setObjectName("sectionHint")
+        streamline_layout.addLayout(seed_row)
+        streamline_layout.addLayout(length_row)
+        streamline_layout.addLayout(step_row)
+        streamline_layout.addWidget(streamline_hint)
+
         animation_panel = QWidget()
         animation_layout = QVBoxLayout(animation_panel)
         animation_layout.setContentsMargins(10, 10, 10, 10)
@@ -1270,9 +1310,11 @@ class MainWindow(QMainWindow):
 
         field_time_button = make_widget_menu_button("字段时间", field_time_panel)
         slice_settings_button = make_widget_menu_button("切面设置", slice_panel)
+        streamline_settings_button = make_widget_menu_button("流线设置", streamline_panel)
         animation_button = make_widget_menu_button("动画控制", animation_panel)
         selector_row.addWidget(field_time_button)
         selector_row.addWidget(slice_settings_button)
+        selector_row.addWidget(streamline_settings_button)
         selector_row.addWidget(animation_button)
         selector_row.addStretch(1)
         self._results_text = QTextEdit()
@@ -1889,9 +1931,14 @@ class MainWindow(QMainWindow):
         selected_time = self._visual_time_combo.currentText().strip() or "默认"
         time_value = self._selected_visualization_time()
         self._ensure_vtk_viewer()
+        seed_count_limit = int(self._streamline_seed_count_input.value())
+        length_factor = float(self._streamline_length_factor_input.value())
+        step_factor = float(self._streamline_step_percent_input.value()) / 100.0
         self._show_visualization_feedback(
             "正在加载速度流线",
-            f"字段：U\n算法：VTK StreamTracer\n时间步：{selected_time}\nCase 路径：{self._current_project.case_dir}",
+            f"字段：U\n算法：VTK StreamTracer\n时间步：{selected_time}\n"
+            f"种子点上限：{seed_count_limit}\n追踪长度：{length_factor:.2f} x 域尺寸\n"
+            f"积分步长：{step_factor * 100:.1f}% 域尺寸\nCase 路径：{self._current_project.case_dir}",
         )
         try:
             case_info = self._context.openfoam_vtk_service.inspect(self._current_project)
@@ -1913,7 +1960,13 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            streamline_output, main_axis, seed_count, speed_range = self._build_vtk_streamlines(output, velocity_array)
+            streamline_output, main_axis, seed_count, speed_range = self._build_vtk_streamlines(
+                output,
+                velocity_array,
+                seed_count_limit=seed_count_limit,
+                length_factor=length_factor,
+                step_factor=step_factor,
+            )
         except RuntimeError as error:
             self._show_error(f"生成 VTK 流线失败：{error}")
             return
@@ -1926,7 +1979,8 @@ class MainWindow(QMainWindow):
         self._append_log(
             "速度流线已加载："
             f"algorithm=VTK StreamTracer, time={selected_time}, mainAxis={main_axis}, "
-            f"seeds={seed_count}, lines={line_count}, linePoints={line_point_count}, "
+            f"seeds={seed_count}, seedLimit={seed_count_limit}, lengthFactor={length_factor:.2f}, "
+            f"stepFactor={step_factor:.4f}, lines={line_count}, linePoints={line_point_count}, "
             f"speedRange=({speed_range[0]:.6g}, {speed_range[1]:.6g})"
         )
         self._show_visualization_feedback(
@@ -1936,15 +1990,25 @@ class MainWindow(QMainWindow):
             f"算法：VTK StreamTracer\n"
             f"主流向轴：{main_axis}\n"
             f"时间步：{selected_time}\n"
-            f"种子点数量：{seed_count}\n"
+            f"种子点上限：{seed_count_limit}\n"
+            f"实际种子点数量：{seed_count}\n"
+            f"追踪长度：{length_factor:.2f} x 域尺寸\n"
+            f"积分步长：{step_factor * 100:.1f}% 域尺寸\n"
             f"流线数量：{line_count}\n"
             f"流线点数：{line_point_count}\n"
             f"速度范围：({speed_range[0]:.6g}, {speed_range[1]:.6g})\n"
-            "说明：本阶段已替换掉临时最近邻追踪，后续可继续增加种子点密度调节。",
+            "说明：种子点越多流线越密，步长越小越细但计算更慢。",
         )
         self._set_status("速度流线已加载。")
 
-    def _build_vtk_streamlines(self, poly_data, velocity_array):
+    def _build_vtk_streamlines(
+        self,
+        poly_data,
+        velocity_array,
+        seed_count_limit: int = 24,
+        length_factor: float = 2.5,
+        step_factor: float = 0.02,
+    ):
         points = self._vtk_viewer._points(poly_data)
         vectors = vtk_to_numpy(velocity_array)
         if points.size == 0 or vectors.size == 0 or vectors.ndim != 2 or vectors.shape[1] < 3:
@@ -1967,11 +2031,14 @@ class MainWindow(QMainWindow):
         plane_tolerance = max(float(bounds_max[axis] - bounds_min[axis]) * 0.08, 1e-9)
         seed_mask = np.abs(points[:, axis] - seed_plane) <= plane_tolerance
         seed_points = points[seed_mask & usable]
+        seed_count_limit = max(4, min(int(seed_count_limit), 96))
+        length_factor = max(0.5, min(float(length_factor), 10.0))
+        step_factor = max(0.002, min(float(step_factor), 0.1))
         if len(seed_points) == 0:
-            seed_indices = np.argsort(np.abs(points[:, axis] - seed_plane))[:18]
+            seed_indices = np.argsort(np.abs(points[:, axis] - seed_plane))[:seed_count_limit]
             seed_points = points[seed_indices]
-        if len(seed_points) > 24:
-            indices = np.linspace(0, len(seed_points) - 1, 24, dtype=int)
+        if len(seed_points) > seed_count_limit:
+            indices = np.linspace(0, len(seed_points) - 1, seed_count_limit, dtype=int)
             seed_points = seed_points[indices]
 
         vtk_seed_points = vtkPoints()
@@ -1981,15 +2048,16 @@ class MainWindow(QMainWindow):
         seed_data.SetPoints(vtk_seed_points)
 
         domain_size = max(float((bounds_max - bounds_min).max()), 1e-9)
+        initial_step = max(domain_size * step_factor, domain_size * 0.002)
         tracer = vtkStreamTracer()
         tracer.SetInputData(poly_data)
         tracer.SetSourceData(seed_data)
         tracer.SetIntegrator(vtkRungeKutta4())
         tracer.SetIntegrationDirectionToForward()
-        tracer.SetMaximumPropagation(domain_size * 2.5)
-        tracer.SetInitialIntegrationStep(domain_size * 0.02)
-        tracer.SetMinimumIntegrationStep(domain_size * 0.001)
-        tracer.SetMaximumIntegrationStep(domain_size * 0.05)
+        tracer.SetMaximumPropagation(domain_size * length_factor)
+        tracer.SetInitialIntegrationStep(initial_step)
+        tracer.SetMinimumIntegrationStep(max(initial_step * 0.1, domain_size * 0.0002))
+        tracer.SetMaximumIntegrationStep(max(initial_step * 2.5, domain_size * 0.005))
         tracer.SetComputeVorticity(False)
         tracer.SetInputArrayToProcess(0, 0, 0, 0, "U")
         tracer.Update()
