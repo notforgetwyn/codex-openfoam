@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 from vtkmodules.util.numpy_support import vtk_to_numpy
 
@@ -1145,6 +1146,15 @@ class MainWindow(QMainWindow):
             button.setMenu(menu)
             return button
 
+        def make_widget_menu_button(title: str, panel: QWidget) -> QPushButton:
+            button = QPushButton(title)
+            menu = QMenu(button)
+            action = QWidgetAction(menu)
+            action.setDefaultWidget(panel)
+            menu.addAction(action)
+            button.setMenu(menu)
+            return button
+
         result_data_button = make_menu_button(
             "结果数据",
             [
@@ -1208,22 +1218,62 @@ class MainWindow(QMainWindow):
         self._visual_time_combo.setMinimumWidth(160)
         self._slice_axis_combo.setMinimumWidth(86)
         self._slice_position_input.setMaximumWidth(92)
-        selector_row.addWidget(QLabel("字段"))
-        selector_row.addWidget(self._visual_field_combo)
-        selector_row.addWidget(QLabel("时间步"))
-        selector_row.addWidget(self._visual_time_combo)
-        selector_row.addWidget(refresh_visual_fields_button)
-        selector_row.addWidget(load_selected_surface_button)
-        selector_row.addWidget(QLabel("切面"))
-        selector_row.addWidget(self._slice_axis_combo)
-        selector_row.addWidget(QLabel("位置"))
-        selector_row.addWidget(self._slice_position_input)
-        selector_row.addWidget(previous_frame_button)
-        selector_row.addWidget(next_frame_button)
-        selector_row.addWidget(QLabel("帧间隔"))
-        selector_row.addWidget(self._visual_frame_interval_input)
-        selector_row.addWidget(play_visual_animation_button)
-        selector_row.addWidget(stop_visual_animation_button)
+        field_time_panel = QWidget()
+        field_time_layout = QVBoxLayout(field_time_panel)
+        field_time_layout.setContentsMargins(10, 10, 10, 10)
+        field_time_layout.setSpacing(8)
+        field_row = QHBoxLayout()
+        field_row.addWidget(QLabel("字段"))
+        field_row.addWidget(self._visual_field_combo)
+        time_row = QHBoxLayout()
+        time_row.addWidget(QLabel("时间步"))
+        time_row.addWidget(self._visual_time_combo)
+        field_action_row = QHBoxLayout()
+        field_action_row.addWidget(refresh_visual_fields_button)
+        field_action_row.addWidget(load_selected_surface_button)
+        field_time_layout.addLayout(field_row)
+        field_time_layout.addLayout(time_row)
+        field_time_layout.addLayout(field_action_row)
+
+        slice_panel = QWidget()
+        slice_layout = QVBoxLayout(slice_panel)
+        slice_layout.setContentsMargins(10, 10, 10, 10)
+        slice_layout.setSpacing(8)
+        slice_axis_row = QHBoxLayout()
+        slice_axis_row.addWidget(QLabel("切面"))
+        slice_axis_row.addWidget(self._slice_axis_combo)
+        slice_position_row = QHBoxLayout()
+        slice_position_row.addWidget(QLabel("位置"))
+        slice_position_row.addWidget(self._slice_position_input)
+        slice_hint = QLabel("0.00 最小侧，0.50 中间，1.00 最大侧")
+        slice_hint.setObjectName("sectionHint")
+        slice_layout.addLayout(slice_axis_row)
+        slice_layout.addLayout(slice_position_row)
+        slice_layout.addWidget(slice_hint)
+
+        animation_panel = QWidget()
+        animation_layout = QVBoxLayout(animation_panel)
+        animation_layout.setContentsMargins(10, 10, 10, 10)
+        animation_layout.setSpacing(8)
+        frame_row = QHBoxLayout()
+        frame_row.addWidget(previous_frame_button)
+        frame_row.addWidget(next_frame_button)
+        interval_row = QHBoxLayout()
+        interval_row.addWidget(QLabel("帧间隔"))
+        interval_row.addWidget(self._visual_frame_interval_input)
+        play_row = QHBoxLayout()
+        play_row.addWidget(play_visual_animation_button)
+        play_row.addWidget(stop_visual_animation_button)
+        animation_layout.addLayout(frame_row)
+        animation_layout.addLayout(interval_row)
+        animation_layout.addLayout(play_row)
+
+        field_time_button = make_widget_menu_button("字段时间", field_time_panel)
+        slice_settings_button = make_widget_menu_button("切面设置", slice_panel)
+        animation_button = make_widget_menu_button("动画控制", animation_panel)
+        selector_row.addWidget(field_time_button)
+        selector_row.addWidget(slice_settings_button)
+        selector_row.addWidget(animation_button)
         selector_row.addStretch(1)
         self._results_text = QTextEdit()
         self._results_text.setReadOnly(True)
