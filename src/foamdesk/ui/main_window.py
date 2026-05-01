@@ -193,15 +193,22 @@ class VtkViewerDialog(QDialog):
 
         action_row = QHBoxLayout()
         action_row.addStretch(1)
+        clear_button = QPushButton("清空视图")
+        clear_button.clicked.connect(self._clear_tabs)
         export_button = QPushButton("导出 PNG")
         export_button.clicked.connect(self._export_png)
+        action_row.addWidget(clear_button)
         action_row.addWidget(export_button)
         layout.addLayout(action_row)
 
         self._last_plot_title = "foamdesk_visualization"
-        self.figure = Figure(figsize=(8, 6), facecolor="#1e1e1e", tight_layout=True)
-        self.canvas = FigureCanvas(self.figure)
-        layout.addWidget(self.canvas)
+        self.figure: Figure | None = None
+        self.canvas: FigureCanvas | None = None
+        self._tabs = QTabWidget()
+        self._tabs.setDocumentMode(True)
+        self._tabs.setTabsClosable(True)
+        self._tabs.tabCloseRequested.connect(self._close_tab)
+        layout.addWidget(self._tabs)
 
     def plot_cube(self) -> None:
         axes = self._reset_axes("3D Preview")
@@ -628,7 +635,10 @@ class VtkViewerDialog(QDialog):
 
     def _reset_axes(self, title: str):
         self._last_plot_title = title
-        self.figure.clear()
+        self.figure = Figure(figsize=(8, 6), facecolor="#1e1e1e", tight_layout=True)
+        self.canvas = FigureCanvas(self.figure)
+        self._tabs.addTab(self.canvas, self._tab_title(title))
+        self._tabs.setCurrentWidget(self.canvas)
         axes = self.figure.add_subplot(111, projection="3d", facecolor="#1e1e1e")
         axes.set_title(title, color="#d4d4d4", pad=14)
         axes.set_xlabel("X", color="#d4d4d4")
@@ -651,15 +661,21 @@ class VtkViewerDialog(QDialog):
         self._show()
 
     def _show(self) -> None:
-        self.canvas.draw()
+        if self.canvas is not None:
+            self.canvas.draw()
         self.show()
         self.raise_()
         self.activateWindow()
 
     def _export_png(self) -> None:
+        current_canvas = self._tabs.currentWidget()
+        if not isinstance(current_canvas, FigureCanvas):
+            QMessageBox.information(self, "暂无视图", "当前没有可导出的 3D 视图。")
+            return
+        current_title = self._tabs.tabText(self._tabs.currentIndex()) or self._last_plot_title
         safe_title = "".join(
             character if character.isalnum() or character in ("-", "_") else "_"
-            for character in self._last_plot_title.strip().lower()
+            for character in current_title.strip().lower()
         ).strip("_") or "foamdesk_visualization"
         default_name = f"{safe_title}.png"
         file_path, _ = QFileDialog.getSaveFileName(
@@ -673,11 +689,36 @@ class VtkViewerDialog(QDialog):
         if not file_path.lower().endswith(".png"):
             file_path = f"{file_path}.png"
         try:
-            self.figure.savefig(file_path, dpi=180, facecolor=self.figure.get_facecolor(), bbox_inches="tight")
+            current_canvas.figure.savefig(
+                file_path,
+                dpi=180,
+                facecolor=current_canvas.figure.get_facecolor(),
+                bbox_inches="tight",
+            )
         except OSError as error:
             QMessageBox.warning(self, "导出失败", f"PNG 导出失败：{error}")
             return
         QMessageBox.information(self, "导出完成", f"已导出 PNG：\n{file_path}")
+
+    def _tab_title(self, title: str) -> str:
+        base = title.strip() or "3D View"
+        existing_titles = {self._tabs.tabText(index) for index in range(self._tabs.count())}
+        if base not in existing_titles:
+            return base
+        suffix = 2
+        while f"{base} {suffix}" in existing_titles:
+            suffix += 1
+        return f"{base} {suffix}"
+
+    def _close_tab(self, index: int) -> None:
+        widget = self._tabs.widget(index)
+        self._tabs.removeTab(index)
+        if widget is not None:
+            widget.deleteLater()
+
+    def _clear_tabs(self) -> None:
+        while self._tabs.count():
+            self._close_tab(0)
 
     def _points(self, poly_data) -> np.ndarray:
         vtk_points = poly_data.GetPoints()
