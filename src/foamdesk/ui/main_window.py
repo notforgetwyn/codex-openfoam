@@ -1050,6 +1050,7 @@ class MainWindow(QMainWindow):
                 ("刷新结果索引", self._refresh_results_panel),
                 ("导出求解指标", self._export_solver_metrics),
                 ("绘制残差曲线", self._plot_residual_curve),
+                ("导出 Markdown 报告", self._export_markdown_report),
             ],
         )
         three_d_button = make_menu_button(
@@ -1360,6 +1361,31 @@ class MainWindow(QMainWindow):
         self._set_status("求解指标导出完成。")
         return True
 
+    def _export_markdown_report(self) -> None:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return
+        try:
+            result_index = self._context.result_index_service.index(self._current_project)
+            try:
+                vtk_info = self._context.openfoam_vtk_service.inspect(self._current_project)
+            except (OSError, RuntimeError):
+                vtk_info = None
+            report_path = self._context.report_export_service.export_markdown(
+                self._current_project,
+                result_index,
+                vtk_info,
+            )
+        except OSError as error:
+            self._show_error(f"导出 Markdown 报告失败：{error}")
+            return
+        self._append_log(f"Markdown 报告已导出：{report_path}")
+        self._results_text.setPlainText(
+            "Markdown 报告已导出\n\n"
+            f"路径：{report_path}\n\n"
+            "当前报告包含：项目/Case、结果索引、VTK 字段、求解指标、残差数据和可视化能力说明。"
+        )
+        self._set_status("Markdown 报告导出完成。")
     def _plot_residual_curve(self) -> None:
         if self._current_project is None:
             self._show_error("请先新建或打开项目。")

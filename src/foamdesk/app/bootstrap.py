@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 
@@ -10,6 +10,7 @@ from foamdesk.services.metric_export_service import MetricExportService
 from foamdesk.services.openfoam_vtk_service import OpenFoamVtkService
 from foamdesk.services.project_service import ProjectService
 from foamdesk.services.residual_plot_service import ResidualPlotService
+from foamdesk.services.report_export_service import ReportExportService
 from foamdesk.services.result_index_service import ResultIndexService
 from foamdesk.services.settings_service import AppSettingsService
 
@@ -27,5 +28,6 @@ class ApplicationContext:
         self.metric_export_service = MetricExportService()
         self.openfoam_vtk_service = OpenFoamVtkService()
         self.residual_plot_service = ResidualPlotService()
+        self.report_export_service = ReportExportService()
         self.result_index_service = ResultIndexService()
         self.environment_detector = OpenFOAMEnvironmentDetector(self.settings_service)
