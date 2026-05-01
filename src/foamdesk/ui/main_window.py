@@ -9,6 +9,7 @@ from matplotlib.colors import Normalize
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from scipy.interpolate import griddata
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtCore import QProcess, QTimer
 from PySide6.QtGui import QFont
@@ -430,6 +431,106 @@ class VtkViewerDialog(QDialog):
             vmax=speed_range[1],
         )
         colorbar = self.figure.colorbar(scatter, ax=axes, shrink=0.72, pad=0.08)
+        colorbar.set_label("|U|", color="#d4d4d4")
+        colorbar.ax.yaxis.set_tick_params(color="#d4d4d4")
+        for label in colorbar.ax.get_yticklabels():
+            label.set_color("#d4d4d4")
+        self._finish_axes(axes, points)
+        return len(slice_points), resolved_axis_name, center, speed_range
+
+    def plot_velocity_slice_contour(
+        self,
+        poly_data,
+        vector_array,
+        axis_name: str | None = None,
+        normalized_position: float = 0.5,
+        resolution: int = 80,
+    ) -> tuple[int, str, float, tuple[float, float]]:
+        points = self._points(poly_data)
+        vectors = vtk_to_numpy(vector_array)
+        axes = self._reset_axes("Velocity Slice Contour |U|")
+        if points.size == 0 or vectors.size == 0 or vectors.ndim != 2 or vectors.shape[1] < 3:
+            axes.text2D(0.08, 0.5, "No velocity slice data to display.", color="#d4d4d4")
+            self._show()
+            return 0, "X", 0.0, (0.0, 0.0)
+
+        count = min(len(points), len(vectors))
+        points = points[:count]
+        speeds = np.linalg.norm(vectors[:count, :3], axis=1)
+        normalized_position = min(max(float(normalized_position), 0.0), 1.0)
+
+        def build_mask(axis: int) -> tuple[float, np.ndarray]:
+            axis_min = float(points[:, axis].min())
+            axis_max = float(points[:, axis].max())
+            center = axis_min + (axis_max - axis_min) * normalized_position
+            span = float(axis_max - axis_min)
+            tolerance = max(span * 0.055, 1e-9)
+            mask = np.abs(points[:, axis] - center) <= tolerance
+            if mask.sum() < 8:
+                nearest = np.argsort(np.abs(points[:, axis] - center))[: min(240, len(points))]
+                mask = np.zeros(len(points), dtype=bool)
+                mask[nearest] = True
+            return center, mask
+
+        requested_axis = None if not axis_name or axis_name == "自动" else "XYZ".find(axis_name)
+        if requested_axis is not None and requested_axis >= 0:
+            axis = requested_axis
+            center, mask = build_mask(axis)
+        else:
+            candidates: list[tuple[float, int, float, np.ndarray]] = []
+            for candidate_axis in range(3):
+                center, mask = build_mask(candidate_axis)
+                slice_speeds = speeds[mask]
+                score = float(slice_speeds.max() - slice_speeds.min()) if slice_speeds.size else -1.0
+                candidates.append((score, candidate_axis, center, mask))
+            _, axis, center, mask = max(candidates, key=lambda item: item[0])
+
+        resolved_axis_name = "XYZ"[axis]
+        slice_points = points[mask]
+        slice_speeds = speeds[mask]
+        if len(slice_points) < 4:
+            axes.text2D(0.08, 0.5, "Not enough points for contour interpolation.", color="#d4d4d4")
+            self._show()
+            return len(slice_points), resolved_axis_name, center, (0.0, 0.0)
+
+        plane_axes = [index for index in range(3) if index != axis]
+        plane_points = slice_points[:, plane_axes]
+        x_values = np.linspace(float(plane_points[:, 0].min()), float(plane_points[:, 0].max()), resolution)
+        y_values = np.linspace(float(plane_points[:, 1].min()), float(plane_points[:, 1].max()), resolution)
+        grid_x, grid_y = np.meshgrid(x_values, y_values)
+        grid_speed = griddata(plane_points, slice_speeds, (grid_x, grid_y), method="linear")
+        if np.isnan(grid_speed).all():
+            grid_speed = griddata(plane_points, slice_speeds, (grid_x, grid_y), method="nearest")
+        else:
+            nearest_speed = griddata(plane_points, slice_speeds, (grid_x, grid_y), method="nearest")
+            grid_speed = np.where(np.isnan(grid_speed), nearest_speed, grid_speed)
+
+        speed_range = (float(np.nanmin(grid_speed)), float(np.nanmax(grid_speed)))
+        if speed_range[0] == speed_range[1]:
+            speed_range = (speed_range[0] - 1.0, speed_range[1] + 1.0)
+        grid_points = np.zeros((resolution, resolution, 3), dtype=float)
+        grid_points[:, :, axis] = center
+        grid_points[:, :, plane_axes[0]] = grid_x
+        grid_points[:, :, plane_axes[1]] = grid_y
+        surface = axes.plot_surface(
+            grid_points[:, :, 0],
+            grid_points[:, :, 1],
+            grid_points[:, :, 2],
+            facecolors=colormaps["turbo"](Normalize(vmin=speed_range[0], vmax=speed_range[1])(grid_speed)),
+            rstride=1,
+            cstride=1,
+            linewidth=0,
+            antialiased=False,
+            shade=False,
+            alpha=0.96,
+        )
+        surface.set_edgecolor("none")
+        colorbar = self.figure.colorbar(
+            self._scalar_mappable(speed_range, colormaps["turbo"]),
+            ax=axes,
+            shrink=0.72,
+            pad=0.08,
+        )
         colorbar.set_label("|U|", color="#d4d4d4")
         colorbar.ax.yaxis.set_tick_params(color="#d4d4d4")
         for label in colorbar.ax.get_yticklabels():
@@ -1073,6 +1174,7 @@ class MainWindow(QMainWindow):
             [
                 ("加载速度箭头", self._load_velocity_vectors),
                 ("加载速度切面", self._load_velocity_slice),
+                ("加载连续速度切面", self._load_velocity_slice_contour),
                 ("加载速度流线", self._load_velocity_streamlines),
             ],
         )
@@ -1671,6 +1773,65 @@ class MainWindow(QMainWindow):
         )
         self._set_status("速度切面已加载。")
 
+    def _load_velocity_slice_contour(self) -> None:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return
+        selected_time = self._visual_time_combo.currentText().strip() or "默认"
+        time_value = self._selected_visualization_time()
+        requested_axis = self._slice_axis_combo.currentText().strip() if hasattr(self, "_slice_axis_combo") else "自动"
+        requested_position = self._slice_position_input.value() if hasattr(self, "_slice_position_input") else 0.5
+        slice_mode = "自动选择速度变化最明显的切面" if requested_axis == "自动" else f"{requested_axis} 方向切面"
+        self._ensure_vtk_viewer()
+        self._show_visualization_feedback(
+            "正在加载连续速度切面",
+            f"字段：U\n切面：{slice_mode}\n位置：{requested_position:.2f}\n时间步：{selected_time}\nCase 路径：{self._current_project.case_dir}",
+        )
+        try:
+            case_info = self._context.openfoam_vtk_service.inspect(self._current_project)
+            geometry = self._context.openfoam_vtk_service.build_geometry_filter(
+                self._current_project,
+                time_value=time_value,
+            )
+        except (OSError, RuntimeError) as error:
+            self._show_error(f"加载连续速度切面失败：{error}")
+            return
+
+        output = geometry.GetOutput()
+        velocity_array = output.GetPointData().GetArray("U")
+        if velocity_array is None:
+            self._show_error(
+                "当前连续速度切面需要点字段 U。"
+                f"可用点字段：{case_info.point_arrays}；可用单元字段：{case_info.cell_arrays}"
+            )
+            return
+
+        point_count, slice_axis, slice_center, speed_range = self._vtk_viewer.plot_velocity_slice_contour(
+            output,
+            velocity_array,
+            None if requested_axis == "自动" else requested_axis,
+            requested_position,
+        )
+        self._append_log(
+            "连续速度切面已加载："
+            f"time={selected_time}, requestedAxis={requested_axis}, position={requested_position:.2f}, "
+            f"resolvedAxis={slice_axis}, center={slice_center:.6g}, sourcePoints={point_count}, "
+            f"speedRange=({speed_range[0]:.6g}, {speed_range[1]:.6g})"
+        )
+        self._show_visualization_feedback(
+            "连续速度切面已加载",
+            "独立 3D 视图窗口显示速度大小 |U| 的连续插值切面。\n"
+            "它比点采样切面更接近专业 CFD 软件里的切面云图。\n"
+            f"请求方向：{requested_axis}\n"
+            f"实际方向：{slice_axis}\n"
+            f"归一化位置：{requested_position:.2f}\n"
+            f"切面位置：{slice_axis}={slice_center:.6g}\n"
+            f"时间步：{selected_time}\n"
+            f"参与插值点数：{point_count}\n"
+            f"速度范围：({speed_range[0]:.6g}, {speed_range[1]:.6g})\n"
+            "说明：当前 v1 使用 scipy.griddata 对切面点插值，后续可升级为 VTK 原生切平面。",
+        )
+        self._set_status("连续速度切面已加载。")
     def _load_velocity_streamlines(self) -> None:
         if self._current_project is None:
             self._show_error("请先新建或打开项目。")
