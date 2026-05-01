@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QMenuBar,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSpinBox,
     QSplitter,
@@ -209,6 +210,10 @@ class VtkViewerDialog(QDialog):
         self._tabs.setTabsClosable(True)
         self._tabs.tabCloseRequested.connect(self._close_tab)
         layout.addWidget(self._tabs)
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self._clear_tabs()
+        super().closeEvent(event)
 
     def plot_cube(self) -> None:
         axes = self._reset_axes("3D Preview")
@@ -719,6 +724,8 @@ class VtkViewerDialog(QDialog):
     def _clear_tabs(self) -> None:
         while self._tabs.count():
             self._close_tab(0)
+        self.figure = None
+        self.canvas = None
 
     def _points(self, poly_data) -> np.ndarray:
         vtk_points = poly_data.GetPoints()
@@ -1235,13 +1242,11 @@ class MainWindow(QMainWindow):
         stop_visual_animation_button.clicked.connect(lambda _checked=False: self._stop_visualization_animation())
         previous_frame_button.clicked.connect(lambda _checked=False: self._step_visualization_frame(-1))
         next_frame_button.clicked.connect(lambda _checked=False: self._step_visualization_frame(1))
-        button_row = QHBoxLayout()
-        button_row.addWidget(result_data_button)
-        button_row.addWidget(three_d_button)
-        button_row.addWidget(contour_button)
-        button_row.addWidget(velocity_button)
-        button_row.addStretch(1)
-        selector_row = QHBoxLayout()
+        action_row = QHBoxLayout()
+        action_row.addWidget(result_data_button)
+        action_row.addWidget(three_d_button)
+        action_row.addWidget(contour_button)
+        action_row.addWidget(velocity_button)
         self._visual_field_combo = QComboBox()
         self._visual_time_combo = QComboBox()
         self._slice_axis_combo = QComboBox()
@@ -1353,11 +1358,21 @@ class MainWindow(QMainWindow):
         slice_settings_button = make_widget_menu_button("切面设置", slice_panel)
         streamline_settings_button = make_widget_menu_button("流线设置", streamline_panel)
         animation_button = make_widget_menu_button("动画控制", animation_panel)
-        selector_row.addWidget(field_time_button)
-        selector_row.addWidget(slice_settings_button)
-        selector_row.addWidget(streamline_settings_button)
-        selector_row.addWidget(animation_button)
-        selector_row.addStretch(1)
+        action_row.addWidget(field_time_button)
+        action_row.addWidget(slice_settings_button)
+        action_row.addWidget(streamline_settings_button)
+        action_row.addWidget(animation_button)
+        action_row.addStretch(1)
+        action_bar = QWidget()
+        action_bar.setLayout(action_row)
+        action_scroll = QScrollArea()
+        action_scroll.setWidget(action_bar)
+        action_scroll.setWidgetResizable(True)
+        action_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        action_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        action_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        action_scroll.setMaximumHeight(58)
+        action_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._results_text = QTextEdit()
         self._results_text.setReadOnly(True)
         self._results_text.setPlainText("请先新建或打开项目，然后运行最小仿真。")
@@ -1373,8 +1388,7 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(title)
         layout.addWidget(description)
-        layout.addLayout(button_row)
-        layout.addLayout(selector_row)
+        layout.addWidget(action_scroll)
         layout.addWidget(self._results_text, 1)
         layout.addWidget(self._residual_canvas, 2)
         layout.addWidget(self._vtk_hint_label)
