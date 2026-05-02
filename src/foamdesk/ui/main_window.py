@@ -846,6 +846,7 @@ class MainWindow(QMainWindow):
         self._theme_index = 0
         self._current_project: SimulationProject | None = None
         self._foam_process: QProcess | None = None
+        self._active_process_kind = "idle"
         self._current_process_output = ""
         self._last_diagnostic_summary = "暂无诊断。"
         self._tutorial_overlay: TutorialOverlay | None = None
@@ -914,6 +915,7 @@ class MainWindow(QMainWindow):
         geometry_menu.addAction("打开几何/CAD 页", self._open_geometry_tab)
         geometry_menu.addAction("导入 STL 几何", self._import_stl_geometry)
         geometry_menu.addAction("生成 snappyHexMeshDict", self._generate_snappy_hex_mesh_dict)
+        geometry_menu.addAction("运行 snappyHexMesh", self._run_snappy_hex_mesh)
         geometry_menu.addAction("预览已导入 STL", self._preview_imported_stl)
 
         solver_menu = menu_bar.addMenu("求解器")
@@ -1167,16 +1169,19 @@ class MainWindow(QMainWindow):
         import_button = QPushButton("导入 STL")
         refresh_button = QPushButton("刷新几何清单")
         snappy_button = QPushButton("生成 snappyHexMeshDict")
+        run_snappy_button = QPushButton("运行 snappyHexMesh")
         preview_button = QPushButton("预览已导入 STL")
         limitation_button = QPushButton("STEP/IGES 支持说明")
         import_button.clicked.connect(lambda _checked=False: self._import_stl_geometry())
         refresh_button.clicked.connect(lambda _checked=False: self._refresh_geometry_panel())
         snappy_button.clicked.connect(lambda _checked=False: self._generate_snappy_hex_mesh_dict())
+        run_snappy_button.clicked.connect(lambda _checked=False: self._run_snappy_hex_mesh())
         preview_button.clicked.connect(lambda _checked=False: self._preview_imported_stl())
         limitation_button.clicked.connect(lambda _checked=False: self._show_cad_import_limitations())
         action_row.addWidget(import_button)
         action_row.addWidget(refresh_button)
         action_row.addWidget(snappy_button)
+        action_row.addWidget(run_snappy_button)
         action_row.addWidget(preview_button)
         action_row.addWidget(limitation_button)
         action_row.addStretch(1)
@@ -1628,6 +1633,57 @@ class MainWindow(QMainWindow):
         self._refresh_geometry_panel()
         self._workspace_tabs.setCurrentIndex(6)
         self._set_status("snappyHexMeshDict 生成完成。")
+
+    def _run_snappy_hex_mesh(self) -> None:
+        if self._foam_process and self._foam_process.state() != QProcess.ProcessState.NotRunning:
+            self._show_error("已有任务正在运行，请先停止当前任务。")
+            return
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return
+
+        status = self._context.environment_detector.detect()
+        if not status.is_available or not status.env_script_path:
+            self._show_error(f"OpenFOAM 环境不可用：{status.detail}")
+            return
+
+        snappy_dict = self._current_project.case_dir / "system" / "snappyHexMeshDict"
+        if not snappy_dict.exists():
+            try:
+                snappy_dict = self._context.geometry_import_service.generate_snappy_hex_mesh_dict(self._current_project)
+            except (OSError, ValueError) as error:
+                self._show_error(f"当前 Case 不能运行 snappyHexMesh：{error}")
+                return
+            self._append_log(f"缺少 snappyHexMeshDict，已自动生成：{snappy_dict}")
+
+        block_mesh_dict = self._current_project.case_dir / "system" / "blockMeshDict"
+        if not block_mesh_dict.exists():
+            self._show_error("当前 Case 缺少 system/blockMeshDict，snappyHexMesh 需要先有背景网格。")
+            return
+
+        self._workspace_tabs.setCurrentIndex(6)
+        self._bottom_tabs.setCurrentIndex(0)
+        self._task_text.setPlainText("任务状态：snappyHexMesh 运行中")
+        self._current_process_output = ""
+        self._last_diagnostic_summary = "snappyHexMesh 正在运行，暂无失败诊断。"
+        self._active_process_kind = "snappyHexMesh"
+        self._refresh_solver_run_panel("snappyHexMesh 运行中")
+        self._set_status("snappyHexMesh 运行中。")
+
+        command = (
+            f"source {shlex.quote(status.env_script_path)} >/dev/null 2>&1 && "
+            f"cd {shlex.quote(str(self._current_project.case_dir))} && "
+            "blockMesh && snappyHexMesh -overwrite"
+        )
+        self._foam_process = QProcess(self)
+        self._foam_process.setProgram("bash")
+        self._foam_process.setArguments(["-lc", command])
+        self._foam_process.readyReadStandardOutput.connect(self._read_process_stdout)
+        self._foam_process.readyReadStandardError.connect(self._read_process_stderr)
+        self._foam_process.finished.connect(self._on_process_finished)
+        self._foam_process.start()
+        self._append_log(f"启动 snappyHexMesh：{self._current_project.case_dir}")
+        self._append_log("执行流程：blockMesh -> snappyHexMesh -overwrite")
 
     def _preview_imported_stl(self) -> None:
         if self._current_project is None:
@@ -2891,6 +2947,7 @@ class MainWindow(QMainWindow):
         self._task_text.setPlainText("任务状态：最小仿真运行中")
         self._current_process_output = ""
         self._last_diagnostic_summary = "本次任务正在运行，暂无失败诊断。"
+        self._active_process_kind = "minimal"
         self._refresh_solver_run_panel("最小仿真运行中")
         self._set_status("最小仿真运行中。")
 
@@ -2919,6 +2976,7 @@ class MainWindow(QMainWindow):
         if not self._foam_process.waitForFinished(3000):
             self._foam_process.kill()
         self._task_text.setPlainText("任务状态：已停止")
+        self._active_process_kind = "idle"
         self._refresh_solver_run_panel("已停止")
         self._set_status("任务已停止。")
 
@@ -2937,7 +2995,16 @@ class MainWindow(QMainWindow):
             self._refresh_solver_metrics_panel()
 
     def _on_process_finished(self, exit_code: int, _exit_status) -> None:
-        if exit_code == 0:
+        process_kind = self._active_process_kind
+        self._active_process_kind = "idle"
+        if exit_code == 0 and process_kind == "snappyHexMesh":
+            self._task_text.setPlainText("任务状态：snappyHexMesh 完成")
+            self._last_diagnostic_summary = "snappyHexMesh 正常完成，没有失败诊断。"
+            self._refresh_geometry_panel()
+            self._refresh_results_panel()
+            self._refresh_solver_run_panel("snappyHexMesh 完成")
+            self._set_status("snappyHexMesh 完成。")
+        elif exit_code == 0:
             self._task_text.setPlainText("任务状态：最小仿真完成")
             self._last_diagnostic_summary = "本次任务正常完成，没有失败诊断。"
             if self._export_solver_metrics():
@@ -2947,9 +3014,10 @@ class MainWindow(QMainWindow):
             self._set_status("最小仿真完成。")
         else:
             self._update_diagnostics(exit_code)
-            self._task_text.setPlainText(f"任务状态：最小仿真失败，退出码 {exit_code}")
-            self._refresh_solver_run_panel(f"最小仿真失败，退出码 {exit_code}")
-            self._set_status(f"最小仿真失败，退出码 {exit_code}。")
+            label = "snappyHexMesh" if process_kind == "snappyHexMesh" else "最小仿真"
+            self._task_text.setPlainText(f"任务状态：{label}失败，退出码 {exit_code}")
+            self._refresh_solver_run_panel(f"{label}失败，退出码 {exit_code}")
+            self._set_status(f"{label}失败，退出码 {exit_code}。")
 
     def _update_diagnostics(self, exit_code: int) -> None:
         diagnostics = self._context.log_diagnostic_service.diagnose(self._current_process_output)
