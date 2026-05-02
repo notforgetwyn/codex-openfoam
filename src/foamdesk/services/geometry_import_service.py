@@ -147,6 +147,30 @@ class GeometryImportService:
         self._write_snappy_config(project, asset, dict_path, resolved_settings)
         return dict_path
 
+    def load_snappy_settings(self, project: SimulationProject) -> SnappyHexMeshSettings | None:
+        config_path = self._snappy_config_path(project)
+        if not config_path.exists():
+            return None
+        try:
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+            raw_settings = payload.get("settings", {})
+            location = raw_settings.get("location_in_mesh", [0.5, 0.5, 0.5])
+            if not isinstance(location, list | tuple) or len(location) != 3:
+                location = [0.5, 0.5, 0.5]
+            return SnappyHexMeshSettings(
+                min_refinement_level=int(raw_settings.get("min_refinement_level", 1)),
+                max_refinement_level=int(raw_settings.get("max_refinement_level", 2)),
+                location_in_mesh=(
+                    float(location[0]),
+                    float(location[1]),
+                    float(location[2]),
+                ),
+                add_layers=bool(raw_settings.get("add_layers", False)),
+                final_layer_thickness=float(raw_settings.get("final_layer_thickness", 0.3)),
+            )
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return None
+
     def _append_manifest(self, project: SimulationProject, asset: GeometryAsset) -> None:
         manifest_path = self._manifest_path(project)
         payload = {"assets": []}
@@ -172,6 +196,9 @@ class GeometryImportService:
     def _manifest_path(self, project: SimulationProject) -> Path:
         return project.case_dir / "constant" / "triSurface" / "geometry_manifest.json"
 
+    def _snappy_config_path(self, project: SimulationProject) -> Path:
+        return project.case_dir / "constant" / "triSurface" / "snappy_config.json"
+
     def _write_snappy_config(
         self,
         project: SimulationProject,
@@ -179,7 +206,7 @@ class GeometryImportService:
         dict_path: Path,
         settings: SnappyHexMeshSettings,
     ) -> None:
-        config_path = project.case_dir / "constant" / "triSurface" / "snappy_config.json"
+        config_path = self._snappy_config_path(project)
         payload = {
             "asset_name": asset.name,
             "dict_path": str(dict_path.relative_to(project.case_dir)),

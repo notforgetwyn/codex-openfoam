@@ -1644,7 +1644,22 @@ class MainWindow(QMainWindow):
         if self._current_project is None:
             self._geometry_text.setPlainText("请先新建或打开项目，然后导入 STL 几何。")
             return
+        self._load_snappy_settings_into_form()
         self._geometry_text.setPlainText(self._context.geometry_import_service.format_assets(self._current_project))
+
+    def _load_snappy_settings_into_form(self) -> None:
+        if self._current_project is None or not hasattr(self, "_snappy_min_refinement_input"):
+            return
+        settings = self._context.geometry_import_service.load_snappy_settings(self._current_project)
+        if settings is None:
+            return
+        self._snappy_min_refinement_input.setValue(settings.min_refinement_level)
+        self._snappy_max_refinement_input.setValue(settings.max_refinement_level)
+        self._snappy_location_x_input.setValue(settings.location_in_mesh[0])
+        self._snappy_location_y_input.setValue(settings.location_in_mesh[1])
+        self._snappy_location_z_input.setValue(settings.location_in_mesh[2])
+        self._snappy_add_layers_checkbox.setChecked(settings.add_layers)
+        self._snappy_layer_thickness_input.setValue(settings.final_layer_thickness)
 
     def _read_snappy_settings(self) -> SnappyHexMeshSettings:
         min_level = self._snappy_min_refinement_input.value()
