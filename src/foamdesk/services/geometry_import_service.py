@@ -78,11 +78,13 @@ class GeometryImportService:
 
     def format_assets(self, project: SimulationProject) -> str:
         assets = self.list_assets(project)
+        snappy_dict = project.case_dir / "system" / "snappyHexMeshDict"
         if not assets:
             return (
                 "当前 Case 暂无已导入几何。\n\n"
                 "MVP 支持：STL 导入到 constant/triSurface。\n"
-                "后续扩展：STEP/IGES/CATIA/SolidWorks 需要接入 OCCT/CAD 内核。"
+                "后续扩展：STEP/IGES/CATIA/SolidWorks 需要接入 OCCT/CAD 内核。\n\n"
+                f"snappyHexMeshDict：{'已生成' if snappy_dict.exists() else '未生成'}"
             )
 
         lines = [
@@ -90,6 +92,7 @@ class GeometryImportService:
             "",
             f"Case：{project.name}/{project.case_name}",
             f"triSurface：{project.case_dir / 'constant' / 'triSurface'}",
+            f"snappyHexMeshDict：{snappy_dict if snappy_dict.exists() else '未生成'}",
             "",
         ]
         for index, asset in enumerate(assets, start=1):
@@ -104,6 +107,34 @@ class GeometryImportService:
                 ]
             )
         return "\n".join(lines)
+
+    def generate_snappy_hex_mesh_dict(
+        self,
+        project: SimulationProject,
+        asset_name: str | None = None,
+    ) -> Path:
+        assets = [
+            asset
+            for asset in self.list_assets(project)
+            if asset.format.upper() == "STL" and asset.stored_path.exists()
+        ]
+        if not assets:
+            raise ValueError("当前 Case 没有可用于 snappyHexMesh 的 STL 几何。")
+
+        if asset_name:
+            matching_assets = [asset for asset in assets if asset.name == asset_name]
+            if not matching_assets:
+                raise ValueError(f"未找到 STL 几何：{asset_name}")
+            asset = matching_assets[0]
+        else:
+            asset = assets[0]
+
+        system_dir = project.case_dir / "system"
+        system_dir.mkdir(parents=True, exist_ok=True)
+        dict_path = system_dir / "snappyHexMeshDict"
+        dict_path.write_text(self._snappy_hex_mesh_dict(asset.name), encoding="utf-8")
+        self._write_snappy_config(project, asset, dict_path)
+        return dict_path
 
     def _append_manifest(self, project: SimulationProject, asset: GeometryAsset) -> None:
         manifest_path = self._manifest_path(project)
@@ -130,6 +161,16 @@ class GeometryImportService:
     def _manifest_path(self, project: SimulationProject) -> Path:
         return project.case_dir / "constant" / "triSurface" / "geometry_manifest.json"
 
+    def _write_snappy_config(self, project: SimulationProject, asset: GeometryAsset, dict_path: Path) -> None:
+        config_path = project.case_dir / "constant" / "triSurface" / "snappy_config.json"
+        payload = {
+            "asset_name": asset.name,
+            "dict_path": str(dict_path.relative_to(project.case_dir)),
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "scope": "MVP starter snappyHexMeshDict; config generation only.",
+        }
+        config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
     def _safe_name(self, name: str) -> str:
         safe = "".join(character if character.isalnum() or character in ("-", "_", ".") else "_" for character in name)
         return safe or "geometry.stl"
@@ -146,3 +187,106 @@ class GeometryImportService:
             if not candidate.exists():
                 return candidate
             counter += 1
+
+    def _snappy_hex_mesh_dict(self, stl_name: str) -> str:
+        return f"""FoamFile
+{{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      snappyHexMeshDict;
+}}
+
+castellatedMesh true;
+snap            true;
+addLayers       false;
+
+geometry
+{{
+    {stl_name}
+    {{
+        type triSurfaceMesh;
+        name importedGeometry;
+    }}
+}}
+
+castellatedMeshControls
+{{
+    maxLocalCells 100000;
+    maxGlobalCells 2000000;
+    minRefinementCells 0;
+    nCellsBetweenLevels 3;
+
+    features
+    (
+    );
+
+    refinementSurfaces
+    {{
+        importedGeometry
+        {{
+            level (1 2);
+        }}
+    }}
+
+    resolveFeatureAngle 30;
+
+    refinementRegions
+    {{
+    }}
+
+    locationInMesh (0.5 0.5 0.5);
+    allowFreeStandingZoneFaces true;
+}}
+
+snapControls
+{{
+    nSmoothPatch 3;
+    tolerance 2.0;
+    nSolveIter 30;
+    nRelaxIter 5;
+}}
+
+addLayersControls
+{{
+    relativeSizes true;
+    layers
+    {{
+    }}
+    expansionRatio 1.0;
+    finalLayerThickness 0.3;
+    minThickness 0.1;
+    nGrow 0;
+    featureAngle 60;
+    nRelaxIter 5;
+    nSmoothSurfaceNormals 1;
+    nSmoothNormals 3;
+    nSmoothThickness 10;
+    maxFaceThicknessRatio 0.5;
+    maxThicknessToMedialRatio 0.3;
+    minMedialAxisAngle 90;
+    nBufferCellsNoExtrude 0;
+    nLayerIter 50;
+}}
+
+meshQualityControls
+{{
+    maxNonOrtho 65;
+    maxBoundarySkewness 20;
+    maxInternalSkewness 4;
+    maxConcave 80;
+    minVol 1e-13;
+    minTetQuality 1e-15;
+    minArea -1;
+    minTwist 0.02;
+    minDeterminant 0.001;
+    minFaceWeight 0.02;
+    minVolRatio 0.01;
+    minTriangleTwist -1;
+    nSmoothScale 4;
+    errorReduction 0.75;
+}}
+
+debug 0;
+mergeTolerance 1e-6;
+"""

@@ -913,6 +913,7 @@ class MainWindow(QMainWindow):
         geometry_menu = menu_bar.addMenu("几何/CAD")
         geometry_menu.addAction("打开几何/CAD 页", self._open_geometry_tab)
         geometry_menu.addAction("导入 STL 几何", self._import_stl_geometry)
+        geometry_menu.addAction("生成 snappyHexMeshDict", self._generate_snappy_hex_mesh_dict)
         geometry_menu.addAction("预览已导入 STL", self._preview_imported_stl)
 
         solver_menu = menu_bar.addMenu("求解器")
@@ -1165,14 +1166,17 @@ class MainWindow(QMainWindow):
         action_row = QHBoxLayout()
         import_button = QPushButton("导入 STL")
         refresh_button = QPushButton("刷新几何清单")
+        snappy_button = QPushButton("生成 snappyHexMeshDict")
         preview_button = QPushButton("预览已导入 STL")
         limitation_button = QPushButton("STEP/IGES 支持说明")
         import_button.clicked.connect(lambda _checked=False: self._import_stl_geometry())
         refresh_button.clicked.connect(lambda _checked=False: self._refresh_geometry_panel())
+        snappy_button.clicked.connect(lambda _checked=False: self._generate_snappy_hex_mesh_dict())
         preview_button.clicked.connect(lambda _checked=False: self._preview_imported_stl())
         limitation_button.clicked.connect(lambda _checked=False: self._show_cad_import_limitations())
         action_row.addWidget(import_button)
         action_row.addWidget(refresh_button)
+        action_row.addWidget(snappy_button)
         action_row.addWidget(preview_button)
         action_row.addWidget(limitation_button)
         action_row.addStretch(1)
@@ -1586,6 +1590,44 @@ class MainWindow(QMainWindow):
             self._geometry_text.setPlainText("请先新建或打开项目，然后导入 STL 几何。")
             return
         self._geometry_text.setPlainText(self._context.geometry_import_service.format_assets(self._current_project))
+
+    def _generate_snappy_hex_mesh_dict(self) -> None:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return
+        assets = self._context.geometry_import_service.list_assets(self._current_project)
+        stl_assets = [asset for asset in assets if asset.format.upper() == "STL" and asset.stored_path.exists()]
+        if not stl_assets:
+            self._show_error("当前 Case 没有可生成网格配置的 STL，请先导入 STL。")
+            return
+
+        selected_name = stl_assets[0].name
+        if len(stl_assets) > 1:
+            names = [asset.name for asset in stl_assets]
+            selected_name, ok = QInputDialog.getItem(
+                self,
+                "生成 snappyHexMeshDict",
+                "选择用于 snappyHexMesh 的 STL",
+                names,
+                0,
+                False,
+            )
+            if not ok or not selected_name:
+                return
+
+        try:
+            dict_path = self._context.geometry_import_service.generate_snappy_hex_mesh_dict(
+                self._current_project,
+                selected_name,
+            )
+        except (OSError, ValueError) as error:
+            self._show_error(f"生成 snappyHexMeshDict 失败：{error}")
+            return
+
+        self._append_log(f"snappyHexMeshDict 已生成：{dict_path}")
+        self._refresh_geometry_panel()
+        self._workspace_tabs.setCurrentIndex(6)
+        self._set_status("snappyHexMeshDict 生成完成。")
 
     def _preview_imported_stl(self) -> None:
         if self._current_project is None:
