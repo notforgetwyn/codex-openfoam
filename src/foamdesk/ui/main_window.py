@@ -3334,8 +3334,9 @@ class MainWindow(QMainWindow):
             label = self._process_label(process_kind)
             failed_step = self._detect_failed_pipeline_step(process_kind, self._current_process_output)
             if failed_step:
+                advice = self._pipeline_step_advice(failed_step)
                 self._last_diagnostic_summary = (
-                    f"失败步骤：{failed_step}\n\n{self._last_diagnostic_summary}"
+                    f"失败步骤：{failed_step}\n\n{advice}\n\n{self._last_diagnostic_summary}"
                 )
                 self._problem_text.setPlainText(self._last_diagnostic_summary)
                 self._bottom_tabs.setCurrentIndex(2)
@@ -3366,6 +3367,43 @@ class MainWindow(QMainWindow):
         if not matches:
             return "未知步骤，未识别到 FoamDesk 步骤标记"
         return step_names.get(matches[-1], matches[-1])
+
+    def _pipeline_step_advice(self, failed_step: str) -> str:
+        if "blockMesh" in failed_step:
+            return (
+                "修复建议：\n"
+                "- 检查 `system/blockMeshDict` 是否存在并且语法正确。\n"
+                "- 确认背景网格区域要包住 STL 几何，否则 snappyHexMesh 后续无法贴体。\n"
+                "- 如果你刚新建 Case，可以先运行最小仿真验证 blockMesh 是否能单独通过。"
+            )
+        if "snappyHexMesh" in failed_step:
+            return (
+                "修复建议：\n"
+                "- 检查 STL 是否已经导入到 `constant/triSurface`，文件名是否和 `snappyHexMeshDict` 一致。\n"
+                "- 检查 `locationInMesh` 是否位于流体区域内部；这个点选错会导致网格区域判断失败。\n"
+                "- 先降低最大加密等级，例如从 4 降到 2，减少网格生成压力。\n"
+                "- 如果启用了边界层 addLayers，先关闭边界层再试。"
+            )
+        if "checkMesh" in failed_step:
+            return (
+                "修复建议：\n"
+                "- 查看日志中的 `Failed`、`severely non-orthogonal`、`skewness` 等关键词。\n"
+                "- 降低 snappy 加密等级或关闭边界层，先得到可用网格。\n"
+                "- 如果非正交角或扭曲度过高，需要调整背景网格、STL 几何质量或 snappy 参数。"
+            )
+        if "icoFoam" in failed_step:
+            return (
+                "修复建议：\n"
+                "- 检查 `0/U` 和 `0/p` 的边界名称是否和网格 boundary 文件一致。\n"
+                "- 如果 snappyHexMesh 生成了新的 patch，求解场文件也必须包含对应边界条件。\n"
+                "- 检查 `system/controlDict`、`fvSchemes`、`fvSolution` 是否完整。\n"
+                "- 先确认 checkMesh 通过，再运行求解器。"
+            )
+        return (
+            "修复建议：\n"
+            "- 查看底部日志中最后一个 OpenFOAM 报错块。\n"
+            "- 优先检查当前 Case 的 system、constant、0 目录是否完整。"
+        )
 
     def _format_check_mesh_summary(self, output: str) -> str:
         lines = ["checkMesh 网格质量检查摘要", ""]
