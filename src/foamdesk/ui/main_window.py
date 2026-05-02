@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import shlex
+import re
 from pathlib import Path
 
 import numpy as np
@@ -916,6 +917,7 @@ class MainWindow(QMainWindow):
         geometry_menu.addAction("导入 STL 几何", self._import_stl_geometry)
         geometry_menu.addAction("生成 snappyHexMeshDict", self._generate_snappy_hex_mesh_dict)
         geometry_menu.addAction("运行 snappyHexMesh", self._run_snappy_hex_mesh)
+        geometry_menu.addAction("运行 checkMesh", self._run_check_mesh)
         geometry_menu.addAction("预览已导入 STL", self._preview_imported_stl)
 
         solver_menu = menu_bar.addMenu("求解器")
@@ -1170,18 +1172,21 @@ class MainWindow(QMainWindow):
         refresh_button = QPushButton("刷新几何清单")
         snappy_button = QPushButton("生成 snappyHexMeshDict")
         run_snappy_button = QPushButton("运行 snappyHexMesh")
+        check_mesh_button = QPushButton("运行 checkMesh")
         preview_button = QPushButton("预览已导入 STL")
         limitation_button = QPushButton("STEP/IGES 支持说明")
         import_button.clicked.connect(lambda _checked=False: self._import_stl_geometry())
         refresh_button.clicked.connect(lambda _checked=False: self._refresh_geometry_panel())
         snappy_button.clicked.connect(lambda _checked=False: self._generate_snappy_hex_mesh_dict())
         run_snappy_button.clicked.connect(lambda _checked=False: self._run_snappy_hex_mesh())
+        check_mesh_button.clicked.connect(lambda _checked=False: self._run_check_mesh())
         preview_button.clicked.connect(lambda _checked=False: self._preview_imported_stl())
         limitation_button.clicked.connect(lambda _checked=False: self._show_cad_import_limitations())
         action_row.addWidget(import_button)
         action_row.addWidget(refresh_button)
         action_row.addWidget(snappy_button)
         action_row.addWidget(run_snappy_button)
+        action_row.addWidget(check_mesh_button)
         action_row.addWidget(preview_button)
         action_row.addWidget(limitation_button)
         action_row.addStretch(1)
@@ -1684,6 +1689,48 @@ class MainWindow(QMainWindow):
         self._foam_process.start()
         self._append_log(f"启动 snappyHexMesh：{self._current_project.case_dir}")
         self._append_log("执行流程：blockMesh -> snappyHexMesh -overwrite")
+
+    def _run_check_mesh(self) -> None:
+        if self._foam_process and self._foam_process.state() != QProcess.ProcessState.NotRunning:
+            self._show_error("已有任务正在运行，请先停止当前任务。")
+            return
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return
+
+        status = self._context.environment_detector.detect()
+        if not status.is_available or not status.env_script_path:
+            self._show_error(f"OpenFOAM 环境不可用：{status.detail}")
+            return
+
+        mesh_dir = self._current_project.case_dir / "constant" / "polyMesh"
+        if not mesh_dir.exists():
+            self._show_error("当前 Case 还没有网格，请先运行 blockMesh 或 snappyHexMesh。")
+            return
+
+        self._workspace_tabs.setCurrentIndex(6)
+        self._bottom_tabs.setCurrentIndex(0)
+        self._task_text.setPlainText("任务状态：checkMesh 运行中")
+        self._current_process_output = ""
+        self._last_diagnostic_summary = "checkMesh 正在运行，暂无失败诊断。"
+        self._active_process_kind = "checkMesh"
+        self._refresh_solver_run_panel("checkMesh 运行中")
+        self._set_status("checkMesh 运行中。")
+
+        command = (
+            f"source {shlex.quote(status.env_script_path)} >/dev/null 2>&1 && "
+            f"cd {shlex.quote(str(self._current_project.case_dir))} && "
+            "checkMesh"
+        )
+        self._foam_process = QProcess(self)
+        self._foam_process.setProgram("bash")
+        self._foam_process.setArguments(["-lc", command])
+        self._foam_process.readyReadStandardOutput.connect(self._read_process_stdout)
+        self._foam_process.readyReadStandardError.connect(self._read_process_stderr)
+        self._foam_process.finished.connect(self._on_process_finished)
+        self._foam_process.start()
+        self._append_log(f"启动 checkMesh：{self._current_project.case_dir}")
+        self._append_log("执行流程：checkMesh")
 
     def _preview_imported_stl(self) -> None:
         if self._current_project is None:
@@ -2997,7 +3044,15 @@ class MainWindow(QMainWindow):
     def _on_process_finished(self, exit_code: int, _exit_status) -> None:
         process_kind = self._active_process_kind
         self._active_process_kind = "idle"
-        if exit_code == 0 and process_kind == "snappyHexMesh":
+        if exit_code == 0 and process_kind == "checkMesh":
+            summary = self._format_check_mesh_summary(self._current_process_output)
+            self._task_text.setPlainText("任务状态：checkMesh 完成")
+            self._last_diagnostic_summary = summary
+            self._problem_text.setPlainText(summary)
+            self._refresh_results_panel()
+            self._refresh_solver_run_panel("checkMesh 完成")
+            self._set_status("checkMesh 完成。")
+        elif exit_code == 0 and process_kind == "snappyHexMesh":
             self._task_text.setPlainText("任务状态：snappyHexMesh 完成")
             self._last_diagnostic_summary = "snappyHexMesh 正常完成，没有失败诊断。"
             self._refresh_geometry_panel()
@@ -3014,10 +3069,58 @@ class MainWindow(QMainWindow):
             self._set_status("最小仿真完成。")
         else:
             self._update_diagnostics(exit_code)
-            label = "snappyHexMesh" if process_kind == "snappyHexMesh" else "最小仿真"
+            label = self._process_label(process_kind)
             self._task_text.setPlainText(f"任务状态：{label}失败，退出码 {exit_code}")
             self._refresh_solver_run_panel(f"{label}失败，退出码 {exit_code}")
             self._set_status(f"{label}失败，退出码 {exit_code}。")
+
+    def _process_label(self, process_kind: str) -> str:
+        labels = {
+            "checkMesh": "checkMesh",
+            "snappyHexMesh": "snappyHexMesh",
+            "minimal": "最小仿真",
+        }
+        return labels.get(process_kind, "OpenFOAM 任务")
+
+    def _format_check_mesh_summary(self, output: str) -> str:
+        lines = ["checkMesh 网格质量检查摘要", ""]
+        if "Mesh OK." in output:
+            lines.append("总体结论：通过，OpenFOAM 输出 Mesh OK。")
+        elif "Failed" in output or "failed" in output:
+            lines.append("总体结论：存在失败检查，需要查看日志中的 Failed 项。")
+        else:
+            lines.append("总体结论：未识别到明确 Mesh OK，请查看完整日志。")
+
+        checks = [
+            ("点数量", r"points:\s+([0-9]+)"),
+            ("面数量", r"faces:\s+([0-9]+)"),
+            ("单元数量", r"cells:\s+([0-9]+)"),
+            ("边界 patch 数量", r"boundary patches:\s+([0-9]+)"),
+            ("最大长宽比", r"Max aspect ratio\s*=\s*([0-9.eE+-]+)"),
+            ("最大非正交角", r"Mesh non-orthogonality Max:\s*([0-9.eE+-]+)"),
+            ("最大扭曲度", r"Max skewness\s*=\s*([0-9.eE+-]+)"),
+        ]
+        for label, pattern in checks:
+            match = re.search(pattern, output)
+            if match:
+                lines.append(f"{label}：{match.group(1)}")
+
+        failed_lines = [
+            line.strip()
+            for line in output.splitlines()
+            if "Failed" in line or "failed" in line or "Error" in line
+        ]
+        if failed_lines:
+            lines.extend(["", "需要关注："])
+            lines.extend(f"- {line}" for line in failed_lines[:8])
+
+        lines.extend(
+            [
+                "",
+                "说明：checkMesh 是 OpenFOAM 的网格体检工具。它不是求解流体，而是检查当前网格是否适合后续计算。",
+            ]
+        )
+        return "\n".join(lines)
 
     def _update_diagnostics(self, exit_code: int) -> None:
         diagnostics = self._context.log_diagnostic_service.diagnose(self._current_process_output)
