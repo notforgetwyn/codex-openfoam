@@ -58,6 +58,7 @@ from vtkmodules.util.numpy_support import vtk_to_numpy
 
 from foamdesk.app.bootstrap import ApplicationContext
 from foamdesk.domain.models import SimulationParameters, SimulationProject
+from foamdesk.services.geometry_import_service import SnappyHexMeshSettings
 from foamdesk.ui.startup_window import StartupWindow
 from foamdesk.ui.theme import THEMES, build_stylesheet
 
@@ -1191,6 +1192,49 @@ class MainWindow(QMainWindow):
         action_row.addWidget(limitation_button)
         action_row.addStretch(1)
 
+        snappy_form = QFormLayout()
+        self._snappy_min_refinement_input = QSpinBox()
+        self._snappy_min_refinement_input.setRange(0, 6)
+        self._snappy_min_refinement_input.setValue(1)
+        self._snappy_max_refinement_input = QSpinBox()
+        self._snappy_max_refinement_input.setRange(0, 8)
+        self._snappy_max_refinement_input.setValue(2)
+        self._snappy_location_x_input = QDoubleSpinBox()
+        self._snappy_location_y_input = QDoubleSpinBox()
+        self._snappy_location_z_input = QDoubleSpinBox()
+        for input_widget in (
+            self._snappy_location_x_input,
+            self._snappy_location_y_input,
+            self._snappy_location_z_input,
+        ):
+            input_widget.setRange(-100000.0, 100000.0)
+            input_widget.setDecimals(4)
+            input_widget.setSingleStep(0.1)
+            input_widget.setValue(0.5)
+        self._snappy_add_layers_checkbox = QCheckBox("启用边界层 addLayers")
+        self._snappy_layer_thickness_input = QDoubleSpinBox()
+        self._snappy_layer_thickness_input.setRange(0.01, 5.0)
+        self._snappy_layer_thickness_input.setDecimals(3)
+        self._snappy_layer_thickness_input.setSingleStep(0.05)
+        self._snappy_layer_thickness_input.setValue(0.3)
+
+        location_row = QHBoxLayout()
+        location_row.addWidget(QLabel("X"))
+        location_row.addWidget(self._snappy_location_x_input)
+        location_row.addWidget(QLabel("Y"))
+        location_row.addWidget(self._snappy_location_y_input)
+        location_row.addWidget(QLabel("Z"))
+        location_row.addWidget(self._snappy_location_z_input)
+        location_row.addStretch(1)
+        location_widget = QWidget()
+        location_widget.setLayout(location_row)
+
+        snappy_form.addRow("最小加密等级", self._snappy_min_refinement_input)
+        snappy_form.addRow("最大加密等级", self._snappy_max_refinement_input)
+        snappy_form.addRow("流体内部点 locationInMesh", location_widget)
+        snappy_form.addRow("边界层", self._snappy_add_layers_checkbox)
+        snappy_form.addRow("最终边界层厚度", self._snappy_layer_thickness_input)
+
         self._geometry_text = QTextEdit()
         self._geometry_text.setReadOnly(True)
         self._geometry_text.setPlainText("请先新建或打开项目，然后导入 STL 几何。")
@@ -1198,6 +1242,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
         layout.addWidget(description)
         layout.addLayout(action_row)
+        layout.addLayout(snappy_form)
         layout.addWidget(self._geometry_text, 1)
         return wrapper
 
@@ -1601,6 +1646,24 @@ class MainWindow(QMainWindow):
             return
         self._geometry_text.setPlainText(self._context.geometry_import_service.format_assets(self._current_project))
 
+    def _read_snappy_settings(self) -> SnappyHexMeshSettings:
+        min_level = self._snappy_min_refinement_input.value()
+        max_level = self._snappy_max_refinement_input.value()
+        if max_level < min_level:
+            max_level = min_level
+            self._snappy_max_refinement_input.setValue(max_level)
+        return SnappyHexMeshSettings(
+            min_refinement_level=min_level,
+            max_refinement_level=max_level,
+            location_in_mesh=(
+                self._snappy_location_x_input.value(),
+                self._snappy_location_y_input.value(),
+                self._snappy_location_z_input.value(),
+            ),
+            add_layers=self._snappy_add_layers_checkbox.isChecked(),
+            final_layer_thickness=self._snappy_layer_thickness_input.value(),
+        )
+
     def _generate_snappy_hex_mesh_dict(self) -> None:
         if self._current_project is None:
             self._show_error("请先新建或打开项目。")
@@ -1629,12 +1692,21 @@ class MainWindow(QMainWindow):
             dict_path = self._context.geometry_import_service.generate_snappy_hex_mesh_dict(
                 self._current_project,
                 selected_name,
+                self._read_snappy_settings(),
             )
         except (OSError, ValueError) as error:
             self._show_error(f"生成 snappyHexMeshDict 失败：{error}")
             return
 
         self._append_log(f"snappyHexMeshDict 已生成：{dict_path}")
+        self._append_log(
+            "snappy 参数："
+            f"level=({self._snappy_min_refinement_input.value()} {self._snappy_max_refinement_input.value()}), "
+            f"locationInMesh=({self._snappy_location_x_input.value():.4g} "
+            f"{self._snappy_location_y_input.value():.4g} "
+            f"{self._snappy_location_z_input.value():.4g}), "
+            f"addLayers={self._snappy_add_layers_checkbox.isChecked()}"
+        )
         self._refresh_geometry_panel()
         self._workspace_tabs.setCurrentIndex(6)
         self._set_status("snappyHexMeshDict 生成完成。")

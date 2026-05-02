@@ -19,6 +19,15 @@ class GeometryAsset:
     imported_at: str
 
 
+@dataclass(slots=True)
+class SnappyHexMeshSettings:
+    min_refinement_level: int = 1
+    max_refinement_level: int = 2
+    location_in_mesh: tuple[float, float, float] = (0.5, 0.5, 0.5)
+    add_layers: bool = False
+    final_layer_thickness: float = 0.3
+
+
 class GeometryImportService:
     """Imports geometry files into the current OpenFOAM case."""
 
@@ -112,6 +121,7 @@ class GeometryImportService:
         self,
         project: SimulationProject,
         asset_name: str | None = None,
+        settings: SnappyHexMeshSettings | None = None,
     ) -> Path:
         assets = [
             asset
@@ -132,8 +142,9 @@ class GeometryImportService:
         system_dir = project.case_dir / "system"
         system_dir.mkdir(parents=True, exist_ok=True)
         dict_path = system_dir / "snappyHexMeshDict"
-        dict_path.write_text(self._snappy_hex_mesh_dict(asset.name), encoding="utf-8")
-        self._write_snappy_config(project, asset, dict_path)
+        resolved_settings = settings or SnappyHexMeshSettings()
+        dict_path.write_text(self._snappy_hex_mesh_dict(asset.name, resolved_settings), encoding="utf-8")
+        self._write_snappy_config(project, asset, dict_path, resolved_settings)
         return dict_path
 
     def _append_manifest(self, project: SimulationProject, asset: GeometryAsset) -> None:
@@ -161,13 +172,26 @@ class GeometryImportService:
     def _manifest_path(self, project: SimulationProject) -> Path:
         return project.case_dir / "constant" / "triSurface" / "geometry_manifest.json"
 
-    def _write_snappy_config(self, project: SimulationProject, asset: GeometryAsset, dict_path: Path) -> None:
+    def _write_snappy_config(
+        self,
+        project: SimulationProject,
+        asset: GeometryAsset,
+        dict_path: Path,
+        settings: SnappyHexMeshSettings,
+    ) -> None:
         config_path = project.case_dir / "constant" / "triSurface" / "snappy_config.json"
         payload = {
             "asset_name": asset.name,
             "dict_path": str(dict_path.relative_to(project.case_dir)),
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "scope": "MVP starter snappyHexMeshDict; config generation only.",
+            "settings": {
+                "min_refinement_level": settings.min_refinement_level,
+                "max_refinement_level": settings.max_refinement_level,
+                "location_in_mesh": list(settings.location_in_mesh),
+                "add_layers": settings.add_layers,
+                "final_layer_thickness": settings.final_layer_thickness,
+            },
         }
         config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -188,7 +212,21 @@ class GeometryImportService:
                 return candidate
             counter += 1
 
-    def _snappy_hex_mesh_dict(self, stl_name: str) -> str:
+    def _snappy_hex_mesh_dict(self, stl_name: str, settings: SnappyHexMeshSettings) -> str:
+        min_level = max(0, int(settings.min_refinement_level))
+        max_level = max(min_level, int(settings.max_refinement_level))
+        location = tuple(float(value) for value in settings.location_in_mesh)
+        add_layers = "true" if settings.add_layers else "false"
+        layer_block = (
+            """
+        importedGeometry
+        {
+            nSurfaceLayers 2;
+        }
+"""
+            if settings.add_layers
+            else ""
+        )
         return f"""FoamFile
 {{
     version     2.0;
@@ -199,7 +237,7 @@ class GeometryImportService:
 
 castellatedMesh true;
 snap            true;
-addLayers       false;
+addLayers       {add_layers};
 
 geometry
 {{
@@ -225,7 +263,7 @@ castellatedMeshControls
     {{
         importedGeometry
         {{
-            level (1 2);
+            level ({min_level} {max_level});
         }}
     }}
 
@@ -235,7 +273,7 @@ castellatedMeshControls
     {{
     }}
 
-    locationInMesh (0.5 0.5 0.5);
+    locationInMesh ({location[0]:.6g} {location[1]:.6g} {location[2]:.6g});
     allowFreeStandingZoneFaces true;
 }}
 
@@ -252,9 +290,10 @@ addLayersControls
     relativeSizes true;
     layers
     {{
+{layer_block}
     }}
     expansionRatio 1.0;
-    finalLayerThickness 0.3;
+    finalLayerThickness {settings.final_layer_thickness:.6g};
     minThickness 0.1;
     nGrow 0;
     featureAngle 60;
