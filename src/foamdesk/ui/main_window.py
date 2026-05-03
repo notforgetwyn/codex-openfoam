@@ -316,12 +316,12 @@ class VtkViewerDialog(QDialog):
         points = self._points(poly_data)
         axes = self._reset_axes(title)
         if points.size == 0:
-            axes.text2D(0.08, 0.5, "当前 case 没有可显示点数据。", color="#d4d4d4")
+            axes.text2D(0.08, 0.5, "No point data in current case.", color="#d4d4d4")
             self._show()
             return
         points = self._filter_points(points)
         if points.size == 0:
-            axes.text2D(0.08, 0.5, "当前显示范围内没有点数据。", color="#d4d4d4")
+            axes.text2D(0.08, 0.5, "No point data in current display range.", color="#d4d4d4")
             self._show()
             return
         points = self._sample_points(points)
@@ -373,7 +373,7 @@ class VtkViewerDialog(QDialog):
         faces = self._sample_faces(faces)
         faces = self._filter_faces_by_center(points, faces)
         if faces.size == 0:
-            axes.text2D(0.08, 0.5, "当前显示范围内没有表面面片。", color="#d4d4d4")
+            axes.text2D(0.08, 0.5, "No surface faces in current display range.", color="#d4d4d4")
             self._show()
             return 0
         face_values = np.array(
@@ -495,7 +495,7 @@ class VtkViewerDialog(QDialog):
         points = points[mask]
         vectors = vectors[mask]
         if len(points) == 0:
-            axes.text2D(0.08, 0.5, "当前显示范围内没有速度切面点。", color="#d4d4d4")
+            axes.text2D(0.08, 0.5, "No velocity slice points in current display range.", color="#d4d4d4")
             self._show()
             return 0, "X", 0.0, (0.0, 0.0)
         speeds = np.linalg.norm(vectors, axis=1)
@@ -583,7 +583,7 @@ class VtkViewerDialog(QDialog):
         points = points[mask]
         vectors = vectors[mask]
         if len(points) == 0:
-            axes.text2D(0.08, 0.5, "当前显示范围内没有连续切面点。", color="#d4d4d4")
+            axes.text2D(0.08, 0.5, "No contour slice points in current display range.", color="#d4d4d4")
             self._show()
             return 0, "X", 0.0, (0.0, 0.0)
         speeds = np.linalg.norm(vectors, axis=1)
@@ -721,7 +721,7 @@ class VtkViewerDialog(QDialog):
             total_line_points += len(line)
 
         if line_count == 0:
-            axes.text2D(0.08, 0.5, "当前显示范围内没有速度流线。", color="#d4d4d4")
+            axes.text2D(0.08, 0.5, "No streamlines in current display range.", color="#d4d4d4")
             self._show()
             return 0, 0, main_axis, speed_range
 
@@ -745,7 +745,7 @@ class VtkViewerDialog(QDialog):
         pressure = vtk_to_numpy(pressure_array)
         axes = self._reset_axes("Pressure Point Cloud")
         if points.size == 0 or pressure.size == 0:
-            axes.text2D(0.08, 0.5, "当前 case 没有可显示压力点数据。", color="#d4d4d4")
+            axes.text2D(0.08, 0.5, "No pressure point data in current case.", color="#d4d4d4")
             self._show()
             return
         count = min(len(points), len(pressure))
@@ -753,7 +753,7 @@ class VtkViewerDialog(QDialog):
         pressure = pressure[:count]
         points, pressure = self._filter_points_values(points, pressure)
         if points.size == 0:
-            axes.text2D(0.08, 0.5, "当前显示范围内没有压力点。", color="#d4d4d4")
+            axes.text2D(0.08, 0.5, "No pressure points in current display range.", color="#d4d4d4")
             self._show()
             return
         points, pressure = self._sample_points(points, pressure)
@@ -2064,7 +2064,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         figure.clear()
         axes = figure.add_subplot(111, projection="3d", facecolor="#1e1e1e")
-        axes.set_title("STL 放置预览", color="#d4d4d4", pad=10)
+        axes.set_title("STL Placement Preview", color="#d4d4d4", pad=10)
         axes.set_xlabel("X", color="#d4d4d4")
         axes.set_ylabel("Y", color="#d4d4d4")
         axes.set_zlabel("Z", color="#d4d4d4")
@@ -2075,12 +2075,12 @@ class MainWindow(QMainWindow):
         try:
             points, faces = self._read_stl_preview_mesh(source_path)
         except (OSError, ValueError) as error:
-            axes.text2D(0.05, 0.5, f"STL 预览失败：{error}", color="#d4d4d4")
+            axes.text2D(0.05, 0.5, f"STL preview failed: {error}", color="#d4d4d4")
             canvas.draw()
             return
 
         if points.size == 0 or faces.size == 0:
-            axes.text2D(0.05, 0.5, "STL 没有可预览的三角面。", color="#d4d4d4")
+            axes.text2D(0.05, 0.5, "No STL triangles to preview.", color="#d4d4d4")
             canvas.draw()
             return
 
@@ -2435,7 +2435,7 @@ class MainWindow(QMainWindow):
             return
         self._domain_preview_figure.clear()
         axes = self._domain_preview_figure.add_subplot(111, projection="3d", facecolor="#1e1e1e")
-        axes.set_title("计算域与 STL 相对位置预览", color="#d4d4d4", pad=10)
+        axes.set_title("Domain and STL Position Preview", color="#d4d4d4", pad=10)
         axes.set_xlabel("X", color="#d4d4d4")
         axes.set_ylabel("Y", color="#d4d4d4")
         axes.set_zlabel("Z", color="#d4d4d4")
@@ -2477,7 +2477,7 @@ class MainWindow(QMainWindow):
                 axes.add_collection3d(collection)
                 points_for_limits.append(points)
         else:
-            axes.text2D(0.05, 0.9, "请先选择项目。", color="#d4d4d4")
+            axes.text2D(0.05, 0.9, "Select a project first.", color="#d4d4d4")
 
         all_points = np.vstack(points_for_limits)
         mins = all_points.min(axis=0)
