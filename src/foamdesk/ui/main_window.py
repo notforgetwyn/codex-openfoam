@@ -1394,6 +1394,9 @@ class MainWindow(QMainWindow):
             self._domain_template_combo.addItem(template.name, template.key)
         self._domain_template_hint = QLabel("计算域 = 流体存在的空间盒子；STL 是放在盒子里的固体障碍物。")
         self._domain_template_hint.setWordWrap(True)
+        self._domain_apply_state_label = QLabel("当前预览尚未绑定项目。")
+        self._domain_apply_state_label.setWordWrap(True)
+        self._domain_apply_state_label.setObjectName("DomainApplyStateLabel")
         self._domain_template_combo.currentIndexChanged.connect(self._refresh_domain_template_hint)
         apply_domain_button = QPushButton("应用计算域模板")
         import_template_stl_button = QPushButton("一键导入模板 STL")
@@ -1408,6 +1411,7 @@ class MainWindow(QMainWindow):
         domain_widget = QWidget()
         domain_widget.setLayout(domain_row)
         domain_form.addRow("计算域模板", domain_widget)
+        domain_form.addRow("应用状态", self._domain_apply_state_label)
         domain_form.addRow("模板说明", self._domain_template_hint)
         custom_domain_size_row = QHBoxLayout()
         custom_domain_size_row.setSpacing(8)
@@ -2354,6 +2358,7 @@ class MainWindow(QMainWindow):
         )
         if template is None:
             self._domain_template_hint.setText("请选择计算域模板。")
+            self._update_domain_apply_state_label()
             self._refresh_domain_preview()
             return
         self._domain_template_hint.setText(
@@ -2364,7 +2369,35 @@ class MainWindow(QMainWindow):
             "建议 STL："
             + self._domain_template_stl_hint(template.key)
         )
+        self._update_domain_apply_state_label()
         self._refresh_domain_preview()
+
+    def _update_domain_apply_state_label(self) -> None:
+        if not hasattr(self, "_domain_apply_state_label"):
+            return
+        if self._current_project is None:
+            self._domain_apply_state_label.setText("预览中：尚未选择项目；选择项目后才能应用计算域。")
+            self._domain_apply_state_label.setStyleSheet("color: #d7ba7d;")
+            return
+        selected = self._selected_domain_template()
+        applied = self._current_domain_template()
+        if applied.key == "custom_domain":
+            self._domain_apply_state_label.setText(
+                f"已应用：当前 Case 使用自定义计算域，尺寸={applied.size}，网格={applied.cells}。"
+            )
+            self._domain_apply_state_label.setStyleSheet("color: #89d185;")
+            return
+        if selected.key == applied.key:
+            self._domain_apply_state_label.setText(
+                f"已应用：当前 Case 正在使用 `{applied.name}`。切换下拉框只会先预览，不会自动改仿真文件。"
+            )
+            self._domain_apply_state_label.setStyleSheet("color: #89d185;")
+            return
+        self._domain_apply_state_label.setText(
+            f"预览中：正在查看 `{selected.name}`；当前 Case 实际仍是 `{applied.name}`。"
+            "需要点击 `应用计算域模板` 后才会写入 OpenFOAM case。"
+        )
+        self._domain_apply_state_label.setStyleSheet("color: #d7ba7d;")
 
     def _domain_template_stl_hint(self, key: str) -> str:
         if key == "simple_unit_box":
@@ -2420,6 +2453,7 @@ class MainWindow(QMainWindow):
         self._snappy_location_x_input.setValue(template.suggested_location_in_mesh[0])
         self._snappy_location_y_input.setValue(template.suggested_location_in_mesh[1])
         self._snappy_location_z_input.setValue(template.suggested_location_in_mesh[2])
+        self._update_domain_apply_state_label()
         self._set_status("计算域模板已应用。")
 
     def _apply_custom_domain(self) -> None:
@@ -2449,6 +2483,7 @@ class MainWindow(QMainWindow):
             f"建议 locationInMesh={template.suggested_location_in_mesh}"
         )
         self._refresh_geometry_panel()
+        self._update_domain_apply_state_label()
         self._set_status("自定义计算域已应用。")
 
     def _apply_boundary_conditions(self) -> None:
@@ -2559,6 +2594,7 @@ class MainWindow(QMainWindow):
             messages.append("- 当前 Case 没有导入 STL。管道内流可以不放障碍物；外流/绕流场景建议导入 STL。")
         elif template.shape in {"pipe", "bend"}:
             messages.append("- 当前是管道/弯管内流模板：通常不需要导入障碍 STL，除非你明确要模拟管内障碍物。")
+        asset_bounds: list[tuple[str, np.ndarray, np.ndarray]] = []
         for asset in assets:
             try:
                 points, _faces = self._read_stl_preview_mesh(asset.stored_path)
@@ -2580,6 +2616,35 @@ class MainWindow(QMainWindow):
                 messages.append(
                     f"- STL 可能超出计算域：{asset.name}，bbox={tuple(stl_min.round(4))} -> {tuple(stl_max.round(4))}"
                 )
+            asset_bounds.append((asset.name, stl_min, stl_max))
+            clearance = np.minimum(stl_min - domain_min, domain_max - stl_max)
+            nearest_clearance = float(clearance.min())
+            if nearest_clearance >= 0.0:
+                messages.append(f"- STL 到最近计算域边界距离：{asset.name}，约 {nearest_clearance:.4g}")
+                domain_span = float((domain_max - domain_min).max())
+                if domain_span > 0.0 and nearest_clearance < domain_span * 0.01:
+                    messages.append(
+                        f"- 提醒：{asset.name} 离计算域边界很近，snappyHexMesh 或求解时可能受边界影响。"
+                    )
+            if np.all((location >= stl_min) & (location <= stl_max)):
+                has_error = True
+                messages.append(
+                    f"- locationInMesh 可能落在 STL 固体内部：{asset.name}。"
+                    "该点必须放在流体区域里，不能放在物体内部。"
+                )
+
+        for index, (name_a, min_a, max_a) in enumerate(asset_bounds):
+            for name_b, min_b, max_b in asset_bounds[index + 1:]:
+                overlap = np.all((min_a <= max_b) & (max_a >= min_b))
+                if overlap:
+                    messages.append(
+                        f"- 提醒：STL 包围盒可能重叠：{name_a} 与 {name_b}。"
+                        "如果不是故意组合几何，建议调整位置避免贴体网格失败。"
+                    )
+                else:
+                    gap_vector = np.maximum(np.maximum(min_a - max_b, min_b - max_a), 0.0)
+                    distance = float(np.linalg.norm(gap_vector))
+                    messages.append(f"- STL 间最近包围盒距离：{name_a} <-> {name_b}，约 {distance:.4g}")
 
         if self._snappy_min_refinement_input.value() > self._snappy_max_refinement_input.value():
             has_error = True
@@ -2679,7 +2744,7 @@ class MainWindow(QMainWindow):
         axes.tick_params(colors="#d4d4d4")
         axes.grid(True, color="#333333", linestyle="--", linewidth=0.5)
 
-        template = self._current_domain_template()
+        template = self._selected_domain_template()
         domain_points = self._draw_domain_template_wireframe(axes, template)
         points_for_limits = [domain_points]
         if self._current_project is not None:
@@ -2741,6 +2806,10 @@ class MainWindow(QMainWindow):
                             ),
                             description="用户自定义计算域。",
                         )
+                    key = str(payload.get("key", "simple_unit_box"))
+                    for template in self._context.project_service.domain_templates():
+                        if template.key == key:
+                            return template
                 except (OSError, ValueError, TypeError, json.JSONDecodeError):
                     pass
         key = None
@@ -2750,6 +2819,14 @@ class MainWindow(QMainWindow):
             if template.key == key:
                 return template
         return self._context.project_service.domain_templates()[0]
+
+    def _selected_domain_template(self) -> ComputationDomainTemplate:
+        if hasattr(self, "_domain_template_combo"):
+            key = self._domain_template_combo.currentData()
+            for template in self._context.project_service.domain_templates():
+                if template.key == key:
+                    return template
+        return self._current_domain_template()
 
     def _load_snappy_settings_into_form(self) -> None:
         if self._current_project is None or not hasattr(self, "_snappy_min_refinement_input"):
