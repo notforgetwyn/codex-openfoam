@@ -20,6 +20,16 @@ class GeometryAsset:
 
 
 @dataclass(slots=True)
+class StlTransform:
+    translate: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    scale: float = 1.0
+
+    @property
+    def is_identity(self) -> bool:
+        return self.scale == 1.0 and self.translate == (0.0, 0.0, 0.0)
+
+
+@dataclass(slots=True)
 class SnappyHexMeshSettings:
     min_refinement_level: int = 1
     max_refinement_level: int = 2
@@ -33,7 +43,12 @@ class GeometryImportService:
 
     SUPPORTED_EXTENSIONS = {".stl"}
 
-    def import_stl(self, project: SimulationProject, source_path: Path) -> GeometryAsset:
+    def import_stl(
+        self,
+        project: SimulationProject,
+        source_path: Path,
+        transform: StlTransform | None = None,
+    ) -> GeometryAsset:
         source = source_path.expanduser().resolve()
         if not source.exists() or not source.is_file():
             raise ValueError("几何文件不存在。")
@@ -45,7 +60,11 @@ class GeometryImportService:
         target_dir = project.case_dir / "constant" / "triSurface"
         target_dir.mkdir(parents=True, exist_ok=True)
         target_path = self._unique_target_path(target_dir, self._safe_name(source.name))
-        shutil.copy2(source, target_path)
+        resolved_transform = transform or StlTransform()
+        if resolved_transform.is_identity:
+            shutil.copy2(source, target_path)
+        else:
+            self._write_transformed_ascii_stl(source, target_path, resolved_transform)
 
         asset = GeometryAsset(
             name=target_path.name,
@@ -55,7 +74,7 @@ class GeometryImportService:
             size_bytes=target_path.stat().st_size,
             imported_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         )
-        self._append_manifest(project, asset)
+        self._append_manifest(project, asset, resolved_transform)
         return asset
 
     def list_assets(self, project: SimulationProject) -> list[GeometryAsset]:
@@ -171,7 +190,7 @@ class GeometryImportService:
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             return None
 
-    def _append_manifest(self, project: SimulationProject, asset: GeometryAsset) -> None:
+    def _append_manifest(self, project: SimulationProject, asset: GeometryAsset, transform: StlTransform) -> None:
         manifest_path = self._manifest_path(project)
         payload = {"assets": []}
         if manifest_path.exists():
@@ -188,6 +207,10 @@ class GeometryImportService:
                 "stored_path": str(asset.stored_path.relative_to(project.case_dir)),
                 "size_bytes": asset.size_bytes,
                 "imported_at": asset.imported_at,
+                "transform": {
+                    "translate": list(transform.translate),
+                    "scale": transform.scale,
+                },
             }
         )
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -225,6 +248,31 @@ class GeometryImportService:
     def _safe_name(self, name: str) -> str:
         safe = "".join(character if character.isalnum() or character in ("-", "_", ".") else "_" for character in name)
         return safe or "geometry.stl"
+
+    def _write_transformed_ascii_stl(self, source: Path, target: Path, transform: StlTransform) -> None:
+        try:
+            lines = source.read_text(encoding="utf-8").splitlines()
+        except UnicodeDecodeError as error:
+            raise ValueError("当前 STL 变换 MVP 只支持 ASCII STL。二进制 STL 请先不使用平移/缩放。") from error
+
+        tx, ty, tz = transform.translate
+        scale = float(transform.scale)
+        transformed_lines: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("vertex "):
+                parts = stripped.split()
+                if len(parts) != 4:
+                    raise ValueError("STL vertex 行格式异常，无法执行平移/缩放。")
+                x, y, z = (float(parts[1]), float(parts[2]), float(parts[3]))
+                x = x * scale + tx
+                y = y * scale + ty
+                z = z * scale + tz
+                indent = line[: len(line) - len(line.lstrip())]
+                transformed_lines.append(f"{indent}vertex {x:.9g} {y:.9g} {z:.9g}")
+            else:
+                transformed_lines.append(line)
+        target.write_text("\n".join(transformed_lines) + "\n", encoding="utf-8")
 
     def _unique_target_path(self, target_dir: Path, file_name: str) -> Path:
         target = target_dir / file_name
@@ -268,10 +316,10 @@ addLayers       {add_layers};
 
 geometry
 {{
-    {stl_name}
+    importedGeometry
     {{
         type triSurfaceMesh;
-        name importedGeometry;
+        file "{stl_name}";
     }}
 }}
 

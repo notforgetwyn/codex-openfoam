@@ -132,6 +132,17 @@ class ProjectService:
         written_files.extend(self._sync_field_boundaries(project.case_dir))
         return written_files
 
+    def ensure_field_boundaries(
+        self,
+        project: SimulationProject,
+        boundary_names: tuple[str, ...],
+    ) -> list[Path]:
+        """Ensure U and p contain all boundaries required by the current mesh workflow."""
+        clean_names = tuple(dict.fromkeys(name for name in boundary_names if name.strip()))
+        if not clean_names:
+            return []
+        return self._sync_field_boundaries_for_names(project.case_dir, clean_names)
+
     def _projects_dir(self) -> Path:
         return self._settings_service.load().workspace_dir / "projects"
 
@@ -178,7 +189,9 @@ class ProjectService:
         boundary_names = self._extract_boundary_names(case_dir / "system" / "blockMeshDict")
         if not boundary_names:
             return []
+        return self._sync_field_boundaries_for_names(case_dir, boundary_names)
 
+    def _sync_field_boundaries_for_names(self, case_dir: Path, boundary_names: tuple[str, ...]) -> list[Path]:
         written_files: list[Path] = []
         velocity_field = case_dir / "0" / "U"
         pressure_field = case_dir / "0" / "p"

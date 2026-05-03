@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QCheckBox,
     QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFontComboBox,
@@ -58,7 +59,7 @@ from vtkmodules.util.numpy_support import vtk_to_numpy
 
 from foamdesk.app.bootstrap import ApplicationContext
 from foamdesk.domain.models import SimulationParameters, SimulationProject
-from foamdesk.services.geometry_import_service import SnappyHexMeshSettings
+from foamdesk.services.geometry_import_service import GeometryAsset, SnappyHexMeshSettings, StlTransform
 from foamdesk.ui.startup_window import StartupWindow
 from foamdesk.ui.theme import THEMES, build_stylesheet
 
@@ -196,6 +197,21 @@ class VtkViewerDialog(QDialog):
         layout.setSpacing(8)
 
         action_row = QHBoxLayout()
+        self._geometry_assets: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        self._filter_mode_combo = QComboBox()
+        self._filter_mode_combo.addItems(["全部显示", "所有 STL 附近", "单个 STL 附近"])
+        self._filter_asset_combo = QComboBox()
+        self._filter_radius_input = QDoubleSpinBox()
+        self._filter_radius_input.setRange(0.0, 100000.0)
+        self._filter_radius_input.setDecimals(4)
+        self._filter_radius_input.setSingleStep(0.05)
+        self._filter_radius_input.setValue(0.1)
+        action_row.addWidget(QLabel("显示范围"))
+        action_row.addWidget(self._filter_mode_combo)
+        action_row.addWidget(QLabel("STL"))
+        action_row.addWidget(self._filter_asset_combo)
+        action_row.addWidget(QLabel("附近半径"))
+        action_row.addWidget(self._filter_radius_input)
         action_row.addStretch(1)
         clear_button = QPushButton("清空视图")
         clear_button.clicked.connect(self._clear_tabs)
@@ -213,6 +229,32 @@ class VtkViewerDialog(QDialog):
         self._tabs.setTabsClosable(True)
         self._tabs.tabCloseRequested.connect(self._close_tab)
         layout.addWidget(self._tabs)
+
+    def set_geometry_assets(self, assets: list[GeometryAsset]) -> None:
+        self._geometry_assets = {}
+        current_name = self._filter_asset_combo.currentText()
+        self._filter_asset_combo.clear()
+        for asset in assets:
+            if asset.format.upper() != "STL" or not asset.stored_path.exists():
+                continue
+            bounds = self._stl_bounds(asset.stored_path)
+            if bounds is None:
+                continue
+            self._geometry_assets[asset.name] = bounds
+            self._filter_asset_combo.addItem(asset.name)
+        if current_name:
+            index = self._filter_asset_combo.findText(current_name)
+            if index >= 0:
+                self._filter_asset_combo.setCurrentIndex(index)
+
+    def _stl_bounds(self, path: Path) -> tuple[np.ndarray, np.ndarray] | None:
+        reader = vtkSTLReader()
+        reader.SetFileName(str(path))
+        reader.Update()
+        points = self._points(reader.GetOutput())
+        if points.size == 0:
+            return None
+        return points.min(axis=0), points.max(axis=0)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._clear_tabs()
@@ -264,6 +306,11 @@ class VtkViewerDialog(QDialog):
             axes.text2D(0.08, 0.5, "当前 case 没有可显示点数据。", color="#d4d4d4")
             self._show()
             return
+        points = self._filter_points(points)
+        if points.size == 0:
+            axes.text2D(0.08, 0.5, "当前显示范围内没有点数据。", color="#d4d4d4")
+            self._show()
+            return
         points = self._sample_points(points)
         axes.scatter(points[:, 0], points[:, 1], points[:, 2], s=6, c="#4fc3ff", alpha=0.85)
         self._finish_axes(axes, points)
@@ -309,6 +356,11 @@ class VtkViewerDialog(QDialog):
             return 0
 
         faces = self._sample_faces(faces)
+        faces = self._filter_faces_by_center(points, faces)
+        if faces.size == 0:
+            axes.text2D(0.08, 0.5, "当前显示范围内没有表面面片。", color="#d4d4d4")
+            self._show()
+            return 0
         face_values = np.array(
             [values[np.asarray(face, dtype=int)].mean() for face in faces],
             dtype=float,
@@ -353,6 +405,9 @@ class VtkViewerDialog(QDialog):
         count = min(len(points), len(vectors))
         points = points[:count]
         vectors = vectors[:count, :3]
+        mask = self._filter_mask(points)
+        points = points[mask]
+        vectors = vectors[mask]
         speeds = np.linalg.norm(vectors, axis=1)
         non_zero = speeds > 1e-12
         if np.any(non_zero):
@@ -419,6 +474,13 @@ class VtkViewerDialog(QDialog):
         count = min(len(points), len(vectors))
         points = points[:count]
         vectors = vectors[:count, :3]
+        mask = self._filter_mask(points)
+        points = points[mask]
+        vectors = vectors[mask]
+        if len(points) == 0:
+            axes.text2D(0.08, 0.5, "当前显示范围内没有速度切面点。", color="#d4d4d4")
+            self._show()
+            return 0, "X", 0.0, (0.0, 0.0)
         speeds = np.linalg.norm(vectors, axis=1)
         normalized_position = min(max(float(normalized_position), 0.0), 1.0)
 
@@ -496,7 +558,15 @@ class VtkViewerDialog(QDialog):
 
         count = min(len(points), len(vectors))
         points = points[:count]
-        speeds = np.linalg.norm(vectors[:count, :3], axis=1)
+        vectors = vectors[:count, :3]
+        mask = self._filter_mask(points)
+        points = points[mask]
+        vectors = vectors[mask]
+        if len(points) == 0:
+            axes.text2D(0.08, 0.5, "当前显示范围内没有连续切面点。", color="#d4d4d4")
+            self._show()
+            return 0, "X", 0.0, (0.0, 0.0)
+        speeds = np.linalg.norm(vectors, axis=1)
         normalized_position = min(max(float(normalized_position), 0.0), 1.0)
 
         def build_mask(axis: int) -> tuple[float, np.ndarray]:
@@ -646,6 +716,11 @@ class VtkViewerDialog(QDialog):
         count = min(len(points), len(pressure))
         points = points[:count]
         pressure = pressure[:count]
+        points, pressure = self._filter_points_values(points, pressure)
+        if points.size == 0:
+            axes.text2D(0.08, 0.5, "当前显示范围内没有压力点。", color="#d4d4d4")
+            self._show()
+            return
         points, pressure = self._sample_points(points, pressure)
         scatter = axes.scatter(
             points[:, 0],
@@ -812,6 +887,43 @@ class VtkViewerDialog(QDialog):
                 faces.append(raw[index : index + count].astype(int))
             index += count
         return np.array(faces, dtype=object)
+
+    def _filter_points(self, points: np.ndarray) -> np.ndarray:
+        return points[self._filter_mask(points)]
+
+    def _filter_points_values(self, points: np.ndarray, values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        mask = self._filter_mask(points)
+        return points[mask], values[mask]
+
+    def _filter_faces_by_center(self, points: np.ndarray, faces: np.ndarray) -> np.ndarray:
+        if points.size == 0 or faces.size == 0:
+            return faces
+        centers = np.array([points[np.asarray(face, dtype=int)].mean(axis=0) for face in faces], dtype=float)
+        return faces[self._filter_mask(centers)]
+
+    def _filter_mask(self, points: np.ndarray) -> np.ndarray:
+        if points.size == 0:
+            return np.zeros((0,), dtype=bool)
+        mode = self._filter_mode_combo.currentText() if hasattr(self, "_filter_mode_combo") else "全部显示"
+        if mode == "全部显示" or not self._geometry_assets:
+            return np.ones((len(points),), dtype=bool)
+
+        radius = self._filter_radius_input.value() if hasattr(self, "_filter_radius_input") else 0.0
+        selected_bounds: list[tuple[np.ndarray, np.ndarray]]
+        if mode == "单个 STL 附近":
+            asset_name = self._filter_asset_combo.currentText() if hasattr(self, "_filter_asset_combo") else ""
+            selected_bounds = [self._geometry_assets[asset_name]] if asset_name in self._geometry_assets else []
+        else:
+            selected_bounds = list(self._geometry_assets.values())
+        if not selected_bounds:
+            return np.ones((len(points),), dtype=bool)
+
+        mask = np.zeros((len(points),), dtype=bool)
+        for mins, maxs in selected_bounds:
+            expanded_min = mins - radius
+            expanded_max = maxs + radius
+            mask |= np.all((points >= expanded_min) & (points <= expanded_max), axis=1)
+        return mask
 
     def _sample_faces(self, faces: np.ndarray, limit: int = 8000) -> np.ndarray:
         if len(faces) <= limit:
@@ -1633,10 +1745,14 @@ class MainWindow(QMainWindow):
         )
         if not file_path:
             return
+        transform = self._read_stl_transform_dialog()
+        if transform is None:
+            return
         try:
             asset = self._context.geometry_import_service.import_stl(
                 self._current_project,
                 Path(file_path),
+                transform,
             )
         except (OSError, ValueError) as error:
             self._show_error(f"导入 STL 失败：{error}")
@@ -1645,6 +1761,43 @@ class MainWindow(QMainWindow):
         self._refresh_geometry_panel()
         self._workspace_tabs.setCurrentIndex(6)
         self._set_status("STL 几何导入完成。")
+
+    def _read_stl_transform_dialog(self) -> StlTransform | None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("导入 STL：位置和缩放")
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+        scale_input = QDoubleSpinBox()
+        scale_input.setRange(0.0001, 10000.0)
+        scale_input.setDecimals(4)
+        scale_input.setValue(1.0)
+        scale_input.setSingleStep(0.1)
+        x_input = QDoubleSpinBox()
+        y_input = QDoubleSpinBox()
+        z_input = QDoubleSpinBox()
+        for input_widget in (x_input, y_input, z_input):
+            input_widget.setRange(-100000.0, 100000.0)
+            input_widget.setDecimals(4)
+            input_widget.setSingleStep(0.1)
+            input_widget.setValue(0.0)
+        hint = QLabel("这些参数会直接修改导入后的 STL 顶点坐标。默认 scale=1、平移=0 表示保持原始位置。")
+        hint.setWordWrap(True)
+        form.addRow("缩放 scale", scale_input)
+        form.addRow("平移 X", x_input)
+        form.addRow("平移 Y", y_input)
+        form.addRow("平移 Z", z_input)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(hint)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return StlTransform(
+            translate=(x_input.value(), y_input.value(), z_input.value()),
+            scale=scale_input.value(),
+        )
 
     def _refresh_geometry_panel(self) -> None:
         if not hasattr(self, "_geometry_text"):
@@ -1942,8 +2095,12 @@ class MainWindow(QMainWindow):
                 selected_name,
                 self._read_snappy_settings(),
             )
+            synced_fields = self._context.project_service.ensure_field_boundaries(
+                self._current_project,
+                ("movingWall", "fixedWalls", "importedGeometry"),
+            )
         except (OSError, ValueError) as error:
-            self._show_error(f"一键仿真无法生成 snappyHexMeshDict：{error}")
+            self._show_error(f"一键仿真准备失败：{error}")
             return
 
         self._workspace_tabs.setCurrentIndex(2)
@@ -1955,6 +2112,10 @@ class MainWindow(QMainWindow):
         self._refresh_solver_run_panel("一键仿真流水线运行中")
         self._set_status("一键仿真流水线运行中。")
         self._refresh_geometry_panel()
+        if synced_fields:
+            relative_fields = [str(path.relative_to(self._current_project.case_dir)) for path in synced_fields]
+            self._append_log("已同步 snappy 后求解边界字段：")
+            self._append_log("\n".join(f"- {path}" for path in relative_fields))
 
         command = (
             f"source {shlex.quote(status.env_script_path)} >/dev/null 2>&1 && "
@@ -2903,6 +3064,10 @@ class MainWindow(QMainWindow):
     def _ensure_vtk_viewer(self) -> None:
         if self._vtk_viewer is None:
             self._vtk_viewer = VtkViewerDialog(self)
+        if self._current_project is not None:
+            self._vtk_viewer.set_geometry_assets(
+                self._context.geometry_import_service.list_assets(self._current_project)
+            )
         self._vtk_viewer.show()
         self._vtk_viewer.raise_()
         self._vtk_viewer.activateWindow()
