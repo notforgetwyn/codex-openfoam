@@ -20,6 +20,13 @@ class ComputationDomainTemplate:
     description: str
 
 
+@dataclass(frozen=True, slots=True)
+class BoundaryConditionSettings:
+    inlet_velocity: tuple[float, float, float] = (1.0, 0.0, 0.0)
+    outlet_pressure: float = 0.0
+    wall_type: str = "noSlip"
+
+
 class ProjectService:
     """Creates and discovers local simulation projects in the configured workspace."""
 
@@ -98,6 +105,56 @@ class ProjectService:
         )
         self._write_domain(project, template)
         return template
+
+    def load_boundary_conditions(self, project: SimulationProject) -> BoundaryConditionSettings:
+        config_path = self._boundary_config_path(project.case_dir)
+        if not config_path.exists():
+            return BoundaryConditionSettings()
+        try:
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+            velocity = payload.get("inlet_velocity", [1.0, 0.0, 0.0])
+            if not isinstance(velocity, list | tuple) or len(velocity) != 3:
+                velocity = [1.0, 0.0, 0.0]
+            wall_type = str(payload.get("wall_type", "noSlip"))
+            if wall_type not in {"noSlip", "slip"}:
+                wall_type = "noSlip"
+            return BoundaryConditionSettings(
+                inlet_velocity=(float(velocity[0]), float(velocity[1]), float(velocity[2])),
+                outlet_pressure=float(payload.get("outlet_pressure", 0.0)),
+                wall_type=wall_type,
+            )
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return BoundaryConditionSettings()
+
+    def apply_boundary_conditions(
+        self,
+        project: SimulationProject,
+        settings: BoundaryConditionSettings,
+    ) -> list[Path]:
+        boundary_names = self._extract_boundary_names(project.case_dir / "system" / "blockMeshDict")
+        if not boundary_names:
+            boundary_names = ("inlet", "outlet", "fixedWalls")
+        written_files: list[Path] = []
+        velocity_field = project.case_dir / "0" / "U"
+        pressure_field = project.case_dir / "0" / "p"
+        velocity_field.write_text(self._default_velocity_field(boundary_names, settings), encoding="utf-8")
+        pressure_field.write_text(self._default_pressure_field(boundary_names, settings), encoding="utf-8")
+        written_files.extend([velocity_field, pressure_field])
+        config_path = self._boundary_config_path(project.case_dir)
+        config_path.write_text(
+            json.dumps(
+                {
+                    "inlet_velocity": list(settings.inlet_velocity),
+                    "outlet_pressure": settings.outlet_pressure,
+                    "wall_type": settings.wall_type,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        written_files.append(config_path)
+        return written_files
 
     def _write_domain(self, project: SimulationProject, template: ComputationDomainTemplate) -> None:
         block_mesh_dict = project.case_dir / "system" / "blockMeshDict"
@@ -293,6 +350,9 @@ class ProjectService:
     def _domain_config_path(self, case_dir: Path) -> Path:
         return case_dir / "system" / "domain_config.json"
 
+    def _boundary_config_path(self, case_dir: Path) -> Path:
+        return case_dir / "system" / "boundary_config.json"
+
     def _domain_template_by_key(self, template_key: str) -> ComputationDomainTemplate:
         for template in self.domain_templates():
             if template.key == template_key:
@@ -424,8 +484,13 @@ mergePatchPairs
     def _default_block_mesh_dict(self) -> str:
         return self._block_mesh_dict_for_template(self.domain_templates()[0])
 
-    def _default_velocity_field(self, boundary_names: tuple[str, ...]) -> str:
-        boundary_field = "\n".join(self._velocity_boundary_entry(name) for name in boundary_names)
+    def _default_velocity_field(
+        self,
+        boundary_names: tuple[str, ...],
+        settings: BoundaryConditionSettings | None = None,
+    ) -> str:
+        resolved_settings = settings or BoundaryConditionSettings()
+        boundary_field = "\n".join(self._velocity_boundary_entry(name, resolved_settings) for name in boundary_names)
         return """FoamFile
 {
     version     2.0;
@@ -443,8 +508,13 @@ __BOUNDARY_FIELD__
 }
 """.replace("__BOUNDARY_FIELD__", boundary_field)
 
-    def _default_pressure_field(self, boundary_names: tuple[str, ...]) -> str:
-        boundary_field = "\n".join(self._pressure_boundary_entry(name) for name in boundary_names)
+    def _default_pressure_field(
+        self,
+        boundary_names: tuple[str, ...],
+        settings: BoundaryConditionSettings | None = None,
+    ) -> str:
+        resolved_settings = settings or BoundaryConditionSettings()
+        boundary_field = "\n".join(self._pressure_boundary_entry(name, resolved_settings) for name in boundary_names)
         return """FoamFile
 {
     version     2.0;
@@ -462,13 +532,14 @@ __BOUNDARY_FIELD__
 }
 """.replace("__BOUNDARY_FIELD__", boundary_field)
 
-    def _velocity_boundary_entry(self, name: str) -> str:
+    def _velocity_boundary_entry(self, name: str, settings: BoundaryConditionSettings) -> str:
         normalized_name = name.lower()
         if "movingwall" in normalized_name or "inlet" in normalized_name:
+            ux, uy, uz = settings.inlet_velocity
             return f"""    {name}
     {{
         type            fixedValue;
-        value           uniform (1 0 0);
+        value           uniform ({ux:g} {uy:g} {uz:g});
     }}
 """
         if "outlet" in normalized_name:
@@ -479,17 +550,17 @@ __BOUNDARY_FIELD__
 """
         return f"""    {name}
     {{
-        type            noSlip;
+        type            {settings.wall_type};
     }}
 """
 
-    def _pressure_boundary_entry(self, name: str) -> str:
+    def _pressure_boundary_entry(self, name: str, settings: BoundaryConditionSettings) -> str:
         normalized_name = name.lower()
         if "outlet" in normalized_name:
             return f"""    {name}
     {{
         type            fixedValue;
-        value           uniform 0;
+        value           uniform {settings.outlet_pressure:g};
     }}
 """
         return f"""    {name}

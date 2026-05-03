@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
@@ -24,10 +25,15 @@ class GeometryAsset:
 class StlTransform:
     translate: tuple[float, float, float] = (0.0, 0.0, 0.0)
     scale: float = 1.0
+    rotate_degrees: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     @property
     def is_identity(self) -> bool:
-        return self.scale == 1.0 and self.translate == (0.0, 0.0, 0.0)
+        return (
+            self.scale == 1.0
+            and self.translate == (0.0, 0.0, 0.0)
+            and self.rotate_degrees == (0.0, 0.0, 0.0)
+        )
 
 
 @dataclass(slots=True)
@@ -135,7 +141,8 @@ class GeometryImportService:
                     f"   - Case 内路径：{asset.stored_path}",
                     f"   - 原始路径：{asset.source_path}",
                     f"   - 变换：scale={asset.transform.scale if asset.transform else 1.0}, "
-                    f"translate={asset.transform.translate if asset.transform else (0.0, 0.0, 0.0)}",
+                    f"translate={asset.transform.translate if asset.transform else (0.0, 0.0, 0.0)}, "
+                    f"rotate={asset.transform.rotate_degrees if asset.transform else (0.0, 0.0, 0.0)}",
                 ]
             )
         return "\n".join(lines)
@@ -169,6 +176,7 @@ class GeometryImportService:
             item["transform"] = {
                 "translate": list(transform.translate),
                 "scale": transform.scale,
+                "rotate_degrees": list(transform.rotate_degrees),
             }
             manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             return GeometryAsset(
@@ -256,6 +264,7 @@ class GeometryImportService:
                 "transform": {
                     "translate": list(transform.translate),
                     "scale": transform.scale,
+                    "rotate_degrees": list(transform.rotate_degrees),
                 },
             }
         )
@@ -266,12 +275,16 @@ class GeometryImportService:
         if not isinstance(payload, dict):
             return StlTransform()
         translate = payload.get("translate", [0.0, 0.0, 0.0])
+        rotate = payload.get("rotate_degrees", [0.0, 0.0, 0.0])
         if not isinstance(translate, list | tuple) or len(translate) != 3:
             translate = [0.0, 0.0, 0.0]
+        if not isinstance(rotate, list | tuple) or len(rotate) != 3:
+            rotate = [0.0, 0.0, 0.0]
         try:
             return StlTransform(
                 translate=(float(translate[0]), float(translate[1]), float(translate[2])),
                 scale=float(payload.get("scale", 1.0)),
+                rotate_degrees=(float(rotate[0]), float(rotate[1]), float(rotate[2])),
             )
         except (TypeError, ValueError):
             return StlTransform()
@@ -317,6 +330,7 @@ class GeometryImportService:
 
         tx, ty, tz = transform.translate
         scale = float(transform.scale)
+        rotation = self._rotation_matrix(transform.rotate_degrees)
         transformed_lines: list[str] = []
         for line in lines:
             stripped = line.strip()
@@ -324,15 +338,41 @@ class GeometryImportService:
                 parts = stripped.split()
                 if len(parts) != 4:
                     raise ValueError("STL vertex 行格式异常，无法执行平移/缩放。")
-                x, y, z = (float(parts[1]), float(parts[2]), float(parts[3]))
-                x = x * scale + tx
-                y = y * scale + ty
-                z = z * scale + tz
+                x, y, z = self._transform_vertex(
+                    (float(parts[1]), float(parts[2]), float(parts[3])),
+                    scale,
+                    rotation,
+                    (tx, ty, tz),
+                )
                 indent = line[: len(line) - len(line.lstrip())]
                 transformed_lines.append(f"{indent}vertex {x:.9g} {y:.9g} {z:.9g}")
             else:
                 transformed_lines.append(line)
         target.write_text("\n".join(transformed_lines) + "\n", encoding="utf-8")
+
+    def _rotation_matrix(self, rotate_degrees: tuple[float, float, float]) -> tuple[tuple[float, float, float], ...]:
+        rx, ry, rz = (math.radians(value) for value in rotate_degrees)
+        cx, sx = math.cos(rx), math.sin(rx)
+        cy, sy = math.cos(ry), math.sin(ry)
+        cz, sz = math.cos(rz), math.sin(rz)
+        return (
+            (cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx),
+            (sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx),
+            (-sy, cy * sx, cy * cx),
+        )
+
+    def _transform_vertex(
+        self,
+        vertex: tuple[float, float, float],
+        scale: float,
+        rotation: tuple[tuple[float, float, float], ...],
+        translate: tuple[float, float, float],
+    ) -> tuple[float, float, float]:
+        x, y, z = (value * scale for value in vertex)
+        rx = rotation[0][0] * x + rotation[0][1] * y + rotation[0][2] * z
+        ry = rotation[1][0] * x + rotation[1][1] * y + rotation[1][2] * z
+        rz = rotation[2][0] * x + rotation[2][1] * y + rotation[2][2] * z
+        return rx + translate[0], ry + translate[1], rz + translate[2]
 
     def _unique_target_path(self, target_dir: Path, file_name: str) -> Path:
         target = target_dir / file_name

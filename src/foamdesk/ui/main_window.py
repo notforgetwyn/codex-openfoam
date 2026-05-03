@@ -62,7 +62,7 @@ from vtkmodules.util.numpy_support import vtk_to_numpy
 from foamdesk.app.bootstrap import ApplicationContext
 from foamdesk.domain.models import SimulationParameters, SimulationProject
 from foamdesk.services.geometry_import_service import GeometryAsset, SnappyHexMeshSettings, StlTransform
-from foamdesk.services.project_service import ComputationDomainTemplate
+from foamdesk.services.project_service import BoundaryConditionSettings, ComputationDomainTemplate
 from foamdesk.ui.startup_window import StartupWindow
 from foamdesk.ui.theme import THEMES, build_stylesheet
 
@@ -1329,7 +1329,14 @@ class MainWindow(QMainWindow):
 
     def _build_geometry_tab(self) -> QWidget:
         wrapper = QWidget()
-        layout = QVBoxLayout(wrapper)
+        root_layout = QVBoxLayout(wrapper)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
@@ -1342,6 +1349,9 @@ class MainWindow(QMainWindow):
         description.setWordWrap(True)
 
         action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+        action_row_2 = QHBoxLayout()
+        action_row_2.setSpacing(8)
         import_button = QPushButton("导入 STL")
         refresh_button = QPushButton("刷新几何清单")
         snappy_button = QPushButton("生成 snappyHexMeshDict")
@@ -1364,15 +1374,16 @@ class MainWindow(QMainWindow):
         limitation_button.clicked.connect(lambda _checked=False: self._show_cad_import_limitations())
         action_row.addWidget(import_button)
         action_row.addWidget(refresh_button)
-        action_row.addWidget(snappy_button)
-        action_row.addWidget(run_snappy_button)
-        action_row.addWidget(check_mesh_button)
-        action_row.addWidget(preprocess_button)
-        action_row.addWidget(simulation_pipeline_button)
-        action_row.addWidget(preview_button)
-        action_row.addWidget(edit_stl_button)
-        action_row.addWidget(limitation_button)
+        action_row_2.addWidget(snappy_button)
+        action_row_2.addWidget(run_snappy_button)
+        action_row_2.addWidget(check_mesh_button)
+        action_row_2.addWidget(preprocess_button)
+        action_row_2.addWidget(simulation_pipeline_button)
+        action_row_2.addWidget(preview_button)
+        action_row_2.addWidget(edit_stl_button)
+        action_row_2.addWidget(limitation_button)
         action_row.addStretch(1)
+        action_row_2.addStretch(1)
 
         domain_form = QFormLayout()
         self._domain_template_combo = QComboBox()
@@ -1386,6 +1397,7 @@ class MainWindow(QMainWindow):
         apply_domain_button.clicked.connect(lambda _checked=False: self._apply_domain_template())
         import_template_stl_button.clicked.connect(lambda _checked=False: self._import_template_stl())
         domain_row = QHBoxLayout()
+        domain_row.setSpacing(8)
         domain_row.addWidget(self._domain_template_combo)
         domain_row.addWidget(apply_domain_button)
         domain_row.addWidget(import_template_stl_button)
@@ -1394,7 +1406,10 @@ class MainWindow(QMainWindow):
         domain_widget.setLayout(domain_row)
         domain_form.addRow("计算域模板", domain_widget)
         domain_form.addRow("模板说明", self._domain_template_hint)
-        custom_domain_row = QHBoxLayout()
+        custom_domain_size_row = QHBoxLayout()
+        custom_domain_size_row.setSpacing(8)
+        custom_domain_cells_row = QHBoxLayout()
+        custom_domain_cells_row.setSpacing(8)
         self._domain_length_x_input = QDoubleSpinBox()
         self._domain_length_y_input = QDoubleSpinBox()
         self._domain_length_z_input = QDoubleSpinBox()
@@ -1423,20 +1438,84 @@ class MainWindow(QMainWindow):
             ("Lx", self._domain_length_x_input),
             ("Ly", self._domain_length_y_input),
             ("Lz", self._domain_length_z_input),
+        ):
+            input_widget.setMinimumWidth(96)
+            custom_domain_size_row.addWidget(QLabel(label))
+            custom_domain_size_row.addWidget(input_widget)
+        custom_domain_size_row.addStretch(1)
+        for label, input_widget in (
             ("Nx", self._domain_cells_x_input),
             ("Ny", self._domain_cells_y_input),
             ("Nz", self._domain_cells_z_input),
         ):
-            custom_domain_row.addWidget(QLabel(label))
-            custom_domain_row.addWidget(input_widget)
-        custom_domain_row.addWidget(apply_custom_domain_button)
-        custom_domain_row.addStretch(1)
+            input_widget.setMinimumWidth(96)
+            custom_domain_cells_row.addWidget(QLabel(label))
+            custom_domain_cells_row.addWidget(input_widget)
+        custom_domain_cells_row.addWidget(apply_custom_domain_button)
+        custom_domain_cells_row.addStretch(1)
         custom_domain_widget = QWidget()
-        custom_domain_widget.setLayout(custom_domain_row)
+        custom_domain_layout = QVBoxLayout(custom_domain_widget)
+        custom_domain_layout.setContentsMargins(0, 0, 0, 0)
+        custom_domain_layout.setSpacing(6)
+        custom_domain_layout.addLayout(custom_domain_size_row)
+        custom_domain_layout.addLayout(custom_domain_cells_row)
         domain_form.addRow("自定义尺寸/网格", custom_domain_widget)
+
+        boundary_row_1 = QHBoxLayout()
+        boundary_row_1.setSpacing(8)
+        boundary_row_2 = QHBoxLayout()
+        boundary_row_2.setSpacing(8)
+        self._inlet_velocity_x_input = QDoubleSpinBox()
+        self._inlet_velocity_y_input = QDoubleSpinBox()
+        self._inlet_velocity_z_input = QDoubleSpinBox()
+        for input_widget in (
+            self._inlet_velocity_x_input,
+            self._inlet_velocity_y_input,
+            self._inlet_velocity_z_input,
+        ):
+            input_widget.setRange(-100000.0, 100000.0)
+            input_widget.setDecimals(4)
+            input_widget.setSingleStep(0.1)
+            input_widget.setValue(0.0)
+            input_widget.setMinimumWidth(96)
+        self._inlet_velocity_x_input.setValue(1.0)
+        self._outlet_pressure_input = QDoubleSpinBox()
+        self._outlet_pressure_input.setRange(-100000.0, 100000.0)
+        self._outlet_pressure_input.setDecimals(4)
+        self._outlet_pressure_input.setSingleStep(0.1)
+        self._outlet_pressure_input.setValue(0.0)
+        self._outlet_pressure_input.setMinimumWidth(96)
+        self._wall_type_combo = QComboBox()
+        self._wall_type_combo.addItem("无滑移壁面 noSlip", "noSlip")
+        self._wall_type_combo.addItem("滑移壁面 slip", "slip")
+        apply_boundary_button = QPushButton("应用边界条件")
+        apply_boundary_button.clicked.connect(lambda _checked=False: self._apply_boundary_conditions())
+        for label, input_widget in (
+            ("Ux", self._inlet_velocity_x_input),
+            ("Uy", self._inlet_velocity_y_input),
+            ("Uz", self._inlet_velocity_z_input),
+        ):
+            boundary_row_1.addWidget(QLabel(label))
+            boundary_row_1.addWidget(input_widget)
+        boundary_row_1.addStretch(1)
+        boundary_row_2.addWidget(QLabel("出口压力 p"))
+        boundary_row_2.addWidget(self._outlet_pressure_input)
+        boundary_row_2.addWidget(QLabel("壁面类型"))
+        boundary_row_2.addWidget(self._wall_type_combo)
+        boundary_row_2.addWidget(apply_boundary_button)
+        boundary_row_2.addStretch(1)
+        boundary_widget = QWidget()
+        boundary_layout = QVBoxLayout(boundary_widget)
+        boundary_layout.setContentsMargins(0, 0, 0, 0)
+        boundary_layout.setSpacing(6)
+        boundary_layout.addLayout(boundary_row_1)
+        boundary_layout.addLayout(boundary_row_2)
+        domain_form.addRow("边界条件", boundary_widget)
+
         self._domain_preview_figure = Figure(figsize=(6.8, 2.8), facecolor="#1e1e1e", tight_layout=True)
         self._domain_preview_canvas = FigureCanvas(self._domain_preview_figure)
-        self._domain_preview_canvas.setMinimumHeight(260)
+        self._domain_preview_canvas.setMinimumHeight(320)
+        self._domain_preview_canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         snappy_form = QFormLayout()
         self._snappy_min_refinement_input = QSpinBox()
@@ -1465,6 +1544,7 @@ class MainWindow(QMainWindow):
         self._snappy_layer_thickness_input.setValue(0.3)
 
         location_row = QHBoxLayout()
+        location_row.setSpacing(8)
         location_row.addWidget(QLabel("X"))
         location_row.addWidget(self._snappy_location_x_input)
         location_row.addWidget(QLabel("Y"))
@@ -1484,14 +1564,18 @@ class MainWindow(QMainWindow):
         self._geometry_text = QTextEdit()
         self._geometry_text.setReadOnly(True)
         self._geometry_text.setPlainText("请先新建或打开项目，然后导入 STL 几何。")
+        self._geometry_text.setMinimumHeight(180)
 
         layout.addWidget(title)
         layout.addWidget(description)
         layout.addLayout(action_row)
+        layout.addLayout(action_row_2)
         layout.addLayout(domain_form)
         layout.addWidget(self._domain_preview_canvas)
         layout.addLayout(snappy_form)
         layout.addWidget(self._geometry_text, 1)
+        scroll_area.setWidget(content)
+        root_layout.addWidget(scroll_area)
         return wrapper
 
     def _build_solver_run_tab(self) -> QWidget:
@@ -1909,14 +1993,24 @@ class MainWindow(QMainWindow):
         x_input = QDoubleSpinBox()
         y_input = QDoubleSpinBox()
         z_input = QDoubleSpinBox()
+        rx_input = QDoubleSpinBox()
+        ry_input = QDoubleSpinBox()
+        rz_input = QDoubleSpinBox()
         for input_widget in (x_input, y_input, z_input):
             input_widget.setRange(-100000.0, 100000.0)
             input_widget.setDecimals(4)
             input_widget.setSingleStep(0.1)
+        for input_widget in (rx_input, ry_input, rz_input):
+            input_widget.setRange(-3600.0, 3600.0)
+            input_widget.setDecimals(3)
+            input_widget.setSingleStep(5.0)
         x_input.setValue(resolved_transform.translate[0])
         y_input.setValue(resolved_transform.translate[1])
         z_input.setValue(resolved_transform.translate[2])
-        hint = QLabel("这些参数会直接修改导入后的 STL 顶点坐标。默认 scale=1、平移=0 表示保持原始位置。")
+        rx_input.setValue(resolved_transform.rotate_degrees[0])
+        ry_input.setValue(resolved_transform.rotate_degrees[1])
+        rz_input.setValue(resolved_transform.rotate_degrees[2])
+        hint = QLabel("这些参数会直接修改导入后的 STL 顶点坐标。变换顺序：缩放 -> 旋转 -> 平移。")
         hint.setWordWrap(True)
         preview_hint = QLabel("预览说明：灰色外框是 1x1x1 计算区域参考，蓝色几何是当前缩放和平移后的 STL 位置。")
         preview_hint.setWordWrap(True)
@@ -1928,6 +2022,7 @@ class MainWindow(QMainWindow):
             return StlTransform(
                 translate=(x_input.value(), y_input.value(), z_input.value()),
                 scale=scale_input.value(),
+                rotate_degrees=(rx_input.value(), ry_input.value(), rz_input.value()),
             )
 
         def refresh_preview() -> None:
@@ -1937,10 +2032,16 @@ class MainWindow(QMainWindow):
         x_input.valueChanged.connect(refresh_preview)
         y_input.valueChanged.connect(refresh_preview)
         z_input.valueChanged.connect(refresh_preview)
+        rx_input.valueChanged.connect(refresh_preview)
+        ry_input.valueChanged.connect(refresh_preview)
+        rz_input.valueChanged.connect(refresh_preview)
         form.addRow("缩放 scale", scale_input)
         form.addRow("平移 X", x_input)
         form.addRow("平移 Y", y_input)
         form.addRow("平移 Z", z_input)
+        form.addRow("旋转 X°", rx_input)
+        form.addRow("旋转 Y°", ry_input)
+        form.addRow("旋转 Z°", rz_input)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
@@ -1983,7 +2084,19 @@ class MainWindow(QMainWindow):
             canvas.draw()
             return
 
-        transformed_points = points * float(transform.scale) + np.array(transform.translate, dtype=float)
+        rotation = self._context.geometry_import_service._rotation_matrix(transform.rotate_degrees)
+        transformed_points = np.array(
+            [
+                self._context.geometry_import_service._transform_vertex(
+                    (float(point[0]), float(point[1]), float(point[2])),
+                    float(transform.scale),
+                    rotation,
+                    transform.translate,
+                )
+                for point in points
+            ],
+            dtype=float,
+        )
         sampled_faces = faces
         if len(sampled_faces) > 5000:
             indices = np.linspace(0, len(sampled_faces) - 1, 5000, dtype=int)
@@ -2078,6 +2191,7 @@ class MainWindow(QMainWindow):
             self._refresh_domain_preview()
             return
         self._load_domain_template_into_form()
+        self._load_boundary_conditions_into_form()
         self._load_snappy_settings_into_form()
         self._geometry_text.setPlainText(self._context.geometry_import_service.format_assets(self._current_project))
         self._refresh_domain_preview()
@@ -2113,6 +2227,18 @@ class MainWindow(QMainWindow):
                 self._domain_cells_z_input.setValue(int(cells[2]))
         except (OSError, ValueError, TypeError):
             return
+
+    def _load_boundary_conditions_into_form(self) -> None:
+        if self._current_project is None or not hasattr(self, "_inlet_velocity_x_input"):
+            return
+        settings = self._context.project_service.load_boundary_conditions(self._current_project)
+        self._inlet_velocity_x_input.setValue(settings.inlet_velocity[0])
+        self._inlet_velocity_y_input.setValue(settings.inlet_velocity[1])
+        self._inlet_velocity_z_input.setValue(settings.inlet_velocity[2])
+        self._outlet_pressure_input.setValue(settings.outlet_pressure)
+        index = self._wall_type_combo.findData(settings.wall_type)
+        if index >= 0:
+            self._wall_type_combo.setCurrentIndex(index)
 
     def _refresh_domain_template_hint(self) -> None:
         if not hasattr(self, "_domain_template_combo") or not hasattr(self, "_domain_template_hint"):
@@ -2208,6 +2334,33 @@ class MainWindow(QMainWindow):
         )
         self._refresh_geometry_panel()
         self._set_status("自定义计算域已应用。")
+
+    def _apply_boundary_conditions(self) -> None:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return
+        settings = BoundaryConditionSettings(
+            inlet_velocity=(
+                self._inlet_velocity_x_input.value(),
+                self._inlet_velocity_y_input.value(),
+                self._inlet_velocity_z_input.value(),
+            ),
+            outlet_pressure=self._outlet_pressure_input.value(),
+            wall_type=str(self._wall_type_combo.currentData()),
+        )
+        try:
+            written_files = self._context.project_service.apply_boundary_conditions(self._current_project, settings)
+        except (OSError, ValueError) as error:
+            self._show_error(f"应用边界条件失败：{error}")
+            return
+        self._append_log(
+            "边界条件已应用："
+            f"inlet U={settings.inlet_velocity}，outlet p={settings.outlet_pressure:g}，"
+            f"wall={settings.wall_type}"
+        )
+        for path in written_files:
+            self._append_log(f"- 已写入：{path}")
+        self._set_status("边界条件已应用。")
 
     def _import_template_stl(self) -> None:
         if self._current_project is None:
