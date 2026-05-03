@@ -83,6 +83,26 @@ class ProjectService:
                 description="底部带斜坡的通道，用于观察流体经过地形/坡面时的变化。",
                 shape="ramp",
             ),
+            ComputationDomainTemplate(
+                key="medium_round_pipe",
+                name="中等：圆管 6 x 2 x 2",
+                level="中等",
+                size=(6.0, 2.0, 2.0),
+                cells=(64, 18, 18),
+                suggested_location_in_mesh=(0.5, 1.0, 1.0),
+                description="近似圆形截面的直管计算域，用于管道内流入门测试。",
+                shape="pipe",
+            ),
+            ComputationDomainTemplate(
+                key="advanced_90_bend_channel",
+                name="高等：90 度弯管通道 4 x 4 x 1.2",
+                level="高等",
+                size=(4.0, 4.0, 1.2),
+                cells=(48, 16, 12),
+                suggested_location_in_mesh=(2.0, 0.5, 0.6),
+                description="90 度弯曲通道，用于观察流体转弯后的速度和压力变化。",
+                shape="bend",
+            ),
         )
 
     def load_domain_template_key(self, project: SimulationProject) -> str:
@@ -443,6 +463,8 @@ class ProjectService:
         cell_x, cell_y, cell_z = template.cells
         vertices = self.domain_vertices(template)
         vertex_lines = "\n".join(f"    ({x:g} {y:g} {z:g})" for x, y, z in vertices)
+        edge_lines = self.domain_edge_lines(template)
+        block_indices = "0 3 2 1 4 7 6 5" if template.shape == "bend" else "0 1 2 3 4 5 6 7"
         return f"""FoamFile
 {{
     version     2.0;
@@ -460,11 +482,12 @@ vertices
 
 blocks
 (
-    hex (0 1 2 3 4 5 6 7) ({cell_x} {cell_y} {cell_z}) simpleGrading (1 1 1)
+    hex ({block_indices}) ({cell_x} {cell_y} {cell_z}) simpleGrading (1 1 1)
 );
 
 edges
 (
+{edge_lines}
 );
 
 boundary
@@ -499,6 +522,34 @@ mergePatchPairs
 
     def domain_vertices(self, template: ComputationDomainTemplate) -> tuple[tuple[float, float, float], ...]:
         length_x, length_y, length_z = template.size
+        if template.shape == "pipe":
+            center_y = length_y / 2.0
+            center_z = length_z / 2.0
+            radius = min(length_y, length_z) * 0.42
+            return (
+                (0.0, center_y - radius, center_z),
+                (length_x, center_y - radius, center_z),
+                (length_x, center_y, center_z - radius),
+                (0.0, center_y, center_z - radius),
+                (0.0, center_y, center_z + radius),
+                (length_x, center_y, center_z + radius),
+                (length_x, center_y + radius, center_z),
+                (0.0, center_y + radius, center_z),
+            )
+        if template.shape == "bend":
+            length_x, length_y, length_z = template.size
+            inner_radius = min(length_x, length_y) * 0.28
+            outer_radius = min(length_x, length_y) * 0.62
+            return (
+                (inner_radius, 0.0, 0.0),
+                (0.0, inner_radius, 0.0),
+                (0.0, outer_radius, 0.0),
+                (outer_radius, 0.0, 0.0),
+                (inner_radius, 0.0, length_z),
+                (0.0, inner_radius, length_z),
+                (0.0, outer_radius, length_z),
+                (outer_radius, 0.0, length_z),
+            )
         if template.shape == "tapered":
             y_margin = length_y * 0.24
             z_margin = length_z * 0.24
@@ -534,6 +585,34 @@ mergePatchPairs
             (length_x, length_y, length_z),
             (0.0, length_y, length_z),
         )
+
+    def domain_edge_lines(self, template: ComputationDomainTemplate) -> str:
+        if template.shape == "pipe":
+            length_x, length_y, length_z = template.size
+            center_y = length_y / 2.0
+            center_z = length_z / 2.0
+            radius = min(length_y, length_z) * 0.42
+            diagonal = radius * 0.70710678118
+            return f"""    arc 0 4 (0 {center_y - diagonal:g} {center_z + diagonal:g})
+    arc 4 7 (0 {center_y + diagonal:g} {center_z + diagonal:g})
+    arc 7 3 (0 {center_y + diagonal:g} {center_z - diagonal:g})
+    arc 3 0 (0 {center_y - diagonal:g} {center_z - diagonal:g})
+    arc 1 5 ({length_x:g} {center_y - diagonal:g} {center_z + diagonal:g})
+    arc 5 6 ({length_x:g} {center_y + diagonal:g} {center_z + diagonal:g})
+    arc 6 2 ({length_x:g} {center_y + diagonal:g} {center_z - diagonal:g})
+    arc 2 1 ({length_x:g} {center_y - diagonal:g} {center_z - diagonal:g})"""
+        if template.shape == "bend":
+            length_x, length_y, _ = template.size
+            inner_radius = min(length_x, length_y) * 0.28
+            outer_radius = min(length_x, length_y) * 0.62
+            inner_mid = inner_radius * 0.70710678118
+            outer_mid = outer_radius * 0.70710678118
+            height = template.size[2]
+            return f"""    arc 0 1 ({inner_mid:g} {inner_mid:g} 0)
+    arc 3 2 ({outer_mid:g} {outer_mid:g} 0)
+    arc 4 5 ({inner_mid:g} {inner_mid:g} {height:g})
+    arc 7 6 ({outer_mid:g} {outer_mid:g} {height:g})"""
+        return ""
 
     def _default_block_mesh_dict(self) -> str:
         return self._block_mesh_dict_for_template(self.domain_templates()[0])

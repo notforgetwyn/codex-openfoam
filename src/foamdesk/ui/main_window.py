@@ -1361,6 +1361,7 @@ class MainWindow(QMainWindow):
         simulation_pipeline_button = QPushButton("一键仿真流水线")
         preview_button = QPushButton("预览已导入 STL")
         edit_stl_button = QPushButton("编辑 STL 位置")
+        precheck_button = QPushButton("运行前检查")
         limitation_button = QPushButton("STEP/IGES 支持说明")
         import_button.clicked.connect(lambda _checked=False: self._import_stl_geometry())
         refresh_button.clicked.connect(lambda _checked=False: self._refresh_geometry_panel())
@@ -1371,6 +1372,7 @@ class MainWindow(QMainWindow):
         simulation_pipeline_button.clicked.connect(lambda _checked=False: self._run_simulation_pipeline())
         preview_button.clicked.connect(lambda _checked=False: self._preview_imported_stl())
         edit_stl_button.clicked.connect(lambda _checked=False: self._edit_imported_stl_transform())
+        precheck_button.clicked.connect(lambda _checked=False: self._run_preflight_check())
         limitation_button.clicked.connect(lambda _checked=False: self._show_cad_import_limitations())
         action_row.addWidget(import_button)
         action_row.addWidget(refresh_button)
@@ -1381,6 +1383,7 @@ class MainWindow(QMainWindow):
         action_row_2.addWidget(simulation_pipeline_button)
         action_row_2.addWidget(preview_button)
         action_row_2.addWidget(edit_stl_button)
+        action_row_2.addWidget(precheck_button)
         action_row_2.addWidget(limitation_button)
         action_row.addStretch(1)
         action_row_2.addStretch(1)
@@ -2184,6 +2187,10 @@ class MainWindow(QMainWindow):
             )
 
     def _draw_domain_template_wireframe(self, axes, template: ComputationDomainTemplate) -> np.ndarray:
+        if template.shape == "pipe":
+            return self._draw_pipe_domain_wireframe(axes, template)
+        if template.shape == "bend":
+            return self._draw_bend_domain_wireframe(axes, template)
         corners = np.array(self._context.project_service.domain_vertices(template), dtype=float)
         edges = [
             (0, 1),
@@ -2209,6 +2216,72 @@ class MainWindow(QMainWindow):
                 alpha=0.85,
             )
         return corners
+
+    def _draw_pipe_domain_wireframe(self, axes, template: ComputationDomainTemplate) -> np.ndarray:
+        length_x, length_y, length_z = template.size
+        center_y = length_y / 2.0
+        center_z = length_z / 2.0
+        radius = min(length_y, length_z) * 0.42
+        theta = np.linspace(0.0, 2.0 * np.pi, 80)
+        inlet = np.column_stack(
+            [
+                np.zeros_like(theta),
+                center_y + radius * np.cos(theta),
+                center_z + radius * np.sin(theta),
+            ]
+        )
+        outlet = np.column_stack(
+            [
+                np.full_like(theta, length_x),
+                center_y + radius * np.cos(theta),
+                center_z + radius * np.sin(theta),
+            ]
+        )
+        axes.plot(inlet[:, 0], inlet[:, 1], inlet[:, 2], color="#8a8a8a", linewidth=1.2, alpha=0.85)
+        axes.plot(outlet[:, 0], outlet[:, 1], outlet[:, 2], color="#8a8a8a", linewidth=1.2, alpha=0.85)
+        for angle in (0, np.pi / 2, np.pi, 3 * np.pi / 2):
+            y = center_y + radius * np.cos(angle)
+            z = center_z + radius * np.sin(angle)
+            axes.plot([0.0, length_x], [y, y], [z, z], color="#8a8a8a", linewidth=1.2, alpha=0.85)
+        return np.vstack([inlet, outlet])
+
+    def _draw_bend_domain_wireframe(self, axes, template: ComputationDomainTemplate) -> np.ndarray:
+        length_x, length_y, height = template.size
+        inner_radius = min(length_x, length_y) * 0.28
+        outer_radius = min(length_x, length_y) * 0.62
+        theta = np.linspace(0.0, np.pi / 2.0, 80)
+        points: list[np.ndarray] = []
+        for radius in (inner_radius, outer_radius):
+            for z_value in (0.0, height):
+                curve = np.column_stack(
+                    [
+                        radius * np.cos(theta),
+                        radius * np.sin(theta),
+                        np.full_like(theta, z_value),
+                    ]
+                )
+                axes.plot(curve[:, 0], curve[:, 1], curve[:, 2], color="#8a8a8a", linewidth=1.2, alpha=0.85)
+                points.append(curve)
+        for angle in (0.0, np.pi / 2.0):
+            for z_value in (0.0, height):
+                axes.plot(
+                    [inner_radius * np.cos(angle), outer_radius * np.cos(angle)],
+                    [inner_radius * np.sin(angle), outer_radius * np.sin(angle)],
+                    [z_value, z_value],
+                    color="#8a8a8a",
+                    linewidth=1.2,
+                    alpha=0.85,
+                )
+            for radius in (inner_radius, outer_radius):
+                axes.plot(
+                    [radius * np.cos(angle), radius * np.cos(angle)],
+                    [radius * np.sin(angle), radius * np.sin(angle)],
+                    [0.0, height],
+                    color="#8a8a8a",
+                    linewidth=1.2,
+                    alpha=0.85,
+                )
+        return np.vstack(points)
 
     def _refresh_geometry_panel(self) -> None:
         if not hasattr(self, "_geometry_text"):
@@ -2304,6 +2377,10 @@ class MainWindow(QMainWindow):
             return "medium_cylinder_obstacle.stl，适合放在渐扩段中部。"
         if key == "advanced_ramp_channel":
             return "medium_ramp_wedge.stl，适合测试斜坡/地形通道。"
+        if key == "medium_round_pipe":
+            return "不建议放入障碍 STL；适合直接做管道内流。"
+        if key == "advanced_90_bend_channel":
+            return "不建议放入障碍 STL；适合观察弯管转弯流动。"
         return "请从 assets/test_geometries 选择匹配的 STL。"
 
     def _template_stl_path(self, key: str) -> Path:
@@ -2318,6 +2395,10 @@ class MainWindow(QMainWindow):
             return geometry_dir / "medium_cylinder_obstacle.stl"
         if key == "advanced_ramp_channel":
             return geometry_dir / "medium_ramp_wedge.stl"
+        if key == "medium_round_pipe":
+            return geometry_dir / "small_obstacle_cube.stl"
+        if key == "advanced_90_bend_channel":
+            return geometry_dir / "small_obstacle_cube.stl"
         return geometry_dir / "small_obstacle_cube.stl"
 
     def _apply_domain_template(self) -> None:
@@ -2396,6 +2477,127 @@ class MainWindow(QMainWindow):
         for path in written_files:
             self._append_log(f"- 已写入：{path}")
         self._set_status("边界条件已应用。")
+
+    def _run_preflight_check(self) -> None:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return
+        template = self._current_domain_template()
+        domain_points = np.array(self._context.project_service.domain_vertices(template), dtype=float)
+        domain_min = domain_points.min(axis=0)
+        domain_max = domain_points.max(axis=0)
+        messages: list[str] = [
+            "运行前检查",
+            f"- 当前计算域：{template.name}，shape={template.shape}",
+            f"- 计算域包围盒：min={tuple(domain_min.round(4))}, max={tuple(domain_max.round(4))}",
+        ]
+        has_error = False
+
+        required_files = [
+            self._current_project.case_dir / "system" / "blockMeshDict",
+            self._current_project.case_dir / "system" / "controlDict",
+            self._current_project.case_dir / "system" / "fvSchemes",
+            self._current_project.case_dir / "system" / "fvSolution",
+            self._current_project.case_dir / "0" / "U",
+            self._current_project.case_dir / "0" / "p",
+        ]
+        for path in required_files:
+            if path.exists():
+                messages.append(f"- 必需文件存在：{path.relative_to(self._current_project.case_dir)}")
+            else:
+                has_error = True
+                messages.append(f"- 缺少必需文件：{path.relative_to(self._current_project.case_dir)}")
+
+        env_script = self._context.settings_service.load().openfoam_env_script
+        if env_script and Path(env_script).exists():
+            messages.append(f"- OpenFOAM 环境脚本存在：{env_script}")
+        else:
+            has_error = True
+            messages.append(f"- OpenFOAM 环境脚本不存在：{env_script or '未配置'}")
+
+        boundary_names = self._context.project_service._extract_boundary_names(
+            self._current_project.case_dir / "system" / "blockMeshDict"
+        )
+        if boundary_names:
+            messages.append(f"- blockMesh 边界：{', '.join(boundary_names)}")
+            for field_name in ("U", "p"):
+                field_path = self._current_project.case_dir / "0" / field_name
+                missing = [
+                    name
+                    for name in boundary_names
+                    if not re.search(rf"\b{re.escape(name)}\s*\{{", field_path.read_text(encoding="utf-8"))
+                ] if field_path.exists() else list(boundary_names)
+                if missing:
+                    has_error = True
+                    messages.append(f"- {field_name} 缺少边界条件：{', '.join(missing)}")
+                else:
+                    messages.append(f"- {field_name} 边界条件完整。")
+        else:
+            has_error = True
+            messages.append("- blockMeshDict 没有读取到边界定义。")
+
+        location = np.array(
+            [
+                self._snappy_location_x_input.value(),
+                self._snappy_location_y_input.value(),
+                self._snappy_location_z_input.value(),
+            ],
+            dtype=float,
+        )
+        if np.all((location >= domain_min) & (location <= domain_max)):
+            messages.append(f"- locationInMesh 合理：{tuple(location.round(4))} 在计算域包围盒内。")
+        else:
+            has_error = True
+            messages.append(f"- locationInMesh 不合理：{tuple(location.round(4))} 不在计算域包围盒内。")
+
+        assets = [
+            asset
+            for asset in self._context.geometry_import_service.list_assets(self._current_project)
+            if asset.format.upper() == "STL" and asset.stored_path.exists()
+        ]
+        if not assets:
+            messages.append("- 当前 Case 没有导入 STL。管道内流可以不放障碍物；外流/绕流场景建议导入 STL。")
+        elif template.shape in {"pipe", "bend"}:
+            messages.append("- 当前是管道/弯管内流模板：通常不需要导入障碍 STL，除非你明确要模拟管内障碍物。")
+        for asset in assets:
+            try:
+                points, _faces = self._read_stl_preview_mesh(asset.stored_path)
+            except (OSError, ValueError) as error:
+                has_error = True
+                messages.append(f"- STL 读取失败：{asset.name}，{error}")
+                continue
+            if points.size == 0:
+                has_error = True
+                messages.append(f"- STL 无顶点：{asset.name}")
+                continue
+            stl_min = points.min(axis=0)
+            stl_max = points.max(axis=0)
+            inside = np.all((stl_min >= domain_min) & (stl_max <= domain_max))
+            if inside:
+                messages.append(f"- STL 在计算域内：{asset.name}，bbox={tuple(stl_min.round(4))} -> {tuple(stl_max.round(4))}")
+            else:
+                has_error = True
+                messages.append(
+                    f"- STL 可能超出计算域：{asset.name}，bbox={tuple(stl_min.round(4))} -> {tuple(stl_max.round(4))}"
+                )
+
+        if self._snappy_min_refinement_input.value() > self._snappy_max_refinement_input.value():
+            has_error = True
+            messages.append("- snappy 加密等级不合理：最小加密等级不能大于最大加密等级。")
+        else:
+            messages.append(
+                f"- snappy 加密等级：{self._snappy_min_refinement_input.value()} -> {self._snappy_max_refinement_input.value()}"
+            )
+
+        summary = "\n".join(messages)
+        self._problem_text.setPlainText(summary)
+        self._append_log(summary)
+        if has_error:
+            self._show_error("运行前检查发现问题，请查看“问题”面板。")
+            self._set_status("运行前检查发现问题。")
+        else:
+            QMessageBox.information(self, "运行前检查通过", "未发现明显问题，可以继续生成网格或运行仿真。")
+            self._set_status("运行前检查通过。")
 
     def _import_template_stl(self) -> None:
         if self._current_project is None:
