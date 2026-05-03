@@ -3,6 +3,7 @@
 import shlex
 import re
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 from matplotlib import colormaps
@@ -191,6 +192,9 @@ class VtkViewerDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("FoamDesk 3D 视图")
         self.resize(920, 680)
+        self._active_plot_callback: Callable[[], None] | None = None
+        self._tab_refresh_callbacks: dict[QWidget, Callable[[], None]] = {}
+        self._is_refreshing_tab = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -206,6 +210,9 @@ class VtkViewerDialog(QDialog):
         self._filter_radius_input.setDecimals(4)
         self._filter_radius_input.setSingleStep(0.05)
         self._filter_radius_input.setValue(0.1)
+        self._filter_mode_combo.currentIndexChanged.connect(self._refresh_current_tab)
+        self._filter_asset_combo.currentIndexChanged.connect(self._refresh_current_tab)
+        self._filter_radius_input.valueChanged.connect(self._refresh_current_tab)
         action_row.addWidget(QLabel("显示范围"))
         action_row.addWidget(self._filter_mode_combo)
         action_row.addWidget(QLabel("STL"))
@@ -233,6 +240,7 @@ class VtkViewerDialog(QDialog):
     def set_geometry_assets(self, assets: list[GeometryAsset]) -> None:
         self._geometry_assets = {}
         current_name = self._filter_asset_combo.currentText()
+        self._filter_asset_combo.blockSignals(True)
         self._filter_asset_combo.clear()
         for asset in assets:
             if asset.format.upper() != "STL" or not asset.stored_path.exists():
@@ -246,6 +254,7 @@ class VtkViewerDialog(QDialog):
             index = self._filter_asset_combo.findText(current_name)
             if index >= 0:
                 self._filter_asset_combo.setCurrentIndex(index)
+        self._filter_asset_combo.blockSignals(False)
 
     def _stl_bounds(self, path: Path) -> tuple[np.ndarray, np.ndarray] | None:
         reader = vtkSTLReader()
@@ -261,6 +270,7 @@ class VtkViewerDialog(QDialog):
         super().closeEvent(event)
 
     def plot_cube(self) -> None:
+        self._begin_plot(lambda: self.plot_cube())
         axes = self._reset_axes("3D Preview")
         corners = np.array(
             [
@@ -300,6 +310,7 @@ class VtkViewerDialog(QDialog):
         self._finish_axes(axes, corners)
 
     def plot_polydata_points(self, poly_data, title: str) -> None:
+        self._begin_plot(lambda: self.plot_polydata_points(poly_data, title))
         points = self._points(poly_data)
         axes = self._reset_axes(title)
         if points.size == 0:
@@ -316,6 +327,7 @@ class VtkViewerDialog(QDialog):
         self._finish_axes(axes, points)
 
     def plot_stl_file(self, path: Path) -> tuple[int, int]:
+        self._begin_plot(lambda: self.plot_stl_file(path))
         reader = vtkSTLReader()
         reader.SetFileName(str(path))
         reader.Update()
@@ -346,6 +358,7 @@ class VtkViewerDialog(QDialog):
         scalar_range: tuple[float, float],
         field_name: str,
     ) -> int:
+        self._begin_plot(lambda: self.plot_field_surface(poly_data, field_array, scalar_range, field_name))
         points = self._points(poly_data)
         faces = self._faces(poly_data)
         values = self._scalar_values(field_array)
@@ -394,6 +407,7 @@ class VtkViewerDialog(QDialog):
         return self.plot_field_surface(poly_data, pressure_array, scalar_range, "p")
 
     def plot_velocity_vectors(self, poly_data, vector_array, limit: int = 700) -> tuple[int, tuple[float, float]]:
+        self._begin_plot(lambda: self.plot_velocity_vectors(poly_data, vector_array, limit))
         points = self._points(poly_data)
         vectors = vtk_to_numpy(vector_array)
         axes = self._reset_axes("Velocity Vectors |U|")
@@ -463,6 +477,7 @@ class VtkViewerDialog(QDialog):
         axis_name: str | None = None,
         normalized_position: float = 0.5,
     ) -> tuple[int, str, float, tuple[float, float]]:
+        self._begin_plot(lambda: self.plot_velocity_slice(poly_data, vector_array, axis_name, normalized_position))
         points = self._points(poly_data)
         vectors = vtk_to_numpy(vector_array)
         axes = self._reset_axes("Velocity Slice |U|")
@@ -548,6 +563,9 @@ class VtkViewerDialog(QDialog):
         normalized_position: float = 0.5,
         resolution: int = 80,
     ) -> tuple[int, str, float, tuple[float, float]]:
+        self._begin_plot(
+            lambda: self.plot_velocity_slice_contour(poly_data, vector_array, axis_name, normalized_position, resolution)
+        )
         points = self._points(poly_data)
         vectors = vtk_to_numpy(vector_array)
         axes = self._reset_axes("Velocity Slice Contour |U|")
@@ -655,6 +673,9 @@ class VtkViewerDialog(QDialog):
         main_axis: str,
         speed_range: tuple[float, float],
     ) -> tuple[int, int, str, tuple[float, float]]:
+        self._begin_plot(
+            lambda: self.plot_velocity_streamlines(source_poly_data, streamline_poly_data, main_axis, speed_range)
+        )
         source_points = self._points(source_poly_data)
         line_points = self._points(streamline_poly_data)
         axes = self._reset_axes("Velocity Streamlines |U|")
@@ -679,6 +700,11 @@ class VtkViewerDialog(QDialog):
             if count < 2:
                 continue
             line = line_points[ids]
+            line_mask = self._filter_mask(line)
+            line = line[line_mask]
+            ids = ids[line_mask]
+            if len(line) < 2:
+                continue
             speed = float(line_speeds[ids].mean()) if len(line_speeds) else 0.0
             axes.plot(
                 line[:, 0],
@@ -690,7 +716,12 @@ class VtkViewerDialog(QDialog):
             )
             axes.scatter(line[0, 0], line[0, 1], line[0, 2], s=16, c="#ffffff", alpha=0.85)
             line_count += 1
-            total_line_points += count
+            total_line_points += len(line)
+
+        if line_count == 0:
+            axes.text2D(0.08, 0.5, "当前显示范围内没有速度流线。", color="#d4d4d4")
+            self._show()
+            return 0, 0, main_axis, speed_range
 
         colorbar = self.figure.colorbar(
             self._scalar_mappable(speed_range, cmap),
@@ -702,10 +733,12 @@ class VtkViewerDialog(QDialog):
         colorbar.ax.yaxis.set_tick_params(color="#d4d4d4")
         for label in colorbar.ax.get_yticklabels():
             label.set_color("#d4d4d4")
-        self._finish_axes(axes, source_points)
+        filtered_source_points = self._filter_points(source_points)
+        self._finish_axes(axes, filtered_source_points if filtered_source_points.size else source_points)
         return line_count, total_line_points, main_axis, speed_range
 
     def plot_pressure_points(self, poly_data, pressure_array, scalar_range: tuple[float, float]) -> None:
+        self._begin_plot(lambda: self.plot_pressure_points(poly_data, pressure_array, scalar_range))
         points = self._points(poly_data)
         pressure = vtk_to_numpy(pressure_array)
         axes = self._reset_axes("Pressure Point Cloud")
@@ -744,6 +777,8 @@ class VtkViewerDialog(QDialog):
         self._last_plot_title = title
         self.figure = Figure(figsize=(8, 6), facecolor="#1e1e1e", tight_layout=True)
         self.canvas = FigureCanvas(self.figure)
+        if self._active_plot_callback is not None:
+            self._tab_refresh_callbacks[self.canvas] = self._active_plot_callback
         self._tabs.addTab(self.canvas, self._tab_title(title))
         self._tabs.setCurrentWidget(self.canvas)
         axes = self.figure.add_subplot(111, projection="3d", facecolor="#1e1e1e")
@@ -851,6 +886,8 @@ class VtkViewerDialog(QDialog):
 
     def _close_tab(self, index: int) -> None:
         widget = self._tabs.widget(index)
+        if widget is not None:
+            self._tab_refresh_callbacks.pop(widget, None)
         self._tabs.removeTab(index)
         if widget is not None:
             widget.deleteLater()
@@ -860,6 +897,26 @@ class VtkViewerDialog(QDialog):
             self._close_tab(0)
         self.figure = None
         self.canvas = None
+
+    def _begin_plot(self, callback: Callable[[], None]) -> None:
+        self._active_plot_callback = callback
+
+    def _refresh_current_tab(self) -> None:
+        if self._is_refreshing_tab:
+            return
+        current_widget = self._tabs.currentWidget()
+        if current_widget is None:
+            return
+        callback = self._tab_refresh_callbacks.get(current_widget)
+        if callback is None:
+            return
+        current_index = self._tabs.currentIndex()
+        self._is_refreshing_tab = True
+        try:
+            self._close_tab(current_index)
+            callback()
+        finally:
+            self._is_refreshing_tab = False
 
     def _points(self, poly_data) -> np.ndarray:
         vtk_points = poly_data.GetPoints()
@@ -1745,7 +1802,7 @@ class MainWindow(QMainWindow):
         )
         if not file_path:
             return
-        transform = self._read_stl_transform_dialog()
+        transform = self._read_stl_transform_dialog(Path(file_path))
         if transform is None:
             return
         try:
@@ -1762,9 +1819,10 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.setCurrentIndex(6)
         self._set_status("STL 几何导入完成。")
 
-    def _read_stl_transform_dialog(self) -> StlTransform | None:
+    def _read_stl_transform_dialog(self, source_path: Path) -> StlTransform | None:
         dialog = QDialog(self)
         dialog.setWindowTitle("导入 STL：位置和缩放")
+        dialog.resize(760, 620)
         layout = QVBoxLayout(dialog)
         form = QFormLayout()
         scale_input = QDoubleSpinBox()
@@ -1782,6 +1840,25 @@ class MainWindow(QMainWindow):
             input_widget.setValue(0.0)
         hint = QLabel("这些参数会直接修改导入后的 STL 顶点坐标。默认 scale=1、平移=0 表示保持原始位置。")
         hint.setWordWrap(True)
+        preview_hint = QLabel("预览说明：灰色外框是 1x1x1 计算区域参考，蓝色几何是当前缩放和平移后的 STL 位置。")
+        preview_hint.setWordWrap(True)
+        preview_figure = Figure(figsize=(6.8, 3.8), facecolor="#1e1e1e", tight_layout=True)
+        preview_canvas = FigureCanvas(preview_figure)
+        preview_canvas.setMinimumHeight(320)
+
+        def current_transform() -> StlTransform:
+            return StlTransform(
+                translate=(x_input.value(), y_input.value(), z_input.value()),
+                scale=scale_input.value(),
+            )
+
+        def refresh_preview() -> None:
+            self._draw_stl_transform_preview(preview_figure, preview_canvas, source_path, current_transform())
+
+        scale_input.valueChanged.connect(refresh_preview)
+        x_input.valueChanged.connect(refresh_preview)
+        y_input.valueChanged.connect(refresh_preview)
+        z_input.valueChanged.connect(refresh_preview)
         form.addRow("缩放 scale", scale_input)
         form.addRow("平移 X", x_input)
         form.addRow("平移 Y", y_input)
@@ -1791,13 +1868,125 @@ class MainWindow(QMainWindow):
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(hint)
         layout.addLayout(form)
+        layout.addWidget(preview_hint)
+        layout.addWidget(preview_canvas)
         layout.addWidget(buttons)
+        refresh_preview()
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
-        return StlTransform(
-            translate=(x_input.value(), y_input.value(), z_input.value()),
-            scale=scale_input.value(),
+        return current_transform()
+
+    def _draw_stl_transform_preview(
+        self,
+        figure: Figure,
+        canvas: FigureCanvas,
+        source_path: Path,
+        transform: StlTransform,
+    ) -> None:
+        figure.clear()
+        axes = figure.add_subplot(111, projection="3d", facecolor="#1e1e1e")
+        axes.set_title("STL 放置预览", color="#d4d4d4", pad=10)
+        axes.set_xlabel("X", color="#d4d4d4")
+        axes.set_ylabel("Y", color="#d4d4d4")
+        axes.set_zlabel("Z", color="#d4d4d4")
+        axes.tick_params(colors="#d4d4d4")
+        axes.grid(True, color="#333333", linestyle="--", linewidth=0.5)
+        self._draw_unit_domain_wireframe(axes)
+
+        try:
+            points, faces = self._read_stl_preview_mesh(source_path)
+        except (OSError, ValueError) as error:
+            axes.text2D(0.05, 0.5, f"STL 预览失败：{error}", color="#d4d4d4")
+            canvas.draw()
+            return
+
+        if points.size == 0 or faces.size == 0:
+            axes.text2D(0.05, 0.5, "STL 没有可预览的三角面。", color="#d4d4d4")
+            canvas.draw()
+            return
+
+        transformed_points = points * float(transform.scale) + np.array(transform.translate, dtype=float)
+        sampled_faces = faces
+        if len(sampled_faces) > 5000:
+            indices = np.linspace(0, len(sampled_faces) - 1, 5000, dtype=int)
+            sampled_faces = sampled_faces[indices]
+        polygons = [transformed_points[np.asarray(face, dtype=int)] for face in sampled_faces]
+        collection = Poly3DCollection(
+            polygons,
+            facecolors=(0.25, 0.74, 1.0, 0.72),
+            edgecolors=(0.03, 0.18, 0.28, 0.45),
+            linewidths=0.25,
         )
+        axes.add_collection3d(collection)
+
+        mins = np.minimum(transformed_points.min(axis=0), np.array([0.0, 0.0, 0.0]))
+        maxs = np.maximum(transformed_points.max(axis=0), np.array([1.0, 1.0, 1.0]))
+        center = (mins + maxs) / 2.0
+        radius = max(float((maxs - mins).max()) / 2.0, 0.55)
+        axes.set_xlim(center[0] - radius, center[0] + radius)
+        axes.set_ylim(center[1] - radius, center[1] + radius)
+        axes.set_zlim(center[2] - radius, center[2] + radius)
+        axes.view_init(elev=24, azim=-55)
+        canvas.draw()
+
+    def _read_stl_preview_mesh(self, source_path: Path) -> tuple[np.ndarray, np.ndarray]:
+        reader = vtkSTLReader()
+        reader.SetFileName(str(source_path))
+        reader.Update()
+        poly_data = reader.GetOutput()
+        vtk_points = poly_data.GetPoints()
+        polygons = poly_data.GetPolys()
+        if vtk_points is None or polygons is None:
+            return np.empty((0, 3), dtype=float), np.empty((0,), dtype=object)
+        points = vtk_to_numpy(vtk_points.GetData())
+        raw = vtk_to_numpy(polygons.GetData())
+        faces: list[np.ndarray] = []
+        index = 0
+        while index < len(raw):
+            count = int(raw[index])
+            index += 1
+            if count >= 3:
+                faces.append(raw[index : index + count].astype(int))
+            index += count
+        return points, np.array(faces, dtype=object)
+
+    def _draw_unit_domain_wireframe(self, axes) -> None:
+        corners = np.array(
+            [
+                [0, 0, 0],
+                [1, 0, 0],
+                [1, 1, 0],
+                [0, 1, 0],
+                [0, 0, 1],
+                [1, 0, 1],
+                [1, 1, 1],
+                [0, 1, 1],
+            ],
+            dtype=float,
+        )
+        edges = [
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 0),
+            (4, 5),
+            (5, 6),
+            (6, 7),
+            (7, 4),
+            (0, 4),
+            (1, 5),
+            (2, 6),
+            (3, 7),
+        ]
+        for start, end in edges:
+            axes.plot(
+                corners[[start, end], 0],
+                corners[[start, end], 1],
+                corners[[start, end], 2],
+                color="#8a8a8a",
+                linewidth=1.2,
+                alpha=0.85,
+            )
 
     def _refresh_geometry_panel(self) -> None:
         if not hasattr(self, "_geometry_text"):
