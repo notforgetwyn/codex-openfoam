@@ -2,11 +2,22 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from foamdesk.domain.models import SimulationProject
 from foamdesk.services.settings_service import AppSettingsService
+
+
+@dataclass(frozen=True, slots=True)
+class ComputationDomainTemplate:
+    key: str
+    name: str
+    level: str
+    size: tuple[float, float, float]
+    cells: tuple[int, int, int]
+    suggested_location_in_mesh: tuple[float, float, float]
+    description: str
 
 
 class ProjectService:
@@ -14,6 +25,73 @@ class ProjectService:
 
     def __init__(self, settings_service: AppSettingsService) -> None:
         self._settings_service = settings_service
+
+    def domain_templates(self) -> tuple[ComputationDomainTemplate, ...]:
+        return (
+            ComputationDomainTemplate(
+                key="simple_unit_box",
+                name="简单：单位立方体 1 x 1 x 1",
+                level="简单",
+                size=(1.0, 1.0, 1.0),
+                cells=(10, 10, 10),
+                suggested_location_in_mesh=(0.2, 0.2, 0.2),
+                description="用于最快验证流程，小 STL 测试最合适。",
+            ),
+            ComputationDomainTemplate(
+                key="medium_wind_tunnel",
+                name="中等：小型风洞 4 x 2 x 2",
+                level="中等",
+                size=(4.0, 2.0, 2.0),
+                cells=(40, 20, 20),
+                suggested_location_in_mesh=(0.5, 1.0, 1.0),
+                description="推荐默认模板，用于流体从左到右流过一个小物体。",
+            ),
+            ComputationDomainTemplate(
+                key="advanced_long_wind_tunnel",
+                name="高等：长风洞 10 x 4 x 4",
+                level="高等",
+                size=(10.0, 4.0, 4.0),
+                cells=(80, 32, 32),
+                suggested_location_in_mesh=(1.0, 2.0, 2.0),
+                description="用于较大外流场景，能给物体前后留出更长流动空间。",
+            ),
+        )
+
+    def load_domain_template_key(self, project: SimulationProject) -> str:
+        config_path = self._domain_config_path(project.case_dir)
+        if not config_path.exists():
+            return "simple_unit_box"
+        try:
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+            key = str(payload.get("key", "simple_unit_box"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return "simple_unit_box"
+        if any(template.key == key for template in self.domain_templates()):
+            return key
+        return "simple_unit_box"
+
+    def apply_domain_template(self, project: SimulationProject, template_key: str) -> ComputationDomainTemplate:
+        template = self._domain_template_by_key(template_key)
+        block_mesh_dict = project.case_dir / "system" / "blockMeshDict"
+        block_mesh_dict.parent.mkdir(parents=True, exist_ok=True)
+        block_mesh_dict.write_text(self._block_mesh_dict_for_template(template), encoding="utf-8")
+        self._sync_field_boundaries_for_names(project.case_dir, ("inlet", "outlet", "fixedWalls"))
+        config_path = self._domain_config_path(project.case_dir)
+        config_path.write_text(
+            json.dumps(
+                {
+                    "key": template.key,
+                    "name": template.name,
+                    "size": list(template.size),
+                    "cells": list(template.cells),
+                    "suggested_location_in_mesh": list(template.suggested_location_in_mesh),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return template
 
     def list_projects(self) -> list[SimulationProject]:
         workspace = self._projects_dir()
@@ -168,8 +246,8 @@ class ProjectService:
     def _write_minimal_case_template(self, case_dir: Path, *, overwrite: bool) -> list[Path]:
         files = {
             case_dir / "system" / "blockMeshDict": self._default_block_mesh_dict(),
-            case_dir / "0" / "U": self._default_velocity_field(("movingWall", "fixedWalls")),
-            case_dir / "0" / "p": self._default_pressure_field(("movingWall", "fixedWalls")),
+            case_dir / "0" / "U": self._default_velocity_field(("inlet", "outlet", "fixedWalls")),
+            case_dir / "0" / "p": self._default_pressure_field(("inlet", "outlet", "fixedWalls")),
             case_dir / "constant" / "transportProperties": self._default_transport_properties(),
             case_dir / "constant" / "physicalProperties": self._default_physical_properties(),
             case_dir / "system" / "controlDict": self._default_control_dict(),
@@ -184,6 +262,15 @@ class ProjectService:
             path.write_text(content, encoding="utf-8")
             written_files.append(path)
         return written_files
+
+    def _domain_config_path(self, case_dir: Path) -> Path:
+        return case_dir / "system" / "domain_config.json"
+
+    def _domain_template_by_key(self, template_key: str) -> ComputationDomainTemplate:
+        for template in self.domain_templates():
+            if template.key == template_key:
+                return template
+        raise ValueError(f"未知计算域模板：{template_key}")
 
     def _sync_field_boundaries(self, case_dir: Path) -> list[Path]:
         boundary_names = self._extract_boundary_names(case_dir / "system" / "blockMeshDict")
@@ -243,32 +330,34 @@ class ProjectService:
         content = field_path.read_text(encoding="utf-8")
         return all(re.search(rf"\b{re.escape(name)}\s*\{{", content) for name in boundary_names)
 
-    def _default_block_mesh_dict(self) -> str:
-        return """FoamFile
-{
+    def _block_mesh_dict_for_template(self, template: ComputationDomainTemplate) -> str:
+        length_x, length_y, length_z = template.size
+        cell_x, cell_y, cell_z = template.cells
+        return f"""FoamFile
+{{
     version     2.0;
     format      ascii;
     class       dictionary;
     object      blockMeshDict;
-}
+}}
 
 convertToMeters 1;
 
 vertices
 (
     (0 0 0)
-    (1 0 0)
-    (1 1 0)
-    (0 1 0)
-    (0 0 1)
-    (1 0 1)
-    (1 1 1)
-    (0 1 1)
+    ({length_x:g} 0 0)
+    ({length_x:g} {length_y:g} 0)
+    (0 {length_y:g} 0)
+    (0 0 {length_z:g})
+    ({length_x:g} 0 {length_z:g})
+    ({length_x:g} {length_y:g} {length_z:g})
+    (0 {length_y:g} {length_z:g})
 );
 
 blocks
 (
-    hex (0 1 2 3 4 5 6 7) (10 10 10) simpleGrading (1 1 1)
+    hex (0 1 2 3 4 5 6 7) ({cell_x} {cell_y} {cell_z}) simpleGrading (1 1 1)
 );
 
 edges
@@ -277,29 +366,36 @@ edges
 
 boundary
 (
-    movingWall
-    {
-        type wall;
-        faces ((3 7 6 2));
-    }
+    inlet
+    {{
+        type patch;
+        faces ((0 4 7 3));
+    }}
+    outlet
+    {{
+        type patch;
+        faces ((1 2 6 5));
+    }}
     fixedWalls
-    {
+    {{
         type wall;
         faces
         (
-            (0 4 7 3)
-            (1 2 6 5)
             (0 1 5 4)
             (0 3 2 1)
             (4 5 6 7)
+            (3 7 6 2)
         );
-    }
+    }}
 );
 
 mergePatchPairs
 (
 );
 """
+
+    def _default_block_mesh_dict(self) -> str:
+        return self._block_mesh_dict_for_template(self.domain_templates()[0])
 
     def _default_velocity_field(self, boundary_names: tuple[str, ...]) -> str:
         boundary_field = "\n".join(self._velocity_boundary_entry(name) for name in boundary_names)

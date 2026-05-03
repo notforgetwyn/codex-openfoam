@@ -1369,6 +1369,24 @@ class MainWindow(QMainWindow):
         action_row.addWidget(limitation_button)
         action_row.addStretch(1)
 
+        domain_form = QFormLayout()
+        self._domain_template_combo = QComboBox()
+        for template in self._context.project_service.domain_templates():
+            self._domain_template_combo.addItem(template.name, template.key)
+        self._domain_template_hint = QLabel("计算域 = 流体存在的空间盒子；STL 是放在盒子里的固体障碍物。")
+        self._domain_template_hint.setWordWrap(True)
+        self._domain_template_combo.currentIndexChanged.connect(self._refresh_domain_template_hint)
+        apply_domain_button = QPushButton("应用计算域模板")
+        apply_domain_button.clicked.connect(lambda _checked=False: self._apply_domain_template())
+        domain_row = QHBoxLayout()
+        domain_row.addWidget(self._domain_template_combo)
+        domain_row.addWidget(apply_domain_button)
+        domain_row.addStretch(1)
+        domain_widget = QWidget()
+        domain_widget.setLayout(domain_row)
+        domain_form.addRow("计算域模板", domain_widget)
+        domain_form.addRow("模板说明", self._domain_template_hint)
+
         snappy_form = QFormLayout()
         self._snappy_min_refinement_input = QSpinBox()
         self._snappy_min_refinement_input.setRange(0, 6)
@@ -1419,6 +1437,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
         layout.addWidget(description)
         layout.addLayout(action_row)
+        layout.addLayout(domain_form)
         layout.addLayout(snappy_form)
         layout.addWidget(self._geometry_text, 1)
         return wrapper
@@ -1994,8 +2013,74 @@ class MainWindow(QMainWindow):
         if self._current_project is None:
             self._geometry_text.setPlainText("请先新建或打开项目，然后导入 STL 几何。")
             return
+        self._load_domain_template_into_form()
         self._load_snappy_settings_into_form()
         self._geometry_text.setPlainText(self._context.geometry_import_service.format_assets(self._current_project))
+
+    def _load_domain_template_into_form(self) -> None:
+        if self._current_project is None or not hasattr(self, "_domain_template_combo"):
+            return
+        key = self._context.project_service.load_domain_template_key(self._current_project)
+        index = self._domain_template_combo.findData(key)
+        if index >= 0:
+            self._domain_template_combo.blockSignals(True)
+            self._domain_template_combo.setCurrentIndex(index)
+            self._domain_template_combo.blockSignals(False)
+        self._refresh_domain_template_hint()
+
+    def _refresh_domain_template_hint(self) -> None:
+        if not hasattr(self, "_domain_template_combo") or not hasattr(self, "_domain_template_hint"):
+            return
+        key = self._domain_template_combo.currentData()
+        template = next(
+            (
+                item
+                for item in self._context.project_service.domain_templates()
+                if item.key == key
+            ),
+            None,
+        )
+        if template is None:
+            self._domain_template_hint.setText("请选择计算域模板。")
+            return
+        self._domain_template_hint.setText(
+            f"{template.description}\n"
+            f"尺寸：{template.size[0]:g} x {template.size[1]:g} x {template.size[2]:g}；"
+            f"网格数：{template.cells[0]} x {template.cells[1]} x {template.cells[2]}；"
+            "边界：左侧 inlet，右侧 outlet，其余 fixedWalls。\n"
+            "建议 STL："
+            + self._domain_template_stl_hint(template.key)
+        )
+
+    def _domain_template_stl_hint(self, key: str) -> str:
+        if key == "simple_unit_box":
+            return "small_obstacle_cube.stl 或 simple_center_cube.stl。"
+        if key == "medium_wind_tunnel":
+            return "medium_cylinder_obstacle.stl 或 medium_ramp_wedge.stl。"
+        if key == "advanced_long_wind_tunnel":
+            return "advanced_simplified_vehicle.stl。"
+        return "请从 assets/test_geometries 选择匹配的 STL。"
+
+    def _apply_domain_template(self) -> None:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return
+        key = str(self._domain_template_combo.currentData())
+        try:
+            template = self._context.project_service.apply_domain_template(self._current_project, key)
+        except (OSError, ValueError) as error:
+            self._show_error(f"应用计算域模板失败：{error}")
+            return
+        self._append_log(
+            "计算域模板已应用："
+            f"{template.name}，尺寸={template.size}，网格={template.cells}，"
+            f"建议 locationInMesh={template.suggested_location_in_mesh}"
+        )
+        self._refresh_geometry_panel()
+        self._snappy_location_x_input.setValue(template.suggested_location_in_mesh[0])
+        self._snappy_location_y_input.setValue(template.suggested_location_in_mesh[1])
+        self._snappy_location_z_input.setValue(template.suggested_location_in_mesh[2])
+        self._set_status("计算域模板已应用。")
 
     def _load_snappy_settings_into_form(self) -> None:
         if self._current_project is None or not hasattr(self, "_snappy_min_refinement_input"):
