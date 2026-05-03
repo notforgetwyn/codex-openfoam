@@ -17,6 +17,7 @@ class GeometryAsset:
     stored_path: Path
     size_bytes: int
     imported_at: str
+    transform: StlTransform | None = None
 
 
 @dataclass(slots=True)
@@ -98,6 +99,7 @@ class GeometryImportService:
                         stored_path=stored_path,
                         size_bytes=int(item["size_bytes"]),
                         imported_at=str(item["imported_at"]),
+                        transform=self._transform_from_manifest(item.get("transform")),
                     )
                 )
             except (KeyError, TypeError, ValueError):
@@ -132,9 +134,53 @@ class GeometryImportService:
                     f"   - 导入时间：{asset.imported_at}",
                     f"   - Case 内路径：{asset.stored_path}",
                     f"   - 原始路径：{asset.source_path}",
+                    f"   - 变换：scale={asset.transform.scale if asset.transform else 1.0}, "
+                    f"translate={asset.transform.translate if asset.transform else (0.0, 0.0, 0.0)}",
                 ]
             )
         return "\n".join(lines)
+
+    def update_stl_transform(
+        self,
+        project: SimulationProject,
+        asset_name: str,
+        transform: StlTransform,
+    ) -> GeometryAsset:
+        manifest_path = self._manifest_path(project)
+        if not manifest_path.exists():
+            raise ValueError("当前 Case 没有几何 manifest，无法编辑 STL。")
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assets = payload.get("assets", [])
+        for item in assets:
+            if str(item.get("name", "")) != asset_name:
+                continue
+            stored_path = project.case_dir / str(item["stored_path"])
+            source_path = Path(str(item.get("source_path", "")))
+            base_path = source_path if source_path.exists() else stored_path
+            if not base_path.exists():
+                raise ValueError(f"STL 源文件和 Case 文件都不存在：{asset_name}")
+            if transform.is_identity and base_path != stored_path:
+                shutil.copy2(base_path, stored_path)
+            elif transform.is_identity:
+                pass
+            else:
+                self._write_transformed_ascii_stl(base_path, stored_path, transform)
+            item["size_bytes"] = stored_path.stat().st_size
+            item["transform"] = {
+                "translate": list(transform.translate),
+                "scale": transform.scale,
+            }
+            manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            return GeometryAsset(
+                name=str(item["name"]),
+                format=str(item["format"]),
+                source_path=str(item["source_path"]),
+                stored_path=stored_path,
+                size_bytes=int(item["size_bytes"]),
+                imported_at=str(item["imported_at"]),
+                transform=transform,
+            )
+        raise ValueError(f"未找到 STL：{asset_name}")
 
     def generate_snappy_hex_mesh_dict(
         self,
@@ -215,6 +261,20 @@ class GeometryImportService:
         )
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _transform_from_manifest(self, payload) -> StlTransform:
+        if not isinstance(payload, dict):
+            return StlTransform()
+        translate = payload.get("translate", [0.0, 0.0, 0.0])
+        if not isinstance(translate, list | tuple) or len(translate) != 3:
+            translate = [0.0, 0.0, 0.0]
+        try:
+            return StlTransform(
+                translate=(float(translate[0]), float(translate[1]), float(translate[2])),
+                scale=float(payload.get("scale", 1.0)),
+            )
+        except (TypeError, ValueError):
+            return StlTransform()
 
     def _manifest_path(self, project: SimulationProject) -> Path:
         return project.case_dir / "constant" / "triSurface" / "geometry_manifest.json"

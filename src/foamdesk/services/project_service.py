@@ -66,12 +66,40 @@ class ProjectService:
             key = str(payload.get("key", "simple_unit_box"))
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             return "simple_unit_box"
+        if key == "custom_domain":
+            return key
         if any(template.key == key for template in self.domain_templates()):
             return key
         return "simple_unit_box"
 
     def apply_domain_template(self, project: SimulationProject, template_key: str) -> ComputationDomainTemplate:
         template = self._domain_template_by_key(template_key)
+        self._write_domain(project, template)
+        return template
+
+    def apply_custom_domain(
+        self,
+        project: SimulationProject,
+        size: tuple[float, float, float],
+        cells: tuple[int, int, int],
+    ) -> ComputationDomainTemplate:
+        if any(value <= 0 for value in size):
+            raise ValueError("计算域长宽高必须大于 0。")
+        if any(value <= 0 for value in cells):
+            raise ValueError("网格数必须大于 0。")
+        template = ComputationDomainTemplate(
+            key="custom_domain",
+            name=f"自定义：{size[0]:g} x {size[1]:g} x {size[2]:g}",
+            level="自定义",
+            size=size,
+            cells=cells,
+            suggested_location_in_mesh=(size[0] * 0.1, size[1] * 0.5, size[2] * 0.5),
+            description="用户手动输入的计算域。",
+        )
+        self._write_domain(project, template)
+        return template
+
+    def _write_domain(self, project: SimulationProject, template: ComputationDomainTemplate) -> None:
         block_mesh_dict = project.case_dir / "system" / "blockMeshDict"
         block_mesh_dict.parent.mkdir(parents=True, exist_ok=True)
         block_mesh_dict.write_text(self._block_mesh_dict_for_template(template), encoding="utf-8")
@@ -91,7 +119,6 @@ class ProjectService:
             ),
             encoding="utf-8",
         )
-        return template
 
     def list_projects(self) -> list[SimulationProject]:
         workspace = self._projects_dir()

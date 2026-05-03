@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import json
 import shlex
 import re
 from pathlib import Path
@@ -61,6 +62,7 @@ from vtkmodules.util.numpy_support import vtk_to_numpy
 from foamdesk.app.bootstrap import ApplicationContext
 from foamdesk.domain.models import SimulationParameters, SimulationProject
 from foamdesk.services.geometry_import_service import GeometryAsset, SnappyHexMeshSettings, StlTransform
+from foamdesk.services.project_service import ComputationDomainTemplate
 from foamdesk.ui.startup_window import StartupWindow
 from foamdesk.ui.theme import THEMES, build_stylesheet
 
@@ -1348,6 +1350,7 @@ class MainWindow(QMainWindow):
         preprocess_button = QPushButton("一键前处理")
         simulation_pipeline_button = QPushButton("一键仿真流水线")
         preview_button = QPushButton("预览已导入 STL")
+        edit_stl_button = QPushButton("编辑 STL 位置")
         limitation_button = QPushButton("STEP/IGES 支持说明")
         import_button.clicked.connect(lambda _checked=False: self._import_stl_geometry())
         refresh_button.clicked.connect(lambda _checked=False: self._refresh_geometry_panel())
@@ -1357,6 +1360,7 @@ class MainWindow(QMainWindow):
         preprocess_button.clicked.connect(lambda _checked=False: self._run_preprocess_pipeline())
         simulation_pipeline_button.clicked.connect(lambda _checked=False: self._run_simulation_pipeline())
         preview_button.clicked.connect(lambda _checked=False: self._preview_imported_stl())
+        edit_stl_button.clicked.connect(lambda _checked=False: self._edit_imported_stl_transform())
         limitation_button.clicked.connect(lambda _checked=False: self._show_cad_import_limitations())
         action_row.addWidget(import_button)
         action_row.addWidget(refresh_button)
@@ -1366,6 +1370,7 @@ class MainWindow(QMainWindow):
         action_row.addWidget(preprocess_button)
         action_row.addWidget(simulation_pipeline_button)
         action_row.addWidget(preview_button)
+        action_row.addWidget(edit_stl_button)
         action_row.addWidget(limitation_button)
         action_row.addStretch(1)
 
@@ -1389,6 +1394,46 @@ class MainWindow(QMainWindow):
         domain_widget.setLayout(domain_row)
         domain_form.addRow("计算域模板", domain_widget)
         domain_form.addRow("模板说明", self._domain_template_hint)
+        custom_domain_row = QHBoxLayout()
+        self._domain_length_x_input = QDoubleSpinBox()
+        self._domain_length_y_input = QDoubleSpinBox()
+        self._domain_length_z_input = QDoubleSpinBox()
+        for input_widget in (
+            self._domain_length_x_input,
+            self._domain_length_y_input,
+            self._domain_length_z_input,
+        ):
+            input_widget.setRange(0.01, 100000.0)
+            input_widget.setDecimals(3)
+            input_widget.setSingleStep(0.5)
+            input_widget.setValue(1.0)
+        self._domain_cells_x_input = QSpinBox()
+        self._domain_cells_y_input = QSpinBox()
+        self._domain_cells_z_input = QSpinBox()
+        for input_widget in (
+            self._domain_cells_x_input,
+            self._domain_cells_y_input,
+            self._domain_cells_z_input,
+        ):
+            input_widget.setRange(1, 100000)
+            input_widget.setValue(10)
+        apply_custom_domain_button = QPushButton("应用自定义计算域")
+        apply_custom_domain_button.clicked.connect(lambda _checked=False: self._apply_custom_domain())
+        for label, input_widget in (
+            ("Lx", self._domain_length_x_input),
+            ("Ly", self._domain_length_y_input),
+            ("Lz", self._domain_length_z_input),
+            ("Nx", self._domain_cells_x_input),
+            ("Ny", self._domain_cells_y_input),
+            ("Nz", self._domain_cells_z_input),
+        ):
+            custom_domain_row.addWidget(QLabel(label))
+            custom_domain_row.addWidget(input_widget)
+        custom_domain_row.addWidget(apply_custom_domain_button)
+        custom_domain_row.addStretch(1)
+        custom_domain_widget = QWidget()
+        custom_domain_widget.setLayout(custom_domain_row)
+        domain_form.addRow("自定义尺寸/网格", custom_domain_widget)
         self._domain_preview_figure = Figure(figsize=(6.8, 2.8), facecolor="#1e1e1e", tight_layout=True)
         self._domain_preview_canvas = FigureCanvas(self._domain_preview_figure)
         self._domain_preview_canvas.setMinimumHeight(260)
@@ -1845,7 +1890,12 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.setCurrentIndex(6)
         self._set_status("STL 几何导入完成。")
 
-    def _read_stl_transform_dialog(self, source_path: Path) -> StlTransform | None:
+    def _read_stl_transform_dialog(
+        self,
+        source_path: Path,
+        initial_transform: StlTransform | None = None,
+    ) -> StlTransform | None:
+        resolved_transform = initial_transform or StlTransform()
         dialog = QDialog(self)
         dialog.setWindowTitle("导入 STL：位置和缩放")
         dialog.resize(760, 620)
@@ -1854,7 +1904,7 @@ class MainWindow(QMainWindow):
         scale_input = QDoubleSpinBox()
         scale_input.setRange(0.0001, 10000.0)
         scale_input.setDecimals(4)
-        scale_input.setValue(1.0)
+        scale_input.setValue(resolved_transform.scale)
         scale_input.setSingleStep(0.1)
         x_input = QDoubleSpinBox()
         y_input = QDoubleSpinBox()
@@ -1863,7 +1913,9 @@ class MainWindow(QMainWindow):
             input_widget.setRange(-100000.0, 100000.0)
             input_widget.setDecimals(4)
             input_widget.setSingleStep(0.1)
-            input_widget.setValue(0.0)
+        x_input.setValue(resolved_transform.translate[0])
+        y_input.setValue(resolved_transform.translate[1])
+        z_input.setValue(resolved_transform.translate[2])
         hint = QLabel("这些参数会直接修改导入后的 STL 顶点坐标。默认 scale=1、平移=0 表示保持原始位置。")
         hint.setWordWrap(True)
         preview_hint = QLabel("预览说明：灰色外框是 1x1x1 计算区域参考，蓝色几何是当前缩放和平移后的 STL 位置。")
@@ -2039,7 +2091,28 @@ class MainWindow(QMainWindow):
             self._domain_template_combo.blockSignals(True)
             self._domain_template_combo.setCurrentIndex(index)
             self._domain_template_combo.blockSignals(False)
+        self._load_custom_domain_inputs()
         self._refresh_domain_template_hint()
+
+    def _load_custom_domain_inputs(self) -> None:
+        if self._current_project is None or not hasattr(self, "_domain_length_x_input"):
+            return
+        config_path = self._current_project.case_dir / "system" / "domain_config.json"
+        if not config_path.exists():
+            return
+        try:
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+            size = payload.get("size", [1.0, 1.0, 1.0])
+            cells = payload.get("cells", [10, 10, 10])
+            if len(size) == 3 and len(cells) == 3:
+                self._domain_length_x_input.setValue(float(size[0]))
+                self._domain_length_y_input.setValue(float(size[1]))
+                self._domain_length_z_input.setValue(float(size[2]))
+                self._domain_cells_x_input.setValue(int(cells[0]))
+                self._domain_cells_y_input.setValue(int(cells[1]))
+                self._domain_cells_z_input.setValue(int(cells[2]))
+        except (OSError, ValueError, TypeError):
+            return
 
     def _refresh_domain_template_hint(self) -> None:
         if not hasattr(self, "_domain_template_combo") or not hasattr(self, "_domain_template_hint"):
@@ -2107,6 +2180,35 @@ class MainWindow(QMainWindow):
         self._snappy_location_z_input.setValue(template.suggested_location_in_mesh[2])
         self._set_status("计算域模板已应用。")
 
+    def _apply_custom_domain(self) -> None:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return
+        size = (
+            self._domain_length_x_input.value(),
+            self._domain_length_y_input.value(),
+            self._domain_length_z_input.value(),
+        )
+        cells = (
+            self._domain_cells_x_input.value(),
+            self._domain_cells_y_input.value(),
+            self._domain_cells_z_input.value(),
+        )
+        try:
+            template = self._context.project_service.apply_custom_domain(self._current_project, size, cells)
+        except (OSError, ValueError) as error:
+            self._show_error(f"应用自定义计算域失败：{error}")
+            return
+        self._snappy_location_x_input.setValue(template.suggested_location_in_mesh[0])
+        self._snappy_location_y_input.setValue(template.suggested_location_in_mesh[1])
+        self._snappy_location_z_input.setValue(template.suggested_location_in_mesh[2])
+        self._append_log(
+            f"自定义计算域已应用：尺寸={template.size}，网格={template.cells}，"
+            f"建议 locationInMesh={template.suggested_location_in_mesh}"
+        )
+        self._refresh_geometry_panel()
+        self._set_status("自定义计算域已应用。")
+
     def _import_template_stl(self) -> None:
         if self._current_project is None:
             self._show_error("请先新建或打开项目。")
@@ -2129,6 +2231,51 @@ class MainWindow(QMainWindow):
         self._append_log(f"已同步计算域模板：{template.name}")
         self._refresh_geometry_panel()
         self._set_status("模板 STL 已导入。")
+
+    def _edit_imported_stl_transform(self) -> None:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return
+        assets = [
+            asset
+            for asset in self._context.geometry_import_service.list_assets(self._current_project)
+            if asset.format.upper() == "STL" and asset.stored_path.exists()
+        ]
+        if not assets:
+            self._show_error("当前 Case 没有可编辑的 STL，请先导入 STL。")
+            return
+        selected_name, ok = QInputDialog.getItem(
+            self,
+            "编辑 STL 位置",
+            "选择要编辑的 STL",
+            [asset.name for asset in assets],
+            0,
+            False,
+        )
+        if not ok or not selected_name:
+            return
+        selected_asset = next(asset for asset in assets if asset.name == selected_name)
+        base_path = Path(selected_asset.source_path)
+        if not base_path.exists():
+            base_path = selected_asset.stored_path
+        transform = self._read_stl_transform_dialog(base_path, selected_asset.transform or StlTransform())
+        if transform is None:
+            return
+        try:
+            updated_asset = self._context.geometry_import_service.update_stl_transform(
+                self._current_project,
+                selected_asset.name,
+                transform,
+            )
+        except (OSError, ValueError) as error:
+            self._show_error(f"编辑 STL 位置失败：{error}")
+            return
+        self._append_log(
+            f"STL 位置已更新：{updated_asset.name}，"
+            f"scale={transform.scale:g}，translate={transform.translate}"
+        )
+        self._refresh_geometry_panel()
+        self._set_status("STL 位置已更新。")
 
     def _refresh_domain_preview(self) -> None:
         if not hasattr(self, "_domain_preview_figure") or not hasattr(self, "_domain_preview_canvas"):
@@ -2190,7 +2337,30 @@ class MainWindow(QMainWindow):
         axes.view_init(elev=24, azim=-55)
         self._domain_preview_canvas.draw()
 
-    def _current_domain_template(self):
+    def _current_domain_template(self) -> ComputationDomainTemplate:
+        if self._current_project is not None:
+            config_path = self._current_project.case_dir / "system" / "domain_config.json"
+            if config_path.exists():
+                try:
+                    payload = json.loads(config_path.read_text(encoding="utf-8"))
+                    if payload.get("key") == "custom_domain":
+                        size = payload.get("size", [1.0, 1.0, 1.0])
+                        cells = payload.get("cells", [10, 10, 10])
+                        return ComputationDomainTemplate(
+                            key="custom_domain",
+                            name="自定义计算域",
+                            level="自定义",
+                            size=(float(size[0]), float(size[1]), float(size[2])),
+                            cells=(int(cells[0]), int(cells[1]), int(cells[2])),
+                            suggested_location_in_mesh=(
+                                float(size[0]) * 0.1,
+                                float(size[1]) * 0.5,
+                                float(size[2]) * 0.5,
+                            ),
+                            description="用户自定义计算域。",
+                        )
+                except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                    pass
         key = None
         if hasattr(self, "_domain_template_combo"):
             key = self._domain_template_combo.currentData()
