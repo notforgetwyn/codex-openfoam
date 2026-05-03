@@ -2183,6 +2183,33 @@ class MainWindow(QMainWindow):
                 alpha=0.85,
             )
 
+    def _draw_domain_template_wireframe(self, axes, template: ComputationDomainTemplate) -> np.ndarray:
+        corners = np.array(self._context.project_service.domain_vertices(template), dtype=float)
+        edges = [
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 0),
+            (4, 5),
+            (5, 6),
+            (6, 7),
+            (7, 4),
+            (0, 4),
+            (1, 5),
+            (2, 6),
+            (3, 7),
+        ]
+        for start, end in edges:
+            axes.plot(
+                corners[[start, end], 0],
+                corners[[start, end], 1],
+                corners[[start, end], 2],
+                color="#8a8a8a",
+                linewidth=1.2,
+                alpha=0.85,
+            )
+        return corners
+
     def _refresh_geometry_panel(self) -> None:
         if not hasattr(self, "_geometry_text"):
             return
@@ -2273,6 +2300,10 @@ class MainWindow(QMainWindow):
             return "medium_cylinder_obstacle.stl 或 medium_ramp_wedge.stl。"
         if key == "advanced_long_wind_tunnel":
             return "advanced_simplified_vehicle.stl。"
+        if key == "medium_tapered_wind_tunnel":
+            return "medium_cylinder_obstacle.stl，适合放在渐扩段中部。"
+        if key == "advanced_ramp_channel":
+            return "medium_ramp_wedge.stl，适合测试斜坡/地形通道。"
         return "请从 assets/test_geometries 选择匹配的 STL。"
 
     def _template_stl_path(self, key: str) -> Path:
@@ -2283,6 +2314,10 @@ class MainWindow(QMainWindow):
             return geometry_dir / "medium_cylinder_obstacle.stl"
         if key == "advanced_long_wind_tunnel":
             return geometry_dir / "advanced_simplified_vehicle.stl"
+        if key == "medium_tapered_wind_tunnel":
+            return geometry_dir / "medium_cylinder_obstacle.stl"
+        if key == "advanced_ramp_channel":
+            return geometry_dir / "medium_ramp_wedge.stl"
         return geometry_dir / "small_obstacle_cube.stl"
 
     def _apply_domain_template(self) -> None:
@@ -2443,16 +2478,8 @@ class MainWindow(QMainWindow):
         axes.grid(True, color="#333333", linestyle="--", linewidth=0.5)
 
         template = self._current_domain_template()
-        self._draw_domain_wireframe(axes, template.size)
-        points_for_limits = [
-            np.array(
-                [
-                    [0.0, 0.0, 0.0],
-                    [template.size[0], template.size[1], template.size[2]],
-                ],
-                dtype=float,
-            )
-        ]
+        domain_points = self._draw_domain_template_wireframe(axes, template)
+        points_for_limits = [domain_points]
         if self._current_project is not None:
             for asset in self._context.geometry_import_service.list_assets(self._current_project):
                 if asset.format.upper() != "STL" or not asset.stored_path.exists():

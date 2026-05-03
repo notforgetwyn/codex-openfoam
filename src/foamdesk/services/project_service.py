@@ -18,6 +18,7 @@ class ComputationDomainTemplate:
     cells: tuple[int, int, int]
     suggested_location_in_mesh: tuple[float, float, float]
     description: str
+    shape: str = "box"
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +62,26 @@ class ProjectService:
                 cells=(80, 32, 32),
                 suggested_location_in_mesh=(1.0, 2.0, 2.0),
                 description="用于较大外流场景，能给物体前后留出更长流动空间。",
+            ),
+            ComputationDomainTemplate(
+                key="medium_tapered_wind_tunnel",
+                name="中等：渐扩风洞 6 x 2.5 x 2.5",
+                level="中等",
+                size=(6.0, 2.5, 2.5),
+                cells=(60, 24, 24),
+                suggested_location_in_mesh=(1.0, 1.25, 1.25),
+                description="入口截面小、出口截面大，用于观察流体从窄口进入后扩散的场景。",
+                shape="tapered",
+            ),
+            ComputationDomainTemplate(
+                key="advanced_ramp_channel",
+                name="高等：斜坡通道 8 x 3 x 2.5",
+                level="高等",
+                size=(8.0, 3.0, 2.5),
+                cells=(70, 28, 24),
+                suggested_location_in_mesh=(1.0, 1.5, 1.0),
+                description="底部带斜坡的通道，用于观察流体经过地形/坡面时的变化。",
+                shape="ramp",
             ),
         )
 
@@ -170,6 +191,7 @@ class ProjectService:
                     "size": list(template.size),
                     "cells": list(template.cells),
                     "suggested_location_in_mesh": list(template.suggested_location_in_mesh),
+                    "shape": template.shape,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -418,8 +440,9 @@ class ProjectService:
         return all(re.search(rf"\b{re.escape(name)}\s*\{{", content) for name in boundary_names)
 
     def _block_mesh_dict_for_template(self, template: ComputationDomainTemplate) -> str:
-        length_x, length_y, length_z = template.size
         cell_x, cell_y, cell_z = template.cells
+        vertices = self.domain_vertices(template)
+        vertex_lines = "\n".join(f"    ({x:g} {y:g} {z:g})" for x, y, z in vertices)
         return f"""FoamFile
 {{
     version     2.0;
@@ -432,14 +455,7 @@ convertToMeters 1;
 
 vertices
 (
-    (0 0 0)
-    ({length_x:g} 0 0)
-    ({length_x:g} {length_y:g} 0)
-    (0 {length_y:g} 0)
-    (0 0 {length_z:g})
-    ({length_x:g} 0 {length_z:g})
-    ({length_x:g} {length_y:g} {length_z:g})
-    (0 {length_y:g} {length_z:g})
+{vertex_lines}
 );
 
 blocks
@@ -480,6 +496,44 @@ mergePatchPairs
 (
 );
 """
+
+    def domain_vertices(self, template: ComputationDomainTemplate) -> tuple[tuple[float, float, float], ...]:
+        length_x, length_y, length_z = template.size
+        if template.shape == "tapered":
+            y_margin = length_y * 0.24
+            z_margin = length_z * 0.24
+            return (
+                (0.0, y_margin, z_margin),
+                (length_x, 0.0, 0.0),
+                (length_x, length_y, 0.0),
+                (0.0, length_y - y_margin, z_margin),
+                (0.0, y_margin, length_z - z_margin),
+                (length_x, 0.0, length_z),
+                (length_x, length_y, length_z),
+                (0.0, length_y - y_margin, length_z - z_margin),
+            )
+        if template.shape == "ramp":
+            ramp_height = length_z * 0.24
+            return (
+                (0.0, 0.0, 0.0),
+                (length_x, 0.0, ramp_height),
+                (length_x, length_y, ramp_height),
+                (0.0, length_y, 0.0),
+                (0.0, 0.0, length_z),
+                (length_x, 0.0, length_z),
+                (length_x, length_y, length_z),
+                (0.0, length_y, length_z),
+            )
+        return (
+            (0.0, 0.0, 0.0),
+            (length_x, 0.0, 0.0),
+            (length_x, length_y, 0.0),
+            (0.0, length_y, 0.0),
+            (0.0, 0.0, length_z),
+            (length_x, 0.0, length_z),
+            (length_x, length_y, length_z),
+            (0.0, length_y, length_z),
+        )
 
     def _default_block_mesh_dict(self) -> str:
         return self._block_mesh_dict_for_template(self.domain_templates()[0])
