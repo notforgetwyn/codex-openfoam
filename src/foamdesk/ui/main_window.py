@@ -1377,15 +1377,21 @@ class MainWindow(QMainWindow):
         self._domain_template_hint.setWordWrap(True)
         self._domain_template_combo.currentIndexChanged.connect(self._refresh_domain_template_hint)
         apply_domain_button = QPushButton("应用计算域模板")
+        import_template_stl_button = QPushButton("一键导入模板 STL")
         apply_domain_button.clicked.connect(lambda _checked=False: self._apply_domain_template())
+        import_template_stl_button.clicked.connect(lambda _checked=False: self._import_template_stl())
         domain_row = QHBoxLayout()
         domain_row.addWidget(self._domain_template_combo)
         domain_row.addWidget(apply_domain_button)
+        domain_row.addWidget(import_template_stl_button)
         domain_row.addStretch(1)
         domain_widget = QWidget()
         domain_widget.setLayout(domain_row)
         domain_form.addRow("计算域模板", domain_widget)
         domain_form.addRow("模板说明", self._domain_template_hint)
+        self._domain_preview_figure = Figure(figsize=(6.8, 2.8), facecolor="#1e1e1e", tight_layout=True)
+        self._domain_preview_canvas = FigureCanvas(self._domain_preview_figure)
+        self._domain_preview_canvas.setMinimumHeight(260)
 
         snappy_form = QFormLayout()
         self._snappy_min_refinement_input = QSpinBox()
@@ -1438,6 +1444,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(description)
         layout.addLayout(action_row)
         layout.addLayout(domain_form)
+        layout.addWidget(self._domain_preview_canvas)
         layout.addLayout(snappy_form)
         layout.addWidget(self._geometry_text, 1)
         return wrapper
@@ -1970,16 +1977,20 @@ class MainWindow(QMainWindow):
         return points, np.array(faces, dtype=object)
 
     def _draw_unit_domain_wireframe(self, axes) -> None:
+        self._draw_domain_wireframe(axes, (1.0, 1.0, 1.0))
+
+    def _draw_domain_wireframe(self, axes, size: tuple[float, float, float]) -> None:
+        length_x, length_y, length_z = size
         corners = np.array(
             [
                 [0, 0, 0],
-                [1, 0, 0],
-                [1, 1, 0],
-                [0, 1, 0],
-                [0, 0, 1],
-                [1, 0, 1],
-                [1, 1, 1],
-                [0, 1, 1],
+                [length_x, 0, 0],
+                [length_x, length_y, 0],
+                [0, length_y, 0],
+                [0, 0, length_z],
+                [length_x, 0, length_z],
+                [length_x, length_y, length_z],
+                [0, length_y, length_z],
             ],
             dtype=float,
         )
@@ -2012,10 +2023,12 @@ class MainWindow(QMainWindow):
             return
         if self._current_project is None:
             self._geometry_text.setPlainText("请先新建或打开项目，然后导入 STL 几何。")
+            self._refresh_domain_preview()
             return
         self._load_domain_template_into_form()
         self._load_snappy_settings_into_form()
         self._geometry_text.setPlainText(self._context.geometry_import_service.format_assets(self._current_project))
+        self._refresh_domain_preview()
 
     def _load_domain_template_into_form(self) -> None:
         if self._current_project is None or not hasattr(self, "_domain_template_combo"):
@@ -2042,6 +2055,7 @@ class MainWindow(QMainWindow):
         )
         if template is None:
             self._domain_template_hint.setText("请选择计算域模板。")
+            self._refresh_domain_preview()
             return
         self._domain_template_hint.setText(
             f"{template.description}\n"
@@ -2051,6 +2065,7 @@ class MainWindow(QMainWindow):
             "建议 STL："
             + self._domain_template_stl_hint(template.key)
         )
+        self._refresh_domain_preview()
 
     def _domain_template_stl_hint(self, key: str) -> str:
         if key == "simple_unit_box":
@@ -2060,6 +2075,16 @@ class MainWindow(QMainWindow):
         if key == "advanced_long_wind_tunnel":
             return "advanced_simplified_vehicle.stl。"
         return "请从 assets/test_geometries 选择匹配的 STL。"
+
+    def _template_stl_path(self, key: str) -> Path:
+        geometry_dir = self._context.project_root / "assets" / "test_geometries"
+        if key == "simple_unit_box":
+            return geometry_dir / "simple_center_cube.stl"
+        if key == "medium_wind_tunnel":
+            return geometry_dir / "medium_cylinder_obstacle.stl"
+        if key == "advanced_long_wind_tunnel":
+            return geometry_dir / "advanced_simplified_vehicle.stl"
+        return geometry_dir / "small_obstacle_cube.stl"
 
     def _apply_domain_template(self) -> None:
         if self._current_project is None:
@@ -2081,6 +2106,98 @@ class MainWindow(QMainWindow):
         self._snappy_location_y_input.setValue(template.suggested_location_in_mesh[1])
         self._snappy_location_z_input.setValue(template.suggested_location_in_mesh[2])
         self._set_status("计算域模板已应用。")
+
+    def _import_template_stl(self) -> None:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return
+        key = str(self._domain_template_combo.currentData())
+        stl_path = self._template_stl_path(key)
+        if not stl_path.exists():
+            self._show_error(f"模板 STL 不存在：{stl_path}")
+            return
+        try:
+            template = self._context.project_service.apply_domain_template(self._current_project, key)
+            asset = self._context.geometry_import_service.import_stl(self._current_project, stl_path)
+        except (OSError, ValueError) as error:
+            self._show_error(f"一键导入模板 STL 失败：{error}")
+            return
+        self._snappy_location_x_input.setValue(template.suggested_location_in_mesh[0])
+        self._snappy_location_y_input.setValue(template.suggested_location_in_mesh[1])
+        self._snappy_location_z_input.setValue(template.suggested_location_in_mesh[2])
+        self._append_log(f"模板 STL 已导入：{asset.name}")
+        self._append_log(f"已同步计算域模板：{template.name}")
+        self._refresh_geometry_panel()
+        self._set_status("模板 STL 已导入。")
+
+    def _refresh_domain_preview(self) -> None:
+        if not hasattr(self, "_domain_preview_figure") or not hasattr(self, "_domain_preview_canvas"):
+            return
+        self._domain_preview_figure.clear()
+        axes = self._domain_preview_figure.add_subplot(111, projection="3d", facecolor="#1e1e1e")
+        axes.set_title("计算域与 STL 相对位置预览", color="#d4d4d4", pad=10)
+        axes.set_xlabel("X", color="#d4d4d4")
+        axes.set_ylabel("Y", color="#d4d4d4")
+        axes.set_zlabel("Z", color="#d4d4d4")
+        axes.tick_params(colors="#d4d4d4")
+        axes.grid(True, color="#333333", linestyle="--", linewidth=0.5)
+
+        template = self._current_domain_template()
+        self._draw_domain_wireframe(axes, template.size)
+        points_for_limits = [
+            np.array(
+                [
+                    [0.0, 0.0, 0.0],
+                    [template.size[0], template.size[1], template.size[2]],
+                ],
+                dtype=float,
+            )
+        ]
+        if self._current_project is not None:
+            for asset in self._context.geometry_import_service.list_assets(self._current_project):
+                if asset.format.upper() != "STL" or not asset.stored_path.exists():
+                    continue
+                try:
+                    points, faces = self._read_stl_preview_mesh(asset.stored_path)
+                except (OSError, ValueError):
+                    continue
+                if points.size == 0 or faces.size == 0:
+                    continue
+                sampled_faces = faces
+                if len(sampled_faces) > 3000:
+                    indices = np.linspace(0, len(sampled_faces) - 1, 3000, dtype=int)
+                    sampled_faces = sampled_faces[indices]
+                polygons = [points[np.asarray(face, dtype=int)] for face in sampled_faces]
+                collection = Poly3DCollection(
+                    polygons,
+                    facecolors=(0.25, 0.74, 1.0, 0.42),
+                    edgecolors=(0.03, 0.18, 0.28, 0.35),
+                    linewidths=0.2,
+                )
+                axes.add_collection3d(collection)
+                points_for_limits.append(points)
+        else:
+            axes.text2D(0.05, 0.9, "请先选择项目。", color="#d4d4d4")
+
+        all_points = np.vstack(points_for_limits)
+        mins = all_points.min(axis=0)
+        maxs = all_points.max(axis=0)
+        center = (mins + maxs) / 2.0
+        radius = max(float((maxs - mins).max()) / 2.0, 0.55)
+        axes.set_xlim(center[0] - radius, center[0] + radius)
+        axes.set_ylim(center[1] - radius, center[1] + radius)
+        axes.set_zlim(center[2] - radius, center[2] + radius)
+        axes.view_init(elev=24, azim=-55)
+        self._domain_preview_canvas.draw()
+
+    def _current_domain_template(self):
+        key = None
+        if hasattr(self, "_domain_template_combo"):
+            key = self._domain_template_combo.currentData()
+        for template in self._context.project_service.domain_templates():
+            if template.key == key:
+                return template
+        return self._context.project_service.domain_templates()[0]
 
     def _load_snappy_settings_into_form(self) -> None:
         if self._current_project is None or not hasattr(self, "_snappy_min_refinement_input"):
