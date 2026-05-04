@@ -1865,7 +1865,8 @@ class MainWindow(QMainWindow):
         )
         if not file_path:
             return
-        transform = self._read_stl_transform_dialog(Path(file_path), template=None)
+        domain_tmpl = self._current_domain_template() if self._current_project is not None else None
+        transform = self._read_stl_transform_dialog(Path(file_path), template=domain_tmpl)
         if transform is None:
             return
         try:
@@ -1935,7 +1936,7 @@ class MainWindow(QMainWindow):
             )
 
         def refresh_preview() -> None:
-            self._draw_stl_transform_preview(preview_figure, preview_canvas, source_path, current_transform())
+            self._draw_stl_transform_preview(preview_figure, preview_canvas, source_path, current_transform(), template)
 
         scale_input.valueChanged.connect(refresh_preview)
         x_input.valueChanged.connect(refresh_preview)
@@ -1975,12 +1976,8 @@ class MainWindow(QMainWindow):
         figure.clear()
         axes = figure.add_subplot(111, projection="3d", facecolor="#1e1e1e")
         axes.set_title("STL Placement Preview", color="#d4d4d4", pad=10)
-        axes.set_xlabel("X", color="#d4d4d4")
-        axes.set_ylabel("Y", color="#d4d4d4")
-        axes.set_zlabel("Z", color="#d4d4d4")
-        axes.tick_params(colors="#d4d4d4")
-        axes.grid(True, color="#333333", linestyle="--", linewidth=0.5)
         if template is not None:
+            self._style_domain_preview_axes(axes, template)
             self._draw_domain_template_wireframe(axes, template)
         else:
             self._draw_unit_domain_wireframe(axes)
