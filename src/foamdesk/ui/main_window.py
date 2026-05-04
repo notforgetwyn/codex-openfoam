@@ -46,6 +46,8 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
     QSplitter,
     QStatusBar,
     QTabWidget,
@@ -1118,6 +1120,7 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.setDocumentMode(True)
         self._workspace_tabs.setTabsClosable(False)
         self._workspace_tabs.addTab(self._build_project_home_tab(), "项目主页")
+        self._workspace_tabs.addTab(self._build_draw_geometry_tab(), "绘制几何")
         self._workspace_tabs.addTab(self._build_geometry_tab(), "几何/CAD")
         self._workspace_tabs.addTab(self._build_parameter_tab(), "参数配置")
         self._workspace_tabs.addTab(self._build_solver_run_tab(), "求解运行")
@@ -1252,6 +1255,160 @@ class MainWindow(QMainWindow):
             action.triggered.connect(lambda _checked=False, cb=callback: cb())
         button.setMenu(menu)
         return button
+
+
+    def _build_draw_geometry_tab(self) -> QWidget:
+        wrapper = QWidget()
+        root_layout = QVBoxLayout(wrapper)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        title = QLabel("绘制几何")
+        title.setStyleSheet("font-size: 22px; font-weight: 600;")
+        desc = QLabel("可视化编辑 blockMesh 顶点和参数，实时预览计算域形状。")
+        desc.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(desc)
+
+        layout.addWidget(QLabel("顶点坐标 (8 corners)"))
+        self._vertex_table = QTableWidget(8, 3)
+        self._vertex_table.setHorizontalHeaderLabels(["X", "Y", "Z"])
+        self._vertex_table.horizontalHeader().setStretchLastSection(True)
+        defaults = [(0,0,0),(1,0,0),(1,1,0),(0,1,0),(0,0,1),(1,0,1),(1,1,1),(0,1,1)]
+        for i, (x, y, z) in enumerate(defaults):
+            for j, val in enumerate([x, y, z]):
+                item = QTableWidgetItem(str(float(val)))
+                self._vertex_table.setItem(i, j, item)
+        self._vertex_table.cellChanged.connect(self._refresh_draw_geo_preview)
+        layout.addWidget(self._vertex_table)
+
+        cell_row = QHBoxLayout()
+        cell_row.setSpacing(8)
+        self._geo_nx = QSpinBox(); self._geo_nx.setRange(1, 500); self._geo_nx.setValue(10)
+        self._geo_ny = QSpinBox(); self._geo_ny.setRange(1, 500); self._geo_ny.setValue(10)
+        self._geo_nz = QSpinBox(); self._geo_nz.setRange(1, 500); self._geo_nz.setValue(10)
+        for w in (self._geo_nx, self._geo_ny, self._geo_nz):
+            w.valueChanged.connect(self._refresh_draw_geo_preview)
+            w.setMinimumWidth(80)
+        cell_row.addWidget(QLabel("Nx")); cell_row.addWidget(self._geo_nx)
+        cell_row.addWidget(QLabel("Ny")); cell_row.addWidget(self._geo_ny)
+        cell_row.addWidget(QLabel("Nz")); cell_row.addWidget(self._geo_nz)
+        cell_row.addStretch(1)
+        layout.addLayout(cell_row)
+
+        bnd_row = QHBoxLayout()
+        bnd_row.setSpacing(8)
+        bnd_row.addWidget(QLabel("入口名"))
+        self._geo_inlet = QLineEdit("inlet")
+        bnd_row.addWidget(self._geo_inlet)
+        bnd_row.addWidget(QLabel("出口名"))
+        self._geo_outlet = QLineEdit("outlet")
+        bnd_row.addWidget(self._geo_outlet)
+        bnd_row.addWidget(QLabel("壁面名"))
+        self._geo_walls = QLineEdit("fixedWalls")
+        bnd_row.addWidget(self._geo_walls)
+        bnd_row.addStretch(1)
+        layout.addLayout(bnd_row)
+
+        self._geo_preview_fig = Figure(figsize=(6.8, 3.5), facecolor="#1e1e1e", tight_layout=True)
+        self._geo_preview_canvas = FigureCanvas(self._geo_preview_fig)
+        self._geo_preview_canvas.setMinimumHeight(380)
+        layout.addWidget(self._geo_preview_canvas)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        gen_btn = QPushButton("生成 blockMeshDict")
+        gen_btn.clicked.connect(lambda _checked=False: self._apply_draw_geometry())
+        reset_btn = QPushButton("重置为立方体")
+        reset_btn.clicked.connect(lambda _checked=False: self._reset_draw_geometry())
+        btn_row.addWidget(gen_btn)
+        btn_row.addWidget(reset_btn)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+
+        layout.addStretch(1)
+        scroll.setWidget(content)
+        root_layout.addWidget(scroll)
+        self._refresh_draw_geo_preview()
+        return wrapper
+
+    def _read_draw_geo_vertices(self):
+        verts = []
+        for i in range(8):
+            row = []
+            for j in range(3):
+                item = self._vertex_table.item(i, j)
+                try:
+                    row.append(float(item.text()) if item else 0.0)
+                except ValueError:
+                    row.append(0.0)
+            verts.append(tuple(row))
+        return verts
+
+    def _refresh_draw_geo_preview(self):
+        if not hasattr(self, "_geo_preview_fig") or not hasattr(self, "_geo_preview_canvas"):
+            return
+        self._geo_preview_fig.clear()
+        axes = self._geo_preview_fig.add_subplot(111, projection="3d", facecolor="#1e1e1e")
+        axes.set_title("Geometry Preview", color="#d4d4d4", pad=10)
+        axes.set_axis_off()
+        verts = self._read_draw_geo_vertices()
+        corners = np.array(verts, dtype=float)
+        faces = [[0,3,7,4],[1,5,6,2],[0,1,2,3],[4,5,6,7],[0,1,5,4],[3,2,6,7]]
+        fc = [(0.537,0.820,0.522,0.30),(0.957,0.529,0.443,0.30)] + [(0.310,0.757,1.000,0.10)]*4
+        ec = [(0.537,0.820,0.522,0.55),(0.957,0.529,0.443,0.55)] + [(0.310,0.757,1.000,0.35)]*4
+        for face, fcol, ecol in zip(faces, fc, ec):
+            vs = [corners[i] for i in face]
+            poly = Poly3DCollection([vs], facecolors=[fcol], edgecolors=[ecol], linewidths=1.2)
+            axes.add_collection3d(poly)
+        axes.text(corners[0,0], corners[0,1], corners[0,2], "inlet", color="#89d185")
+        axes.text(corners[1,0], corners[1,1], corners[1,2], "outlet", color="#f48771")
+        all_pts = corners
+        mins = all_pts.min(axis=0); maxs = all_pts.max(axis=0)
+        center = (mins + maxs) / 2.0
+        radius = max(float((maxs - mins).max()) / 2.0, 0.55)
+        axes.set_xlim(center[0]-radius, center[0]+radius)
+        axes.set_ylim(center[1]-radius, center[1]+radius)
+        axes.set_zlim(center[2]-radius, center[2]+radius)
+        axes.view_init(elev=24, azim=-55)
+        self._geo_preview_canvas.draw()
+
+    def _apply_draw_geometry(self):
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return
+        verts = self._read_draw_geo_vertices()
+        nx = self._geo_nx.value(); ny = self._geo_ny.value(); nz = self._geo_nz.value()
+        size = (
+            max(abs(verts[1][0]-verts[0][0]), abs(verts[3][0]-verts[0][0]), 1.0),
+            max(abs(verts[3][1]-verts[0][1]), abs(verts[2][1]-verts[1][1]), 1.0),
+            max(abs(verts[4][2]-verts[0][2]), abs(verts[7][2]-verts[3][2]), 1.0),
+        )
+        tpl = ComputationDomainTemplate(key="custom_domain", name="手工绘制", level="自定义",
+            size=size, cells=(nx, ny, nz),
+            suggested_location_in_mesh=(size[0]*0.1, size[1]*0.5, size[2]*0.5),
+            description="在绘制几何页手工编辑。", shape="box")
+        self._context.project_service._write_domain(self._current_project, tpl)
+        self._append_log("blockMeshDict 已生成：尺寸={}，网格=({},{},{})".format(size, nx, ny, nz))
+        self._set_status("blockMeshDict 已生成。")
+
+    def _reset_draw_geometry(self):
+        defaults = [(0,0,0),(1,0,0),(1,1,0),(0,1,0),(0,0,1),(1,0,1),(1,1,1),(0,1,1)]
+        self._vertex_table.blockSignals(True)
+        for i, (x, y, z) in enumerate(defaults):
+            for j, val in enumerate([x, y, z]):
+                self._vertex_table.item(i, j).setText(str(float(val)))
+        self._vertex_table.blockSignals(False)
+        self._geo_nx.setValue(10); self._geo_ny.setValue(10); self._geo_nz.setValue(10)
+        self._geo_inlet.setText("inlet"); self._geo_outlet.setText("outlet"); self._geo_walls.setText("fixedWalls")
+        self._refresh_draw_geo_preview()
 
 
     def _build_geometry_tab(self) -> QWidget:
@@ -1839,16 +1996,16 @@ class MainWindow(QMainWindow):
         return wrapper
 
     def _open_settings_tab(self) -> None:
-        self._workspace_tabs.setCurrentIndex(5)
+        self._workspace_tabs.setCurrentIndex(6)
         self._set_status("已打开设置页。")
 
     def _open_environment_tab(self) -> None:
-        self._workspace_tabs.setCurrentIndex(4)
+        self._workspace_tabs.setCurrentIndex(5)
         self._refresh_environment_panels()
         self._set_status("已打开环境检查页。")
 
     def _open_geometry_tab(self) -> None:
-        self._workspace_tabs.setCurrentIndex(1)
+        self._workspace_tabs.setCurrentIndex(2)
         self._refresh_geometry_panel()
         self._set_status("已打开几何/CAD 页。")
 
@@ -1879,7 +2036,7 @@ class MainWindow(QMainWindow):
             return
         self._append_log(f"STL 几何已导入：{asset.stored_path}")
         self._refresh_geometry_panel()
-        self._workspace_tabs.setCurrentIndex(1)
+        self._workspace_tabs.setCurrentIndex(2)
         self._set_status("STL 几何导入完成。")
 
     def _read_stl_transform_dialog(
@@ -2907,7 +3064,7 @@ class MainWindow(QMainWindow):
             f"addLayers={self._snappy_add_layers_checkbox.isChecked()}"
         )
         self._refresh_geometry_panel()
-        self._workspace_tabs.setCurrentIndex(1)
+        self._workspace_tabs.setCurrentIndex(2)
         self._set_status("snappyHexMeshDict 生成完成。")
 
     def _select_stl_asset_for_snappy(self) -> str | None:
@@ -2962,7 +3119,7 @@ class MainWindow(QMainWindow):
             self._show_error("当前 Case 缺少 system/blockMeshDict，snappyHexMesh 需要先有背景网格。")
             return
 
-        self._workspace_tabs.setCurrentIndex(1)
+        self._workspace_tabs.setCurrentIndex(2)
         self._bottom_tabs.setCurrentIndex(0)
         self._task_text.setPlainText("任务状态：snappyHexMesh 运行中")
         self._current_process_output = ""
@@ -3004,7 +3161,7 @@ class MainWindow(QMainWindow):
             self._show_error("当前 Case 还没有网格，请先运行 blockMesh 或 snappyHexMesh。")
             return
 
-        self._workspace_tabs.setCurrentIndex(1)
+        self._workspace_tabs.setCurrentIndex(2)
         self._bottom_tabs.setCurrentIndex(0)
         self._task_text.setPlainText("任务状态：checkMesh 运行中")
         self._current_process_output = ""
@@ -3060,7 +3217,7 @@ class MainWindow(QMainWindow):
             self._show_error(f"一键前处理无法生成 snappyHexMeshDict：{error}")
             return
 
-        self._workspace_tabs.setCurrentIndex(1)
+        self._workspace_tabs.setCurrentIndex(2)
         self._bottom_tabs.setCurrentIndex(0)
         self._task_text.setPlainText("任务状态：一键前处理运行中")
         self._current_process_output = ""
@@ -3126,7 +3283,7 @@ class MainWindow(QMainWindow):
             self._show_error(f"一键仿真准备失败：{error}")
             return
 
-        self._workspace_tabs.setCurrentIndex(3)
+        self._workspace_tabs.setCurrentIndex(4)
         self._bottom_tabs.setCurrentIndex(0)
         self._task_text.setPlainText("任务状态：一键仿真流水线运行中")
         self._current_process_output = ""
@@ -4078,7 +4235,7 @@ class MainWindow(QMainWindow):
             return None
 
     def _show_visualization_feedback(self, title: str, detail: str) -> None:
-        self._workspace_tabs.setCurrentIndex(6)
+        self._workspace_tabs.setCurrentIndex(7)
         if hasattr(self, "_results_text"):
             self._results_text.setPlainText(f"{title}\n\n{detail}")
 
@@ -4184,11 +4341,11 @@ class MainWindow(QMainWindow):
         elif index == 1:
             self._search_projects()
         elif index == 2:
-            self._workspace_tabs.setCurrentIndex(3)
+            self._workspace_tabs.setCurrentIndex(4)
             self._bottom_tabs.setCurrentIndex(1)
             self._set_status("已切换到任务视图。")
         elif index == 3:
-            self._workspace_tabs.setCurrentIndex(6)
+            self._workspace_tabs.setCurrentIndex(7)
             self._refresh_results_panel()
             self._set_status("已切换到结果视图。")
 
@@ -4416,7 +4573,7 @@ class MainWindow(QMainWindow):
             self._show_error("当前 case 缺少 system/blockMeshDict。")
             return
 
-        self._workspace_tabs.setCurrentIndex(3)
+        self._workspace_tabs.setCurrentIndex(4)
         self._bottom_tabs.setCurrentIndex(0)
         self._task_text.setPlainText("任务状态：最小仿真运行中")
         self._current_process_output = ""
