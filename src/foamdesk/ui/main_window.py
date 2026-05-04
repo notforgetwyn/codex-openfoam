@@ -2724,16 +2724,11 @@ class MainWindow(QMainWindow):
             self._show_error(f"模板 STL 不存在：{stl_path}")
             return
         try:
-            template = self._context.project_service.apply_domain_template(self._current_project, key)
             asset = self._context.geometry_import_service.import_stl(self._current_project, stl_path)
         except (OSError, ValueError) as error:
             self._show_error(f"一键导入模板 STL 失败：{error}")
             return
-        self._snappy_location_x_input.setValue(template.suggested_location_in_mesh[0])
-        self._snappy_location_y_input.setValue(template.suggested_location_in_mesh[1])
-        self._snappy_location_z_input.setValue(template.suggested_location_in_mesh[2])
         self._append_log(f"模板 STL 已导入：{asset.name}")
-        self._append_log(f"已同步计算域模板：{template.name}")
         self._refresh_geometry_panel()
         self._set_status("模板 STL 已导入。")
 
@@ -2749,17 +2744,9 @@ class MainWindow(QMainWindow):
         if not assets:
             self._show_error("当前 Case 没有可编辑的 STL，请先导入 STL。")
             return
-        selected_name, ok = QInputDialog.getItem(
-            self,
-            "编辑 STL 位置",
-            "选择要编辑的 STL",
-            [asset.name for asset in assets],
-            0,
-            False,
-        )
-        if not ok or not selected_name:
+        selected_asset = self._pick_stl_asset_dialog(assets, "编辑 STL 位置")
+        if selected_asset is None:
             return
-        selected_asset = next(asset for asset in assets if asset.name == selected_name)
         base_path = Path(selected_asset.source_path)
         if not base_path.exists():
             base_path = selected_asset.stored_path
@@ -2782,6 +2769,27 @@ class MainWindow(QMainWindow):
         )
         self._refresh_geometry_panel()
         self._set_status("STL 位置已更新。")
+
+    def _pick_stl_asset_dialog(self, assets, title="选择 STL"):
+        if not assets:
+            return None
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.resize(420, 150)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("选择已导入的 STL："))
+        combo = QComboBox()
+        for asset in assets:
+            combo.addItem(asset.name, asset)
+        layout.addWidget(combo)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return combo.currentData()
+
 
     def _refresh_domain_preview(self) -> None:
         if not hasattr(self, "_domain_preview_figure") or not hasattr(self, "_domain_preview_canvas"):
@@ -3215,11 +3223,9 @@ class MainWindow(QMainWindow):
         if not stl_assets:
             self._show_error("当前 Case 没有可预览的 STL，请先导入 STL。")
             return
-        names = [asset.name for asset in stl_assets]
-        selected_name, ok = QInputDialog.getItem(self, "预览 STL", "选择 STL", names, 0, False)
-        if not ok or not selected_name:
+        selected_asset = self._pick_stl_asset_dialog(stl_assets, "预览 STL")
+        if selected_asset is None:
             return
-        selected_asset = next(asset for asset in stl_assets if asset.name == selected_name)
         self._ensure_vtk_viewer()
         try:
             point_count, face_count = self._vtk_viewer.plot_stl_file(selected_asset.stored_path)
