@@ -1257,6 +1257,7 @@ class MainWindow(QMainWindow):
         return button
 
 
+
     def _build_draw_geometry_tab(self) -> QWidget:
         wrapper = QWidget()
         root_layout = QVBoxLayout(wrapper)
@@ -1268,26 +1269,86 @@ class MainWindow(QMainWindow):
         content = QWidget()
         layout = QVBoxLayout(content)
         layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
         title = QLabel("绘制几何")
         title.setStyleSheet("font-size: 22px; font-weight: 600;")
-        desc = QLabel("可视化编辑 blockMesh 顶点和参数，实时预览计算域形状。")
+        desc = QLabel("可视化编辑 blockMesh：顶点、边、块、边界。参数变化实时预览。")
         desc.setWordWrap(True)
         layout.addWidget(title)
         layout.addWidget(desc)
 
-        layout.addWidget(QLabel("顶点坐标 (8 corners)"))
-        self._vertex_table = QTableWidget(8, 3)
+        v_header = QHBoxLayout()
+        v_header.addWidget(QLabel("顶点列表"))
+        add_v_btn = QPushButton("+ 添加顶点")
+        del_v_btn = QPushButton("- 删除选中")
+        v_header.addStretch(1)
+        v_header.addWidget(add_v_btn)
+        v_header.addWidget(del_v_btn)
+        layout.addLayout(v_header)
+
+        self._vertex_table = QTableWidget(0, 3)
         self._vertex_table.setHorizontalHeaderLabels(["X", "Y", "Z"])
         self._vertex_table.horizontalHeader().setStretchLastSection(True)
+        self._vertex_table.setMinimumHeight(180)
         defaults = [(0,0,0),(1,0,0),(1,1,0),(0,1,0),(0,0,1),(1,0,1),(1,1,1),(0,1,1)]
-        for i, (x, y, z) in enumerate(defaults):
-            for j, val in enumerate([x, y, z]):
-                item = QTableWidgetItem(str(float(val)))
-                self._vertex_table.setItem(i, j, item)
+        for x, y, z in defaults:
+            self._add_vertex_row(x, y, z)
         self._vertex_table.cellChanged.connect(self._refresh_draw_geo_preview)
+        add_v_btn.clicked.connect(lambda: (self._add_vertex_row(0,0,0), self._refresh_draw_geo_preview()))
+        del_v_btn.clicked.connect(self._delete_selected_vertex)
         layout.addWidget(self._vertex_table)
+
+        edge_label = QLabel("边 (Edges)")
+        edge_label.setStyleSheet("font-weight: 600; margin-top: 8px;")
+        layout.addWidget(edge_label)
+        edge_form = QHBoxLayout()
+        edge_form.setSpacing(6)
+        self._edge_type_combo = QComboBox()
+        self._edge_type_combo.addItems(["arc", "spline", "polyLine", "BSpline"])
+        self._edge_start = QSpinBox(); self._edge_start.setRange(0, 99); self._edge_start.setValue(0)
+        self._edge_end = QSpinBox(); self._edge_end.setRange(0, 99); self._edge_end.setValue(1)
+        self._edge_interp = QLineEdit("0.5 0.5 0.5")
+        self._edge_interp.setPlaceholderText("x y z  (空格分隔多个点)")
+        self._edge_interp.setMinimumWidth(180)
+        add_edge_btn = QPushButton("添加边")
+        add_edge_btn.clicked.connect(self._add_edge)
+        edge_form.addWidget(QLabel("类型"))
+        edge_form.addWidget(self._edge_type_combo)
+        edge_form.addWidget(QLabel("起点"))
+        edge_form.addWidget(self._edge_start)
+        edge_form.addWidget(QLabel("终点"))
+        edge_form.addWidget(self._edge_end)
+        edge_form.addWidget(QLabel("插值/控制点"))
+        edge_form.addWidget(self._edge_interp)
+        edge_form.addWidget(add_edge_btn)
+        edge_form.addStretch(1)
+        layout.addLayout(edge_form)
+
+        self._edge_list = QTextEdit()
+        self._edge_list.setReadOnly(True)
+        self._edge_list.setMaximumHeight(80)
+        self._edge_list.setPlaceholderText("已定义的边将显示在这里。")
+        layout.addWidget(self._edge_list)
+        del_edge_btn = QPushButton("删除选中边")
+        del_edge_btn.clicked.connect(self._delete_selected_edge)
+        layout.addWidget(del_edge_btn)
+        self._edge_defs = []
+
+        block_label = QLabel("块 (Blocks)")
+        block_label.setStyleSheet("font-weight: 600; margin-top: 8px;")
+        layout.addWidget(block_label)
+        block_row = QHBoxLayout()
+        block_row.setSpacing(6)
+        self._block_vert_inputs = []
+        for i in range(8):
+            sb = QSpinBox(); sb.setRange(0, 99); sb.setValue(i)
+            sb.valueChanged.connect(self._refresh_draw_geo_preview)
+            self._block_vert_inputs.append(sb)
+            block_row.addWidget(QLabel(str(i)))
+            block_row.addWidget(sb)
+        block_row.addStretch(1)
+        layout.addLayout(block_row)
 
         cell_row = QHBoxLayout()
         cell_row.setSpacing(8)
@@ -1300,9 +1361,16 @@ class MainWindow(QMainWindow):
         cell_row.addWidget(QLabel("Nx")); cell_row.addWidget(self._geo_nx)
         cell_row.addWidget(QLabel("Ny")); cell_row.addWidget(self._geo_ny)
         cell_row.addWidget(QLabel("Nz")); cell_row.addWidget(self._geo_nz)
+        self._geo_grading = QLineEdit("1 1 1")
+        self._geo_grading.setMaximumWidth(120)
+        cell_row.addWidget(QLabel("Grading"))
+        cell_row.addWidget(self._geo_grading)
         cell_row.addStretch(1)
         layout.addLayout(cell_row)
 
+        bnd_label = QLabel("边界 (Boundary)")
+        bnd_label.setStyleSheet("font-weight: 600; margin-top: 8px;")
+        layout.addWidget(bnd_label)
         bnd_row = QHBoxLayout()
         bnd_row.setSpacing(8)
         bnd_row.addWidget(QLabel("入口名"))
@@ -1339,9 +1407,58 @@ class MainWindow(QMainWindow):
         self._refresh_draw_geo_preview()
         return wrapper
 
+    def _add_vertex_row(self, x=0.0, y=0.0, z=0.0):
+        row = self._vertex_table.rowCount()
+        self._vertex_table.insertRow(row)
+        for j, val in enumerate([x, y, z]):
+            item = QTableWidgetItem(str(float(val)))
+            self._vertex_table.setItem(row, j, item)
+
+    def _delete_selected_vertex(self):
+        rows = set(i.row() for i in self._vertex_table.selectedIndexes())
+        for r in sorted(rows, reverse=True):
+            self._vertex_table.removeRow(r)
+        self._refresh_draw_geo_preview()
+
+    def _add_edge(self):
+        etype = self._edge_type_combo.currentText()
+        start = self._edge_start.value()
+        end = self._edge_end.value()
+        interp = self._edge_interp.text().strip()
+        line = etype + " " + str(start) + " " + str(end) + " (" + interp + ")"
+        self._edge_defs.append((etype, start, end, interp))
+        current = self._edge_list.toPlainText()
+        if current:
+            self._edge_list.setPlainText(current + "\n" + line)
+        else:
+            self._edge_list.setPlainText(line)
+        self._refresh_draw_geo_preview()
+
+    def _delete_selected_edge(self):
+        cursor = self._edge_list.textCursor()
+        if cursor.hasSelection():
+            s = cursor.selectionStart()
+            e = cursor.selectionEnd()
+            text = self._edge_list.toPlainText()
+            lines = text.split("\n")
+            pos = 0
+            to_remove = []
+            for i, line in enumerate(lines):
+                le = pos + len(line)
+                if s < le and e > pos:
+                    to_remove.append(i)
+                pos = le + 1
+            for i in sorted(to_remove, reverse=True):
+                if i < len(lines):
+                    lines.pop(i)
+                if i < len(self._edge_defs):
+                    self._edge_defs.pop(i)
+            self._edge_list.setPlainText("\n".join(lines))
+            self._refresh_draw_geo_preview()
+
     def _read_draw_geo_vertices(self):
         verts = []
-        for i in range(8):
+        for i in range(self._vertex_table.rowCount()):
             row = []
             for j in range(3):
                 item = self._vertex_table.item(i, j)
@@ -1352,6 +1469,41 @@ class MainWindow(QMainWindow):
             verts.append(tuple(row))
         return verts
 
+    def _draw_edge_in_preview(self, axes, verts, etype, start, end, interp_str):
+        if start >= len(verts) or end >= len(verts):
+            return
+        p0 = np.array(verts[start])
+        p1 = np.array(verts[end])
+        try:
+            coords = [float(v) for v in interp_str.split()]
+        except ValueError:
+            coords = []
+        if etype == "arc" and len(coords) >= 3:
+            interp = np.array(coords[:3])
+            mid = (p0 + p1) / 2.0
+            offset = interp - mid
+            t = np.linspace(0, 1, 60)
+            pts = (1-t)[:,None] * p0 + t[:,None] * p1
+            bow = np.sin(t * np.pi)[:,None] * offset
+            pts += bow
+            axes.plot(pts[:,0], pts[:,1], pts[:,2], color="#4fc1ff", linewidth=1.4, alpha=0.9)
+        elif etype in ("spline", "polyLine", "BSpline") and len(coords) >= 3:
+            ctrl_pts = [p0]
+            for k in range(len(coords)//3):
+                ctrl_pts.append(np.array(coords[k*3:(k+1)*3]))
+            ctrl_pts.append(p1)
+            ctrl = np.array(ctrl_pts)
+            t = np.linspace(0, 1, 60)
+            n = len(ctrl) - 1
+            pts = np.zeros((len(t), 3))
+            import math
+            for k in range(n + 1):
+                binom = math.comb(n, k)
+                pts += binom * (t**k)[:,None] * ((1-t)**(n-k))[:,None] * ctrl[k]
+            axes.plot(pts[:,0], pts[:,1], pts[:,2], color="#4fc1ff", linewidth=1.4, alpha=0.9)
+        else:
+            axes.plot([p0[0], p1[0]], [p0[1], p1[1]], [p0[2], p1[2]], color="#4fc1ff", linewidth=1.4, alpha=0.9)
+
     def _refresh_draw_geo_preview(self):
         if not hasattr(self, "_geo_preview_fig") or not hasattr(self, "_geo_preview_canvas"):
             return
@@ -1360,16 +1512,27 @@ class MainWindow(QMainWindow):
         axes.set_title("Geometry Preview", color="#d4d4d4", pad=10)
         axes.set_axis_off()
         verts = self._read_draw_geo_vertices()
+        if not verts:
+            self._geo_preview_canvas.draw()
+            return
         corners = np.array(verts, dtype=float)
-        faces = [[0,3,7,4],[1,5,6,2],[0,1,2,3],[4,5,6,7],[0,1,5,4],[3,2,6,7]]
-        fc = [(0.537,0.820,0.522,0.30),(0.957,0.529,0.443,0.30)] + [(0.310,0.757,1.000,0.10)]*4
-        ec = [(0.537,0.820,0.522,0.55),(0.957,0.529,0.443,0.55)] + [(0.310,0.757,1.000,0.35)]*4
-        for face, fcol, ecol in zip(faces, fc, ec):
-            vs = [corners[i] for i in face]
-            poly = Poly3DCollection([vs], facecolors=[fcol], edgecolors=[ecol], linewidths=1.2)
-            axes.add_collection3d(poly)
-        axes.text(corners[0,0], corners[0,1], corners[0,2], "inlet", color="#89d185")
-        axes.text(corners[1,0], corners[1,1], corners[1,2], "outlet", color="#f48771")
+        axes.scatter(corners[:,0], corners[:,1], corners[:,2], c="#ff9944", s=30, alpha=0.9)
+        for i, v in enumerate(verts):
+            axes.text(v[0], v[1], v[2], str(i), color="#ff9944", fontsize=8)
+        for edef in self._edge_defs:
+            self._draw_edge_in_preview(axes, verts, edef[0], edef[1], edef[2], edef[3])
+        if hasattr(self, "_block_vert_inputs") and len(verts) >= 8:
+            bv = [sb.value() for sb in self._block_vert_inputs]
+            if all(v < len(verts) for v in bv):
+                faces = [[0,3,7,4],[1,5,6,2],[0,1,2,3],[4,5,6,7],[0,1,5,4],[3,2,6,7]]
+                fc = [(0.537,0.820,0.522,0.25),(0.957,0.529,0.443,0.25)] + [(0.310,0.757,1.000,0.08)]*4
+                ec = [(0.537,0.820,0.522,0.50),(0.957,0.529,0.443,0.50)] + [(0.310,0.757,1.000,0.30)]*4
+                for face, fcol, ecol in zip(faces, fc, ec):
+                    vs = [corners[bv[i]] for i in face]
+                    poly = Poly3DCollection([vs], facecolors=[fcol], edgecolors=[ecol], linewidths=1.2)
+                    axes.add_collection3d(poly)
+                axes.text(corners[bv[0],0], corners[bv[0],1], corners[bv[0],2], "inlet", color="#89d185")
+                axes.text(corners[bv[1],0], corners[bv[1],1], corners[bv[1],2], "outlet", color="#f48771")
         all_pts = corners
         mins = all_pts.min(axis=0); maxs = all_pts.max(axis=0)
         center = (mins + maxs) / 2.0
@@ -1385,31 +1548,53 @@ class MainWindow(QMainWindow):
             self._show_error("请先新建或打开项目。")
             return
         verts = self._read_draw_geo_vertices()
+        if len(verts) < 8:
+            self._show_error("至少需要 8 个顶点定义一个 block。")
+            return
         nx = self._geo_nx.value(); ny = self._geo_ny.value(); nz = self._geo_nz.value()
-        size = (
-            max(abs(verts[1][0]-verts[0][0]), abs(verts[3][0]-verts[0][0]), 1.0),
-            max(abs(verts[3][1]-verts[0][1]), abs(verts[2][1]-verts[1][1]), 1.0),
-            max(abs(verts[4][2]-verts[0][2]), abs(verts[7][2]-verts[3][2]), 1.0),
-        )
-        tpl = ComputationDomainTemplate(key="custom_domain", name="手工绘制", level="自定义",
-            size=size, cells=(nx, ny, nz),
-            suggested_location_in_mesh=(size[0]*0.1, size[1]*0.5, size[2]*0.5),
-            description="在绘制几何页手工编辑。", shape="box")
-        self._context.project_service._write_domain(self._current_project, tpl)
-        self._append_log("blockMeshDict 已生成：尺寸={}，网格=({},{},{})".format(size, nx, ny, nz))
+        grading = self._geo_grading.text().strip() or "1 1 1"
+        bv = [sb.value() for sb in self._block_vert_inputs]
+        vl = "\n".join("    ({} {} {})".format(x, y, z) for x, y, z in verts)
+        el = ""
+        for et, s, e, ip in self._edge_defs:
+            if ip:
+                el += "    {} {} {} ({})\n".format(et, s, e, ip)
+            else:
+                el += "    {} {} {}\n".format(et, s, e)
+        bl = "    hex ({}) ({} {} {}) simpleGrading ({})\n".format(
+            " ".join(str(v) for v in bv), nx, ny, nz, grading)
+        il = self._geo_inlet.text().strip() or "inlet"
+        ol = self._geo_outlet.text().strip() or "outlet"
+        wl = self._geo_walls.text().strip() or "fixedWalls"
+        bm = ("FoamFile\n{{\n    version     2.0;\n    format      ascii;\n"
+              "    class       dictionary;\n    object      blockMeshDict;\n}}\n\n"
+              "convertToMeters 1;\n\nvertices\n(\n{});\n\n"
+              "blocks\n(\n{});\n\nedges\n(\n{});\n\n"
+              "boundary\n(\n    {} {{ type patch; faces ((0 4 7 3)); }}\n"
+              "    {} {{ type patch; faces ((1 2 6 5)); }}\n"
+              "    {} {{ type wall; faces ((0 1 5 4) (0 3 2 1) (4 5 6 7) (3 7 6 2)); }}\n);\n\n"
+              "mergePatchPairs\n(\n);\n").format(vl, bl, el, il, ol, wl)
+        bp = self._current_project.case_dir / "system" / "blockMeshDict"
+        bp.parent.mkdir(parents=True, exist_ok=True)
+        bp.write_text(bm, encoding="utf-8")
+        self._append_log("blockMeshDict 已生成：{} 顶点, {} 边, {}x{}x{}".format(
+            len(verts), len(self._edge_defs), nx, ny, nz))
         self._set_status("blockMeshDict 已生成。")
 
     def _reset_draw_geometry(self):
+        while self._vertex_table.rowCount() > 0:
+            self._vertex_table.removeRow(0)
         defaults = [(0,0,0),(1,0,0),(1,1,0),(0,1,0),(0,0,1),(1,0,1),(1,1,1),(0,1,1)]
-        self._vertex_table.blockSignals(True)
-        for i, (x, y, z) in enumerate(defaults):
-            for j, val in enumerate([x, y, z]):
-                self._vertex_table.item(i, j).setText(str(float(val)))
-        self._vertex_table.blockSignals(False)
+        for x, y, z in defaults:
+            self._add_vertex_row(x, y, z)
+        self._edge_defs = []
+        self._edge_list.clear()
+        for i, sb in enumerate(self._block_vert_inputs):
+            sb.setValue(i)
         self._geo_nx.setValue(10); self._geo_ny.setValue(10); self._geo_nz.setValue(10)
+        self._geo_grading.setText("1 1 1")
         self._geo_inlet.setText("inlet"); self._geo_outlet.setText("outlet"); self._geo_walls.setText("fixedWalls")
         self._refresh_draw_geo_preview()
-
 
     def _build_geometry_tab(self) -> QWidget:
         wrapper = QWidget()
