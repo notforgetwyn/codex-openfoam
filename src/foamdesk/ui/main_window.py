@@ -1201,12 +1201,12 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.setDocumentMode(True)
         self._workspace_tabs.setTabsClosable(False)
         self._workspace_tabs.addTab(self._build_project_home_tab(), "项目主页")
+        self._workspace_tabs.addTab(self._build_geometry_tab(), "几何/CAD")
         self._workspace_tabs.addTab(self._build_parameter_tab(), "参数配置")
         self._workspace_tabs.addTab(self._build_solver_run_tab(), "求解运行")
         self._workspace_tabs.addTab(self._build_environment_tab(), "环境检查")
         self._workspace_tabs.addTab(self._build_settings_tab(), "设置")
         self._workspace_tabs.addTab(self._build_results_tab(), "结果")
-        self._workspace_tabs.addTab(self._build_geometry_tab(), "几何/CAD")
         layout.addWidget(self._workspace_tabs)
         return container
 
@@ -1939,16 +1939,16 @@ class MainWindow(QMainWindow):
         return wrapper
 
     def _open_settings_tab(self) -> None:
-        self._workspace_tabs.setCurrentIndex(4)
+        self._workspace_tabs.setCurrentIndex(5)
         self._set_status("已打开设置页。")
 
     def _open_environment_tab(self) -> None:
-        self._workspace_tabs.setCurrentIndex(3)
+        self._workspace_tabs.setCurrentIndex(4)
         self._refresh_environment_panels()
         self._set_status("已打开环境检查页。")
 
     def _open_geometry_tab(self) -> None:
-        self._workspace_tabs.setCurrentIndex(6)
+        self._workspace_tabs.setCurrentIndex(1)
         self._refresh_geometry_panel()
         self._set_status("已打开几何/CAD 页。")
 
@@ -1978,7 +1978,7 @@ class MainWindow(QMainWindow):
             return
         self._append_log(f"STL 几何已导入：{asset.stored_path}")
         self._refresh_geometry_panel()
-        self._workspace_tabs.setCurrentIndex(6)
+        self._workspace_tabs.setCurrentIndex(1)
         self._set_status("STL 几何导入完成。")
 
     def _read_stl_transform_dialog(
@@ -2961,7 +2961,7 @@ class MainWindow(QMainWindow):
             f"addLayers={self._snappy_add_layers_checkbox.isChecked()}"
         )
         self._refresh_geometry_panel()
-        self._workspace_tabs.setCurrentIndex(6)
+        self._workspace_tabs.setCurrentIndex(1)
         self._set_status("snappyHexMeshDict 生成完成。")
 
     def _select_stl_asset_for_snappy(self) -> str | None:
@@ -3016,7 +3016,7 @@ class MainWindow(QMainWindow):
             self._show_error("当前 Case 缺少 system/blockMeshDict，snappyHexMesh 需要先有背景网格。")
             return
 
-        self._workspace_tabs.setCurrentIndex(6)
+        self._workspace_tabs.setCurrentIndex(1)
         self._bottom_tabs.setCurrentIndex(0)
         self._task_text.setPlainText("任务状态：snappyHexMesh 运行中")
         self._current_process_output = ""
@@ -3058,7 +3058,7 @@ class MainWindow(QMainWindow):
             self._show_error("当前 Case 还没有网格，请先运行 blockMesh 或 snappyHexMesh。")
             return
 
-        self._workspace_tabs.setCurrentIndex(6)
+        self._workspace_tabs.setCurrentIndex(1)
         self._bottom_tabs.setCurrentIndex(0)
         self._task_text.setPlainText("任务状态：checkMesh 运行中")
         self._current_process_output = ""
@@ -3114,7 +3114,7 @@ class MainWindow(QMainWindow):
             self._show_error(f"一键前处理无法生成 snappyHexMeshDict：{error}")
             return
 
-        self._workspace_tabs.setCurrentIndex(6)
+        self._workspace_tabs.setCurrentIndex(1)
         self._bottom_tabs.setCurrentIndex(0)
         self._task_text.setPlainText("任务状态：一键前处理运行中")
         self._current_process_output = ""
@@ -3180,7 +3180,7 @@ class MainWindow(QMainWindow):
             self._show_error(f"一键仿真准备失败：{error}")
             return
 
-        self._workspace_tabs.setCurrentIndex(2)
+        self._workspace_tabs.setCurrentIndex(3)
         self._bottom_tabs.setCurrentIndex(0)
         self._task_text.setPlainText("任务状态：一键仿真流水线运行中")
         self._current_process_output = ""
@@ -4132,7 +4132,7 @@ class MainWindow(QMainWindow):
             return None
 
     def _show_visualization_feedback(self, title: str, detail: str) -> None:
-        self._workspace_tabs.setCurrentIndex(5)
+        self._workspace_tabs.setCurrentIndex(6)
         if hasattr(self, "_results_text"):
             self._results_text.setPlainText(f"{title}\n\n{detail}")
 
@@ -4241,11 +4241,11 @@ class MainWindow(QMainWindow):
         elif index == 1:
             self._search_projects()
         elif index == 2:
-            self._workspace_tabs.setCurrentIndex(2)
+            self._workspace_tabs.setCurrentIndex(3)
             self._bottom_tabs.setCurrentIndex(1)
             self._set_status("已切换到任务视图。")
         elif index == 3:
-            self._workspace_tabs.setCurrentIndex(5)
+            self._workspace_tabs.setCurrentIndex(6)
             self._refresh_results_panel()
             self._set_status("已切换到结果视图。")
 
@@ -4473,7 +4473,7 @@ class MainWindow(QMainWindow):
             self._show_error("当前 case 缺少 system/blockMeshDict。")
             return
 
-        self._workspace_tabs.setCurrentIndex(2)
+        self._workspace_tabs.setCurrentIndex(3)
         self._bottom_tabs.setCurrentIndex(0)
         self._task_text.setPlainText("任务状态：最小仿真运行中")
         self._current_process_output = ""
