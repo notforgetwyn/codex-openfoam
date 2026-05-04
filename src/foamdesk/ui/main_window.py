@@ -1964,7 +1964,7 @@ class MainWindow(QMainWindow):
         )
         if not file_path:
             return
-        transform = self._read_stl_transform_dialog(Path(file_path))
+        transform = self._read_stl_transform_dialog(Path(file_path), template=None)
         if transform is None:
             return
         try:
@@ -2019,7 +2019,7 @@ class MainWindow(QMainWindow):
         rz_input.setValue(resolved_transform.rotate_degrees[2])
         hint = QLabel("这些参数会直接修改导入后的 STL 顶点坐标。变换顺序：缩放 -> 旋转 -> 平移。")
         hint.setWordWrap(True)
-        preview_hint = QLabel("预览说明：灰色外框是 1x1x1 计算区域参考，蓝色几何是当前缩放和平移后的 STL 位置。")
+        preview_hint = QLabel("预览说明：半透明区域为当前计算域，蓝色几何是当前缩放和平移后的 STL 位置。")
         preview_hint.setWordWrap(True)
         preview_figure = Figure(figsize=(6.8, 3.8), facecolor="#1e1e1e", tight_layout=True)
         preview_canvas = FigureCanvas(preview_figure)
@@ -2077,7 +2077,10 @@ class MainWindow(QMainWindow):
         axes.set_zlabel("Z", color="#d4d4d4")
         axes.tick_params(colors="#d4d4d4")
         axes.grid(True, color="#333333", linestyle="--", linewidth=0.5)
-        self._draw_unit_domain_wireframe(axes)
+        if template is not None:
+            self._draw_domain_template_wireframe(axes, template)
+        else:
+            self._draw_unit_domain_wireframe(axes)
 
         try:
             points, faces = self._read_stl_preview_mesh(source_path)
@@ -2117,8 +2120,15 @@ class MainWindow(QMainWindow):
         )
         axes.add_collection3d(collection)
 
-        mins = np.minimum(transformed_points.min(axis=0), np.array([0.0, 0.0, 0.0]))
-        maxs = np.maximum(transformed_points.max(axis=0), np.array([1.0, 1.0, 1.0]))
+        if template is not None:
+            domain_corners = np.array(self._context.project_service.domain_vertices(template), dtype=float)
+            domain_min = domain_corners.min(axis=0)
+            domain_max = domain_corners.max(axis=0)
+        else:
+            domain_min = np.array([0.0, 0.0, 0.0])
+            domain_max = np.array([1.0, 1.0, 1.0])
+        mins = np.minimum(transformed_points.min(axis=0), domain_min)
+        maxs = np.maximum(transformed_points.max(axis=0), domain_max)
         center = (mins + maxs) / 2.0
         radius = max(float((maxs - mins).max()) / 2.0, 0.55)
         axes.set_xlim(center[0] - radius, center[0] + radius)
@@ -2224,8 +2234,8 @@ class MainWindow(QMainWindow):
             verts = [corners[i] for i in face]
             poly = Poly3DCollection([verts], facecolors=[fac], edgecolors=[edg], linewidths=1.2)
             axes.add_collection3d(poly)
-        axes.text(corners[0,0], corners[0,1], corners[0,2], "inlet", color=chr(34)+chr(35)+chr(56)+chr(57)+chr(100)+chr(49)+chr(56)+chr(53)+chr(34))
-        axes.text(corners[1,0], corners[1,1], corners[1,2], "outlet", color=chr(34)+chr(35)+chr(102)+chr(52)+chr(56)+chr(55)+chr(55)+chr(49)+chr(34))
+        axes.text(corners[0,0], corners[0,1], corners[0,2], "inlet", color="#89d185")
+        axes.text(corners[1,0], corners[1,1], corners[1,2], "outlet", color="#f48771")
         return corners
     def _draw_pipe_domain_wireframe(self, axes, template: ComputationDomainTemplate) -> np.ndarray:
         length_x, length_y, length_z = template.size
@@ -2753,7 +2763,8 @@ class MainWindow(QMainWindow):
         base_path = Path(selected_asset.source_path)
         if not base_path.exists():
             base_path = selected_asset.stored_path
-        transform = self._read_stl_transform_dialog(base_path, selected_asset.transform or StlTransform())
+        domain_template = self._current_domain_template() if self._current_project is not None else None
+        transform = self._read_stl_transform_dialog(base_path, selected_asset.transform or StlTransform(), template=domain_template)
         if transform is None:
             return
         try:
