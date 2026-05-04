@@ -2226,7 +2226,20 @@ class MainWindow(QMainWindow):
         center_y = length_y / 2.0
         center_z = length_z / 2.0
         radius = min(length_y, length_z) * 0.42
-        theta = np.linspace(0.0, 2.0 * np.pi, 80)
+        theta = np.linspace(0.0, 2.0 * np.pi, 96)
+        x_values = np.linspace(0.0, length_x, 18)
+        theta_grid, x_grid = np.meshgrid(theta, x_values)
+        y_grid = center_y + radius * np.cos(theta_grid)
+        z_grid = center_z + radius * np.sin(theta_grid)
+        axes.plot_surface(
+            x_grid,
+            y_grid,
+            z_grid,
+            color="#4fc1ff",
+            alpha=0.18,
+            linewidth=0,
+            shade=False,
+        )
         inlet = np.column_stack(
             [
                 np.zeros_like(theta),
@@ -2241,20 +2254,36 @@ class MainWindow(QMainWindow):
                 center_z + radius * np.sin(theta),
             ]
         )
-        axes.plot(inlet[:, 0], inlet[:, 1], inlet[:, 2], color="#8a8a8a", linewidth=1.2, alpha=0.85)
-        axes.plot(outlet[:, 0], outlet[:, 1], outlet[:, 2], color="#8a8a8a", linewidth=1.2, alpha=0.85)
+        axes.plot(inlet[:, 0], inlet[:, 1], inlet[:, 2], color="#89d185", linewidth=2.2, alpha=0.95)
+        axes.plot(outlet[:, 0], outlet[:, 1], outlet[:, 2], color="#f48771", linewidth=2.2, alpha=0.95)
         for angle in (0, np.pi / 2, np.pi, 3 * np.pi / 2):
             y = center_y + radius * np.cos(angle)
             z = center_z + radius * np.sin(angle)
-            axes.plot([0.0, length_x], [y, y], [z, z], color="#8a8a8a", linewidth=1.2, alpha=0.85)
+            axes.plot([0.0, length_x], [y, y], [z, z], color="#4fc1ff", linewidth=1.4, alpha=0.95)
+        axes.text(0.0, center_y, center_z, "inlet", color="#89d185")
+        axes.text(length_x, center_y, center_z, "outlet", color="#f48771")
         return np.vstack([inlet, outlet])
 
     def _draw_bend_domain_wireframe(self, axes, template: ComputationDomainTemplate) -> np.ndarray:
         length_x, length_y, height = template.size
         inner_radius = min(length_x, length_y) * 0.28
         outer_radius = min(length_x, length_y) * 0.62
-        theta = np.linspace(0.0, np.pi / 2.0, 80)
+        theta = np.linspace(0.0, np.pi / 2.0, 96)
+        z_values = np.linspace(0.0, height, 8)
+        theta_grid, z_grid = np.meshgrid(theta, z_values)
         points: list[np.ndarray] = []
+        for radius, alpha in ((inner_radius, 0.16), (outer_radius, 0.16)):
+            x_grid = radius * np.cos(theta_grid)
+            y_grid = radius * np.sin(theta_grid)
+            axes.plot_surface(
+                x_grid,
+                y_grid,
+                z_grid,
+                color="#4fc1ff",
+                alpha=alpha,
+                linewidth=0,
+                shade=False,
+            )
         for radius in (inner_radius, outer_radius):
             for z_value in (0.0, height):
                 curve = np.column_stack(
@@ -2264,7 +2293,7 @@ class MainWindow(QMainWindow):
                         np.full_like(theta, z_value),
                     ]
                 )
-                axes.plot(curve[:, 0], curve[:, 1], curve[:, 2], color="#8a8a8a", linewidth=1.2, alpha=0.85)
+                axes.plot(curve[:, 0], curve[:, 1], curve[:, 2], color="#4fc1ff", linewidth=1.4, alpha=0.95)
                 points.append(curve)
         for angle in (0.0, np.pi / 2.0):
             for z_value in (0.0, height):
@@ -2272,20 +2301,35 @@ class MainWindow(QMainWindow):
                     [inner_radius * np.cos(angle), outer_radius * np.cos(angle)],
                     [inner_radius * np.sin(angle), outer_radius * np.sin(angle)],
                     [z_value, z_value],
-                    color="#8a8a8a",
-                    linewidth=1.2,
-                    alpha=0.85,
+                    color="#89d185" if angle == 0.0 else "#f48771",
+                    linewidth=2.0,
+                    alpha=0.95,
                 )
             for radius in (inner_radius, outer_radius):
                 axes.plot(
                     [radius * np.cos(angle), radius * np.cos(angle)],
                     [radius * np.sin(angle), radius * np.sin(angle)],
                     [0.0, height],
-                    color="#8a8a8a",
-                    linewidth=1.2,
-                    alpha=0.85,
+                    color="#89d185" if angle == 0.0 else "#f48771",
+                    linewidth=2.0,
+                    alpha=0.95,
                 )
+        axes.text((inner_radius + outer_radius) / 2.0, 0.0, height / 2.0, "inlet", color="#89d185")
+        axes.text(0.0, (inner_radius + outer_radius) / 2.0, height / 2.0, "outlet", color="#f48771")
         return np.vstack(points)
+
+    def _style_domain_preview_axes(self, axes, template: ComputationDomainTemplate) -> None:
+        if template.shape in {"pipe", "bend"}:
+            # For curved domains, the Matplotlib 3D axis cube is visually misleading.
+            # Hide it so the user sees the pipe/bend as the actual computational domain.
+            axes.set_axis_off()
+            return
+        axes.set_axis_on()
+        axes.set_xlabel("X", color="#d4d4d4")
+        axes.set_ylabel("Y", color="#d4d4d4")
+        axes.set_zlabel("Z", color="#d4d4d4")
+        axes.tick_params(colors="#d4d4d4")
+        axes.grid(True, color="#333333", linestyle="--", linewidth=0.5)
 
     def _refresh_geometry_panel(self) -> None:
         if not hasattr(self, "_geometry_text"):
@@ -2735,16 +2779,14 @@ class MainWindow(QMainWindow):
     def _refresh_domain_preview(self) -> None:
         if not hasattr(self, "_domain_preview_figure") or not hasattr(self, "_domain_preview_canvas"):
             return
-        self._domain_preview_figure.clear()
-        axes = self._domain_preview_figure.add_subplot(111, projection="3d", facecolor="#1e1e1e")
+        if hasattr(self, "_domain_preview_axes"):
+            self._domain_preview_axes.remove()
+        self._domain_preview_axes = self._domain_preview_figure.add_subplot(111, projection="3d", facecolor="#1e1e1e")
+        axes = self._domain_preview_axes
         axes.set_title("Domain and STL Position Preview", color="#d4d4d4", pad=10)
-        axes.set_xlabel("X", color="#d4d4d4")
-        axes.set_ylabel("Y", color="#d4d4d4")
-        axes.set_zlabel("Z", color="#d4d4d4")
-        axes.tick_params(colors="#d4d4d4")
-        axes.grid(True, color="#333333", linestyle="--", linewidth=0.5)
 
         template = self._selected_domain_template()
+        self._style_domain_preview_axes(axes, template)
         domain_points = self._draw_domain_template_wireframe(axes, template)
         points_for_limits = [domain_points]
         if self._current_project is not None:
