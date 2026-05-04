@@ -117,78 +117,6 @@ class WindowTitleBar(QFrame):
             self._window.showMaximized()
 
 
-class TutorialOverlay(QFrame):
-    def __init__(self, parent: QWidget) -> None:
-        super().__init__(parent)
-        self.setObjectName("tutorialPanel")
-        self.hide()
-        self.setFixedWidth(560)
-        self._drag_start: QPoint | None = None
-
-        panel_layout = QVBoxLayout(self)
-        panel_layout.setContentsMargins(24, 20, 24, 20)
-        panel_layout.setSpacing(12)
-
-        header = QHBoxLayout()
-        title = QLabel("FoamDesk 新手教程")
-        title.setObjectName("tutorialTitle")
-        close_button = QPushButton("×")
-        close_button.setObjectName("tutorialIconButton")
-        close_button.setFixedSize(32, 30)
-        close_button.clicked.connect(self.hide)
-        header.addWidget(title)
-        header.addStretch(1)
-        header.addWidget(close_button)
-
-        body = QLabel(
-            "1. 点击“新建项目”，输入项目名称。\n"
-            "2. 左侧 Case 树会显示真实项目，点击项目设为当前 Case。\n"
-            "3. 打开“设置”，确认工作区、字体、字号和 OpenFOAM 环境脚本。\n"
-            "4. 打开“环境检查”，确认 OpenFOAM 环境是否可用。\n"
-            "5. 点击“运行”，当前阶段会执行 blockMesh + icoFoam 最小仿真。\n"
-            "6. 底部“日志 / 任务 / 问题”面板会显示运行信息。\n\n"
-            "当前 Sprint：Sprint 2 UI 可用性与设置系统。\n"
-            "下一阶段：Sprint 3 项目管理与 OpenFOAM 最小执行闭环。"
-        )
-        body.setObjectName("tutorialBody")
-        body.setWordWrap(True)
-
-        panel_layout.addLayout(header)
-        panel_layout.addWidget(body)
-
-    def show_overlay(self) -> None:
-        if self.parentWidget():
-            parent_rect = self.parentWidget().rect()
-            self.adjustSize()
-            margin = 18
-            self.move(parent_rect.right() - self.width() - margin, 118)
-        self.raise_()
-        self.show()
-
-    def mousePressEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_start = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event) -> None:  # noqa: N802
-        if self._drag_start is not None and event.buttons() & Qt.MouseButton.LeftButton:
-            target = event.globalPosition().toPoint() - self._drag_start
-            if self.parentWidget():
-                parent_rect = self.parentWidget().rect()
-                target.setX(max(8, min(target.x(), parent_rect.width() - self.width() - 8)))
-                target.setY(max(8, min(target.y(), parent_rect.height() - self.height() - 8)))
-            self.move(target)
-            event.accept()
-            return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        self._drag_start = None
-        super().mouseReleaseEvent(event)
-
-
 class VtkViewerDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1022,7 +950,6 @@ class MainWindow(QMainWindow):
         self._active_process_kind = "idle"
         self._current_process_output = ""
         self._last_diagnostic_summary = "暂无诊断。"
-        self._tutorial_overlay: TutorialOverlay | None = None
         self._vtk_viewer: VtkViewerDialog | None = None
         self._visual_animation_timer = QTimer(self)
         self._visual_animation_timer.timeout.connect(self._advance_visualization_frame)
@@ -1034,8 +961,6 @@ class MainWindow(QMainWindow):
         self._refresh_status_bar()
         if initial_project is not None:
             self._activate_project(initial_project, "已恢复上次项目。")
-        if self._context.settings_service.load().show_tutorial_on_startup:
-            QTimer.singleShot(0, self._show_tutorial)
 
     def _build_ui(self) -> None:
         self._build_status_bar()
@@ -1054,13 +979,10 @@ class MainWindow(QMainWindow):
         shell_layout.addWidget(WindowTitleBar(self))
         shell_layout.addWidget(self._build_menu_bar())
         shell_layout.addWidget(workbench, 1)
-        self._tutorial_overlay = TutorialOverlay(shell)
         self.setCentralWidget(shell)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        if self._tutorial_overlay and self._tutorial_overlay.isVisible():
-            self._tutorial_overlay.show_overlay()
 
     def _build_menu_bar(self) -> QWidget:
         menu_bar = QMenuBar(self)
@@ -1109,7 +1031,6 @@ class MainWindow(QMainWindow):
         theme_menu.addAction("循环切换主题", self._cycle_theme)
 
         help_menu = menu_bar.addMenu("帮助")
-        help_menu.addAction("新手教程", self._show_tutorial)
         help_menu.addAction("当前阶段说明", self._show_stage_summary)
         return menu_bar
 
@@ -1327,6 +1248,16 @@ class MainWindow(QMainWindow):
         self._set_parameter_inputs_enabled(False)
         return wrapper
 
+    def _make_menu_button(self, title, actions):
+        button = QPushButton(title)
+        menu = QMenu(button)
+        for label, callback in actions:
+            action = menu.addAction(label)
+            action.triggered.connect(lambda _checked=False, cb=callback: cb())
+        button.setMenu(menu)
+        return button
+
+
     def _build_geometry_tab(self) -> QWidget:
         wrapper = QWidget()
         root_layout = QVBoxLayout(wrapper)
@@ -1348,45 +1279,23 @@ class MainWindow(QMainWindow):
         )
         description.setWordWrap(True)
 
-        action_row = QHBoxLayout()
-        action_row.setSpacing(8)
-        action_row_2 = QHBoxLayout()
-        action_row_2.setSpacing(8)
-        import_button = QPushButton("导入 STL")
-        refresh_button = QPushButton("刷新几何清单")
-        snappy_button = QPushButton("生成 snappyHexMeshDict")
-        run_snappy_button = QPushButton("运行 snappyHexMesh")
-        check_mesh_button = QPushButton("运行 checkMesh")
-        preprocess_button = QPushButton("一键前处理")
-        simulation_pipeline_button = QPushButton("一键仿真流水线")
-        preview_button = QPushButton("预览已导入 STL")
-        edit_stl_button = QPushButton("编辑 STL 位置")
-        precheck_button = QPushButton("运行前检查")
-        limitation_button = QPushButton("STEP/IGES 支持说明")
-        import_button.clicked.connect(lambda _checked=False: self._import_stl_geometry())
-        refresh_button.clicked.connect(lambda _checked=False: self._refresh_geometry_panel())
-        snappy_button.clicked.connect(lambda _checked=False: self._generate_snappy_hex_mesh_dict())
-        run_snappy_button.clicked.connect(lambda _checked=False: self._run_snappy_hex_mesh())
-        check_mesh_button.clicked.connect(lambda _checked=False: self._run_check_mesh())
-        preprocess_button.clicked.connect(lambda _checked=False: self._run_preprocess_pipeline())
-        simulation_pipeline_button.clicked.connect(lambda _checked=False: self._run_simulation_pipeline())
-        preview_button.clicked.connect(lambda _checked=False: self._preview_imported_stl())
-        edit_stl_button.clicked.connect(lambda _checked=False: self._edit_imported_stl_transform())
-        precheck_button.clicked.connect(lambda _checked=False: self._run_preflight_check())
-        limitation_button.clicked.connect(lambda _checked=False: self._show_cad_import_limitations())
-        action_row.addWidget(import_button)
-        action_row.addWidget(refresh_button)
-        action_row_2.addWidget(snappy_button)
-        action_row_2.addWidget(run_snappy_button)
-        action_row_2.addWidget(check_mesh_button)
-        action_row_2.addWidget(preprocess_button)
-        action_row_2.addWidget(simulation_pipeline_button)
-        action_row_2.addWidget(preview_button)
-        action_row_2.addWidget(edit_stl_button)
-        action_row_2.addWidget(precheck_button)
-        action_row_2.addWidget(limitation_button)
-        action_row.addStretch(1)
-        action_row_2.addStretch(1)
+        stl_menu_btn = self._make_menu_button("STL 几何管理", [
+            ("导入 STL", self._import_stl_geometry),
+            ("刷新几何清单", self._refresh_geometry_panel),
+            ("预览已导入 STL", self._preview_imported_stl),
+            ("编辑 STL 位置", self._edit_imported_stl_transform),
+        ])
+        mesh_menu_btn = self._make_menu_button("前处理 & 网格", [
+            ("生成 snappyHexMeshDict", self._generate_snappy_hex_mesh_dict),
+            ("运行 snappyHexMesh", self._run_snappy_hex_mesh),
+            ("运行 checkMesh", self._run_check_mesh),
+            ("一键前处理", self._run_preprocess_pipeline),
+        ])
+        diag_menu_btn = self._make_menu_button("诊断 & 工具", [
+            ("运行前检查", self._run_preflight_check),
+            ("一键仿真流水线", self._run_simulation_pipeline),
+            ("STEP/IGES 支持说明", self._show_cad_import_limitations),
+        ])
 
         domain_form = QFormLayout()
         self._domain_template_combo = QComboBox()
@@ -1575,8 +1484,12 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(title)
         layout.addWidget(description)
-        layout.addLayout(action_row)
-        layout.addLayout(action_row_2)
+        groups_row = QHBoxLayout()
+        groups_row.addWidget(stl_menu_btn)
+        groups_row.addWidget(mesh_menu_btn)
+        groups_row.addWidget(diag_menu_btn)
+        groups_row.addStretch(1)
+        layout.addLayout(groups_row)
         layout.addLayout(domain_form)
         layout.addWidget(self._domain_preview_canvas)
         layout.addLayout(snappy_form)
@@ -1685,15 +1598,6 @@ class MainWindow(QMainWindow):
         previous_frame_button = QPushButton("上一帧")
         next_frame_button = QPushButton("下一帧")
 
-        def make_menu_button(title: str, actions: list[tuple[str, object]]) -> QPushButton:
-            button = QPushButton(title)
-            menu = QMenu(button)
-            for label, callback in actions:
-                action = menu.addAction(label)
-                action.triggered.connect(lambda _checked=False, callback=callback: callback())
-            button.setMenu(menu)
-            return button
-
         def make_widget_menu_button(title: str, panel: QWidget) -> QPushButton:
             button = QPushButton(title)
             menu = QMenu(button)
@@ -1703,7 +1607,7 @@ class MainWindow(QMainWindow):
             button.setMenu(menu)
             return button
 
-        result_data_button = make_menu_button(
+        result_data_button = self._make_menu_button(
             "结果数据",
             [
                 ("刷新结果索引", self._refresh_results_panel),
@@ -1712,14 +1616,14 @@ class MainWindow(QMainWindow):
                 ("导出 Markdown 报告", self._export_markdown_report),
             ],
         )
-        three_d_button = make_menu_button(
+        three_d_button = self._make_menu_button(
             "3D 视图",
             [
                 ("加载 3D 技术验证场景", self._load_3d_preview_scene),
                 ("加载真实 OpenFOAM 3D Case", self._load_openfoam_3d_case),
             ],
         )
-        contour_button = make_menu_button(
+        contour_button = self._make_menu_button(
             "云图",
             [
                 ("加载压力云图", self._load_pressure_cloud),
@@ -1727,7 +1631,7 @@ class MainWindow(QMainWindow):
                 ("加载所选字段表面图", self._load_selected_field_surface),
             ],
         )
-        velocity_button = make_menu_button(
+        velocity_button = self._make_menu_button(
             "速度场",
             [
                 ("加载速度箭头", self._load_velocity_vectors),
@@ -1916,14 +1820,11 @@ class MainWindow(QMainWindow):
         self._font_size_input = QSpinBox()
         self._font_size_input.setRange(11, 28)
         self._font_size_input.setValue(settings.font_size)
-        self._show_tutorial_checkbox = QCheckBox("每次启动时显示新手教程")
-        self._show_tutorial_checkbox.setChecked(settings.show_tutorial_on_startup)
 
         form.addRow("主题", self._theme_combo)
         form.addRow("主背景色", self._background_color_input)
         form.addRow("界面字体", self._font_combo)
         form.addRow("字体大小", self._font_size_input)
-        form.addRow("新手教程", self._show_tutorial_checkbox)
         form.addRow("工作区路径", self._workspace_input)
         form.addRow("OpenFOAM 环境脚本", self._env_script_input)
 
@@ -4171,7 +4072,6 @@ class MainWindow(QMainWindow):
             self._env_script_input.setText(settings.openfoam_env_script or "")
             self._font_combo.setCurrentFont(QFont(settings.font_family))
             self._font_size_input.setValue(settings.font_size)
-            self._show_tutorial_checkbox.setChecked(settings.show_tutorial_on_startup)
 
     def _cycle_theme(self) -> None:
         self._theme_index = (self._theme_index + 1) % len(self._theme_names)
@@ -4187,7 +4087,6 @@ class MainWindow(QMainWindow):
             background_color=palette.window_bg,
             font_family=settings.font_family,
             font_size=settings.font_size,
-            show_tutorial_on_startup=settings.show_tutorial_on_startup,
             last_project_path=settings.last_project_path,
         )
         self._context.settings_service.save(updated_settings)
@@ -4206,7 +4105,6 @@ class MainWindow(QMainWindow):
             background_color=background_color,
             font_family=self._font_combo.currentFont().family(),
             font_size=self._font_size_input.value(),
-            show_tutorial_on_startup=self._show_tutorial_checkbox.isChecked(),
             last_project_path=settings.last_project_path,
         )
         self._context.settings_service.save(updated_settings)
@@ -4706,11 +4604,6 @@ class MainWindow(QMainWindow):
             "当前 Sprint：Sprint 2 UI 可用性与设置系统；下一阶段：Sprint 3 项目管理与 OpenFOAM 最小执行闭环。"
         )
         self._set_status("已输出当前阶段说明。")
-
-    def _show_tutorial(self) -> None:
-        if self._tutorial_overlay:
-            self._tutorial_overlay.show_overlay()
-        self._append_log("已显示新手教程。")
 
     def _show_error(self, message: str) -> None:
         self._problem_text.setPlainText(message)

@@ -137,30 +137,7 @@ def build_stylesheet(
     #topToolBar {{
         border-top: none;
     }}
-    #tutorialPanel {{
-        background-color: {window_bg};
-        border: 1px solid {palette.border};
     }}
-    #tutorialTitle {{
-        color: {palette.text};
-        font-size: {font_size + 7}px;
-        font-weight: 600;
-    }}
-    #tutorialBody {{
-        color: {palette.text};
-        line-height: 1.45;
-    }}
-    #tutorialPanel:hover {{
-        border: 1px solid {palette.accent};
-    }}
-    #tutorialIconButton {{
-        background-color: transparent;
-        border: none;
-        padding: 0;
-        color: {palette.muted_text};
-    }}
-    #tutorialIconButton:hover {{
-        background-color: {palette.accent};
         color: {palette.text};
     }}
     QMenu {{

@@ -26,7 +26,6 @@ class AppSettingsService:
         background_color = payload.get("background_color", "#1e1e1e")
         font_family = payload.get("font_family", "Noto Sans CJK SC")
         font_size = int(payload.get("font_size", 15))
-        show_tutorial_on_startup = bool(payload.get("show_tutorial_on_startup", True))
         last_project_raw = payload.get("last_project_path")
         return AppSettings(
             workspace_dir=workspace_dir,
@@ -35,7 +34,6 @@ class AppSettingsService:
             background_color=background_color,
             font_family=font_family,
             font_size=font_size,
-            show_tutorial_on_startup=show_tutorial_on_startup,
             last_project_path=Path(last_project_raw) if last_project_raw else None,
         )
 
@@ -48,7 +46,6 @@ class AppSettingsService:
             "background_color": settings.background_color,
             "font_family": settings.font_family,
             "font_size": settings.font_size,
-            "show_tutorial_on_startup": settings.show_tutorial_on_startup,
             "last_project_path": str(settings.last_project_path) if settings.last_project_path else None,
         }
         self._settings_file.write_text(
@@ -68,7 +65,6 @@ class AppSettingsService:
             "background_color": "#1e1e1e",
             "font_family": "Noto Sans CJK SC",
             "font_size": 15,
-            "show_tutorial_on_startup": True,
             "last_project_path": None,
         }
         self._settings_file.write_text(
