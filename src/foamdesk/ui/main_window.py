@@ -1885,8 +1885,8 @@ class MainWindow(QMainWindow):
     def _read_stl_transform_dialog(
         self,
         source_path: Path,
-        template: ComputationDomainTemplate | None = None,
         initial_transform: StlTransform | None = None,
+        template: ComputationDomainTemplate | None = None,
     ) -> StlTransform | None:
         resolved_transform = initial_transform or StlTransform()
         dialog = QDialog(self)
@@ -1970,6 +1970,7 @@ class MainWindow(QMainWindow):
         canvas: FigureCanvas,
         source_path: Path,
         transform: StlTransform,
+        template: ComputationDomainTemplate | None = None,
     ) -> None:
         figure.clear()
         axes = figure.add_subplot(111, projection="3d", facecolor="#1e1e1e")
