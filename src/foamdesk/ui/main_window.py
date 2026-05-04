@@ -1885,6 +1885,7 @@ class MainWindow(QMainWindow):
     def _read_stl_transform_dialog(
         self,
         source_path: Path,
+        template: ComputationDomainTemplate | None = None,
         initial_transform: StlTransform | None = None,
     ) -> StlTransform | None:
         resolved_transform = initial_transform or StlTransform()
