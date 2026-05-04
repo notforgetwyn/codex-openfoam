@@ -713,11 +713,7 @@ class VtkViewerDialog(QDialog):
         self._tabs.setCurrentWidget(self.canvas)
         axes = self.figure.add_subplot(111, projection="3d", facecolor="#1e1e1e")
         axes.set_title(title, color="#d4d4d4", pad=14)
-        axes.set_xlabel("X", color="#d4d4d4")
-        axes.set_ylabel("Y", color="#d4d4d4")
-        axes.set_zlabel("Z", color="#d4d4d4")
-        axes.tick_params(colors="#d4d4d4")
-        axes.grid(True, color="#333333", linestyle="--", linewidth=0.6)
+        axes.set_axis_off()
         return axes
 
     def _finish_axes(self, axes, points) -> None:
