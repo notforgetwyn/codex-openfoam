@@ -2196,31 +2196,37 @@ class MainWindow(QMainWindow):
         if template.shape == "bend":
             return self._draw_bend_domain_wireframe(axes, template)
         corners = np.array(self._context.project_service.domain_vertices(template), dtype=float)
-        edges = [
-            (0, 1),
-            (1, 2),
-            (2, 3),
-            (3, 0),
-            (4, 5),
-            (5, 6),
-            (6, 7),
-            (7, 4),
-            (0, 4),
-            (1, 5),
-            (2, 6),
-            (3, 7),
+        faces = [
+            [0, 3, 7, 4],
+            [1, 5, 6, 2],
+            [0, 1, 2, 3],
+            [4, 5, 6, 7],
+            [0, 1, 5, 4],
+            [3, 2, 6, 7],
         ]
-        for start, end in edges:
-            axes.plot(
-                corners[[start, end], 0],
-                corners[[start, end], 1],
-                corners[[start, end], 2],
-                color="#8a8a8a",
-                linewidth=1.2,
-                alpha=0.85,
-            )
+        fc = [
+            (0.537, 0.820, 0.522, 0.30),
+            (0.957, 0.529, 0.443, 0.30),
+            (0.310, 0.757, 1.000, 0.10),
+            (0.310, 0.757, 1.000, 0.10),
+            (0.310, 0.757, 1.000, 0.10),
+            (0.310, 0.757, 1.000, 0.10),
+        ]
+        ec = [
+            (0.537, 0.820, 0.522, 0.55),
+            (0.957, 0.529, 0.443, 0.55),
+            (0.310, 0.757, 1.000, 0.35),
+            (0.310, 0.757, 1.000, 0.35),
+            (0.310, 0.757, 1.000, 0.35),
+            (0.310, 0.757, 1.000, 0.35),
+        ]
+        for face, fac, edg in zip(faces, fc, ec):
+            verts = [corners[i] for i in face]
+            poly = Poly3DCollection([verts], facecolors=[fac], edgecolors=[edg], linewidths=1.2)
+            axes.add_collection3d(poly)
+        axes.text(corners[0,0], corners[0,1], corners[0,2], "inlet", color=chr(34)+chr(35)+chr(56)+chr(57)+chr(100)+chr(49)+chr(56)+chr(53)+chr(34))
+        axes.text(corners[1,0], corners[1,1], corners[1,2], "outlet", color=chr(34)+chr(35)+chr(102)+chr(52)+chr(56)+chr(55)+chr(55)+chr(49)+chr(34))
         return corners
-
     def _draw_pipe_domain_wireframe(self, axes, template: ComputationDomainTemplate) -> np.ndarray:
         length_x, length_y, length_z = template.size
         center_y = length_y / 2.0
@@ -2319,17 +2325,7 @@ class MainWindow(QMainWindow):
         return np.vstack(points)
 
     def _style_domain_preview_axes(self, axes, template: ComputationDomainTemplate) -> None:
-        if template.shape in {"pipe", "bend"}:
-            # For curved domains, the Matplotlib 3D axis cube is visually misleading.
-            # Hide it so the user sees the pipe/bend as the actual computational domain.
-            axes.set_axis_off()
-            return
-        axes.set_axis_on()
-        axes.set_xlabel("X", color="#d4d4d4")
-        axes.set_ylabel("Y", color="#d4d4d4")
-        axes.set_zlabel("Z", color="#d4d4d4")
-        axes.tick_params(colors="#d4d4d4")
-        axes.grid(True, color="#333333", linestyle="--", linewidth=0.5)
+        axes.set_axis_off()
 
     def _refresh_geometry_panel(self) -> None:
         if not hasattr(self, "_geometry_text"):
