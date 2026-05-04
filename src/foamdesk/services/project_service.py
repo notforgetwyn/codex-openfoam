@@ -347,6 +347,13 @@ class ProjectService:
             return []
         return self._sync_field_boundaries_for_names(project.case_dir, clean_names)
 
+    def delete_project(self, path):
+        import shutil
+        d = path.expanduser().resolve()
+        if not d.exists():
+            raise ValueError("project not found")
+        shutil.rmtree(str(d))
+
     def _projects_dir(self) -> Path:
         return self._settings_service.load().workspace_dir / "projects"
 

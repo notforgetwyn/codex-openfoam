@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QInputDialog,
+    QLineEdit,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -29,6 +30,7 @@ class StartupWindow(QDialog):
         super().__init__()
         self._context = context
         self.selected_project: SimulationProject | None = None
+        self._all_projects = []
 
         self.setWindowTitle("FoamDesk - 选择项目")
         self.resize(920, 620)
@@ -80,11 +82,21 @@ class StartupWindow(QDialog):
         new_button.clicked.connect(self._create_project)
         open_button.clicked.connect(self._open_project_from_disk)
         refresh_button.clicked.connect(self._load_projects)
+        delete_button = QPushButton("删除项目")
+        delete_button.setStyleSheet("color: #f48771;")
+        delete_button.clicked.connect(self._delete_selected_project)
+        self._search_input = QLineEdit()
+        self._search_input.setPlaceholderText("搜索项目...")
+        self._search_input.setClearButtonEnabled(True)
+        self._search_input.setMaximumWidth(200)
+        self._search_input.textChanged.connect(self._filter_projects)
         header.addWidget(title)
         header.addStretch(1)
+        header.addWidget(self._search_input)
         header.addWidget(new_button)
         header.addWidget(open_button)
         header.addWidget(refresh_button)
+        header.addWidget(delete_button)
 
         self._project_list = QListWidget()
         self._project_list.itemDoubleClicked.connect(self._accept_item)
@@ -117,18 +129,54 @@ class StartupWindow(QDialog):
         )
 
     def _load_projects(self) -> None:
+        self._all_projects = self._context.project_service.list_projects()
+        self._apply_filter()
+
+    def _apply_filter(self, text=""):
         self._project_list.clear()
-        projects = self._context.project_service.list_projects()
+        projects = self._all_projects
+        if text:
+            projects = [p for p in projects if text.lower() in p.name.lower()]
         if not projects:
-            item = QListWidgetItem("暂无项目，请点击右上角“新建项目”。")
+            msg = "没有匹配的项目。" if text else "暂无项目，请点击右上角“新建项目”。"
+            item = QListWidgetItem(msg)
             item.setFlags(Qt.ItemFlag.NoItemFlags)
             self._project_list.addItem(item)
             return
-
         for project in projects:
-            item = QListWidgetItem(f"{project.name}\n{project.path}")
+            item = QListWidgetItem(project.name + chr(10) + str(project.path))
             item.setData(Qt.ItemDataRole.UserRole, str(project.path))
             self._project_list.addItem(item)
+
+    def _filter_projects(self, text):
+        self._apply_filter(text)
+
+    def _delete_selected_project(self):
+        item = self._project_list.currentItem()
+        if item is None:
+            self._show_error("请先选择要删除的项目。")
+            return
+        pp = item.data(Qt.ItemDataRole.UserRole)
+        if not pp:
+            return
+        name = item.text().split(chr(10))[0]
+        msg = "确定要删除项目“" + name + "”吗？" + chr(10) + chr(10) + "此操作不可撤销，项目目录将被永久删除。"
+        confirm = QMessageBox.question(
+            self,
+            "删除项目",
+            msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._context.project_service.delete_project(Path(pp))
+        except ValueError as error:
+            self._show_error(str(error))
+            return
+        self._load_projects()
+
 
     def _accept_item(self, item: QListWidgetItem) -> None:
         project_path = item.data(Qt.ItemDataRole.UserRole)
