@@ -1122,7 +1122,8 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.addTab(self._build_project_home_tab(), "项目主页")
         self._workspace_tabs.addTab(self._build_draw_geometry_tab(), "绘制几何")
         self._workspace_tabs.addTab(self._build_geometry_tab(), "几何/CAD")
-        self._workspace_tabs.addTab(self._build_parameter_tab(), "参数配置")
+        self._workspace_tabs.addTab(self._build_solver_select_tab(), "求解器选择")
+        self._workspace_tabs.addTab(self._build_parameter_tab(), "仿真参数")
         self._workspace_tabs.addTab(self._build_solver_run_tab(), "求解运行")
         self._workspace_tabs.addTab(self._build_environment_tab(), "环境检查")
         self._workspace_tabs.addTab(self._build_settings_tab(), "设置")
@@ -1190,15 +1191,79 @@ class MainWindow(QMainWindow):
         layout.addWidget(summary)
         return wrapper
 
+    def _build_solver_select_tab(self) -> QWidget:
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        title = QLabel("求解器选择")
+        title.setStyleSheet("font-size: 22px; font-weight: 600;")
+        description = QLabel("选择当前 Case 要使用的 OpenFOAM 求解器。本阶段先支持 icoFoam、simpleFoam、pisoFoam。")
+        description.setWordWrap(True)
+
+        form = QFormLayout()
+        self._solver_name_combo = QComboBox()
+        self._solver_name_combo.addItem("icoFoam - 入门不可压瞬态流", "icoFoam")
+        self._solver_name_combo.addItem("simpleFoam - 稳态不可压流/风洞绕流", "simpleFoam")
+        self._solver_name_combo.addItem("pisoFoam - 瞬态不可压流", "pisoFoam")
+        self._turbulence_model_combo = QComboBox()
+        self._turbulence_model_combo.addItem("laminar - 层流/入门默认", "laminar")
+        self._turbulence_model_combo.addItem("RAS kEpsilon - 湍流模型占位", "RAS kEpsilon")
+        self._numeric_scheme_combo = QComboBox()
+        self._numeric_scheme_combo.addItem("stable - 稳定优先 upwind", "stable")
+        self._numeric_scheme_combo.addItem("balanced - 平衡 linearUpwind", "balanced")
+        self._numeric_scheme_combo.addItem("accurate - 精度优先 linear", "accurate")
+        self._fv_solution_preset_combo = QComboBox()
+        self._fv_solution_preset_combo.addItem("default - 默认收敛设置", "default")
+        self._fv_solution_preset_combo.addItem("strict - 更严格残差", "strict")
+        self._fv_solution_preset_combo.addItem("fast - 更快但较粗", "fast")
+        form.addRow("求解器", self._solver_name_combo)
+        form.addRow("湍流模型", self._turbulence_model_combo)
+        form.addRow("数值格式 fvSchemes", self._numeric_scheme_combo)
+        form.addRow("求解设置 fvSolution", self._fv_solution_preset_combo)
+
+        button_row = QHBoxLayout()
+        load_button = QPushButton("加载当前 Case 求解器")
+        save_button = QPushButton("保存求解器配置")
+        load_button.clicked.connect(lambda _checked=False: self._load_case_parameters())
+        save_button.clicked.connect(lambda _checked=False: self._save_case_parameters())
+        button_row.addWidget(load_button)
+        button_row.addWidget(save_button)
+        button_row.addStretch(1)
+
+        self._solver_select_status_label = QLabel("请先新建或打开项目。")
+        self._solver_select_status_label.setWordWrap(True)
+        help_text = QTextEdit()
+        help_text.setReadOnly(True)
+        help_text.setMaximumHeight(190)
+        help_text.setPlainText(
+            "求解器怎么选：\n"
+            "- icoFoam：先跑通最小不可压瞬态流，适合学习和验证流程。\n"
+            "- simpleFoam：稳态不可压流，后续做车/圆柱/风洞绕流更常用。\n"
+            "- pisoFoam：瞬态不可压流，适合观察流动随时间变化。\n\n"
+            "注意：当前页面先负责保存配置和生成核心字典，真正切换不同求解器的完整运行流水线后续继续增强。"
+        )
+
+        layout.addWidget(title)
+        layout.addWidget(description)
+        layout.addLayout(form)
+        layout.addLayout(button_row)
+        layout.addWidget(self._solver_select_status_label)
+        layout.addWidget(help_text)
+        layout.addStretch(1)
+        self._set_solver_inputs_enabled(False)
+        return wrapper
+
     def _build_parameter_tab(self) -> QWidget:
         wrapper = QWidget()
         layout = QVBoxLayout(wrapper)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
-        title = QLabel("参数配置")
+        title = QLabel("仿真参数")
         title.setStyleSheet("font-size: 22px; font-weight: 600;")
-        description = QLabel("当前阶段接入 controlDict 与 physicalProperties 的基础参数。")
+        description = QLabel("配置当前 Case 的时间、写出、收敛、流体属性和基础数值参数。")
         description.setWordWrap(True)
 
         form = QFormLayout()
@@ -1206,10 +1271,18 @@ class MainWindow(QMainWindow):
         self._delta_t_input = QLineEdit()
         self._write_interval_input = QSpinBox()
         self._write_interval_input.setRange(1, 1000000)
+        self._max_iterations_input = QSpinBox()
+        self._max_iterations_input.setRange(1, 10000000)
+        self._max_iterations_input.setValue(100)
+        self._residual_tolerance_input = QLineEdit()
+        self._density_input = QLineEdit()
         self._viscosity_input = QLineEdit()
-        form.addRow("结束时间 endTime", self._end_time_input)
+        form.addRow("仿真总时间 endTime", self._end_time_input)
         form.addRow("时间步长 deltaT", self._delta_t_input)
         form.addRow("写出间隔 writeInterval", self._write_interval_input)
+        form.addRow("最大迭代次数", self._max_iterations_input)
+        form.addRow("收敛残差", self._residual_tolerance_input)
+        form.addRow("流体密度 rho", self._density_input)
         form.addRow("运动粘度 nu", self._viscosity_input)
 
         button_row = QHBoxLayout()
@@ -1231,10 +1304,13 @@ class MainWindow(QMainWindow):
         help_text.setMaximumHeight(150)
         help_text.setPlainText(
             "参数说明：\n"
-            "- endTime：仿真结束时间，越大运行越久。\n"
+            "- endTime：仿真总时间，越大运行越久。\n"
             "- deltaT：每一步的时间步长，越小越稳定但更慢。\n"
             "- writeInterval：每隔多少步写一次结果。\n"
-            "- nu：运动粘度，当前最小算例默认 0.01。"
+            "- 最大迭代次数：稳态求解时常用，可作为后续 simpleFoam 控制依据。\n"
+            "- 收敛残差：越小代表要求越严格。\n"
+            "- rho：流体密度，例如空气约 1.225 kg/m^3。\n"
+            "- nu：运动粘度，例如空气约 1.5e-5 m^2/s。"
         )
 
         layout.addWidget(title)
@@ -3541,26 +3617,61 @@ class MainWindow(QMainWindow):
         self._end_time_input.setEnabled(enabled)
         self._delta_t_input.setEnabled(enabled)
         self._write_interval_input.setEnabled(enabled)
+        self._max_iterations_input.setEnabled(enabled)
+        self._residual_tolerance_input.setEnabled(enabled)
+        self._density_input.setEnabled(enabled)
         self._viscosity_input.setEnabled(enabled)
 
+    def _set_solver_inputs_enabled(self, enabled: bool) -> None:
+        if not hasattr(self, "_solver_name_combo"):
+            return
+        self._solver_name_combo.setEnabled(enabled)
+        self._turbulence_model_combo.setEnabled(enabled)
+        self._numeric_scheme_combo.setEnabled(enabled)
+        self._fv_solution_preset_combo.setEnabled(enabled)
+
     def _show_parameters(self, parameters: SimulationParameters) -> None:
+        self._set_combo_value(self._solver_name_combo, parameters.solver_name)
+        self._set_combo_value(self._turbulence_model_combo, parameters.turbulence_model)
+        self._set_combo_value(self._numeric_scheme_combo, parameters.numeric_scheme)
+        self._set_combo_value(self._fv_solution_preset_combo, parameters.fv_solution_preset)
         self._end_time_input.setText(f"{parameters.end_time:.12g}")
         self._delta_t_input.setText(f"{parameters.delta_t:.12g}")
         self._write_interval_input.setValue(parameters.write_interval)
+        self._max_iterations_input.setValue(parameters.max_iterations)
+        self._residual_tolerance_input.setText(f"{parameters.residual_tolerance:.12g}")
+        self._density_input.setText(f"{parameters.density:.12g}")
         self._viscosity_input.setText(f"{parameters.viscosity:.12g}")
 
     def _read_parameter_inputs(self) -> SimulationParameters:
         return SimulationParameters(
+            solver_name=str(self._solver_name_combo.currentData()),
             end_time=float(self._end_time_input.text().strip()),
             delta_t=float(self._delta_t_input.text().strip()),
             write_interval=self._write_interval_input.value(),
+            max_iterations=self._max_iterations_input.value(),
+            residual_tolerance=float(self._residual_tolerance_input.text().strip()),
+            density=float(self._density_input.text().strip()),
             viscosity=float(self._viscosity_input.text().strip()),
+            turbulence_model=str(self._turbulence_model_combo.currentData()),
+            numeric_scheme=str(self._numeric_scheme_combo.currentData()),
+            fv_solution_preset=str(self._fv_solution_preset_combo.currentData()),
         )
+
+    def _set_combo_value(self, combo: QComboBox, value: str) -> None:
+        index = combo.findData(value)
+        if index < 0:
+            index = combo.findText(value)
+        if index >= 0:
+            combo.setCurrentIndex(index)
 
     def _load_case_parameters(self) -> None:
         if self._current_project is None:
             self._parameter_status_label.setText("请先新建或打开项目。")
             self._set_parameter_inputs_enabled(False)
+            if hasattr(self, "_solver_select_status_label"):
+                self._solver_select_status_label.setText("请先新建或打开项目。")
+            self._set_solver_inputs_enabled(False)
             return
 
         try:
@@ -3572,7 +3683,12 @@ class MainWindow(QMainWindow):
 
         self._show_parameters(parameters)
         self._set_parameter_inputs_enabled(True)
+        self._set_solver_inputs_enabled(True)
         self._parameter_status_label.setText(f"已加载项目参数：{self._current_project.name}")
+        if hasattr(self, "_solver_select_status_label"):
+            self._solver_select_status_label.setText(
+                f"已加载求解器：{parameters.solver_name}，湍流模型：{parameters.turbulence_model}"
+            )
         self._refresh_solver_run_panel()
         self._set_status("参数已加载。")
 
@@ -3593,12 +3709,20 @@ class MainWindow(QMainWindow):
             return False
 
         self._parameter_status_label.setText(
-            f"参数已保存到 Case：endTime={parameters.end_time:g}, "
+            f"参数已保存到 Case：solver={parameters.solver_name}, endTime={parameters.end_time:g}, "
             f"deltaT={parameters.delta_t:g}, writeInterval={parameters.write_interval}, "
-            f"nu={parameters.viscosity:g}"
+            f"rho={parameters.density:g}, nu={parameters.viscosity:g}"
         )
+        if hasattr(self, "_solver_select_status_label"):
+            self._solver_select_status_label.setText(
+                f"求解器配置已保存：{parameters.solver_name} / {parameters.turbulence_model} / "
+                f"{parameters.numeric_scheme} / {parameters.fv_solution_preset}"
+            )
         self._refresh_solver_run_panel()
-        self._append_log("参数已写入 system/controlDict 和 constant/physicalProperties。")
+        self._append_log(
+            "参数已写入 system/controlDict、system/fvSchemes、system/fvSolution、"
+            "constant/physicalProperties 和 system/foamdesk_simulation_config.json。"
+        )
         self._set_status("参数保存完成。")
         return True
 
@@ -3607,6 +3731,9 @@ class MainWindow(QMainWindow):
         self._show_parameters(parameters)
         self._parameter_status_label.setText("已恢复默认参数，点击“保存参数到 Case”后生效。")
         self._set_parameter_inputs_enabled(self._current_project is not None)
+        self._set_solver_inputs_enabled(self._current_project is not None)
+        if hasattr(self, "_solver_select_status_label"):
+            self._solver_select_status_label.setText("已恢复默认求解器配置，点击“保存求解器配置”后生效。")
         self._refresh_solver_run_panel()
 
     def _refresh_solver_run_panel(self, status_text: str | None = None) -> None:
@@ -3633,10 +3760,17 @@ class MainWindow(QMainWindow):
 
         self._solver_parameter_summary.setPlainText(
             "参数摘要：\n"
+            f"- solver：{parameters.solver_name}\n"
             f"- endTime：{parameters.end_time:g}\n"
             f"- deltaT：{parameters.delta_t:g}\n"
             f"- writeInterval：{parameters.write_interval}\n"
+            f"- maxIterations：{parameters.max_iterations}\n"
+            f"- residualTolerance：{parameters.residual_tolerance:g}\n"
+            f"- rho：{parameters.density:g}\n"
             f"- nu：{parameters.viscosity:g}\n"
+            f"- turbulence：{parameters.turbulence_model}\n"
+            f"- fvSchemes：{parameters.numeric_scheme}\n"
+            f"- fvSolution：{parameters.fv_solution_preset}\n"
             "\n"
             "输出位置：当前 Case 目录下的时间步目录、constant/polyMesh 和日志面板。"
         )

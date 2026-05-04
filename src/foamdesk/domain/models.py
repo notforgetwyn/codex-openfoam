@@ -34,10 +34,17 @@ class SimulationProject:
 
 @dataclass(slots=True)
 class SimulationParameters:
+    solver_name: str
     end_time: float
     delta_t: float
     write_interval: int
+    max_iterations: int
+    residual_tolerance: float
+    density: float
     viscosity: float
+    turbulence_model: str
+    numeric_scheme: str
+    fv_solution_preset: str
 
 
 @dataclass(slots=True)
