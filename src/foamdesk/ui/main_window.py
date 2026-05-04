@@ -1487,7 +1487,10 @@ class MainWindow(QMainWindow):
         groups_row = QHBoxLayout()
         groups_row.addWidget(stl_menu_btn)
         groups_row.addWidget(mesh_menu_btn)
+        zoom_btn = QPushButton("放大预览")
+        zoom_btn.clicked.connect(lambda _checked=False: self._open_domain_preview_dialog())
         groups_row.addWidget(diag_menu_btn)
+        groups_row.addWidget(zoom_btn)
         groups_row.addStretch(1)
         layout.addLayout(groups_row)
         layout.addLayout(domain_form)
@@ -2236,6 +2239,53 @@ class MainWindow(QMainWindow):
 
     def _style_domain_preview_axes(self, axes, template: ComputationDomainTemplate) -> None:
         axes.set_axis_off()
+
+    def _open_domain_preview_dialog(self):
+        template = self._selected_domain_template() if self._current_project is not None else self._context.project_service.domain_templates()[0]
+        dialog = QDialog(self)
+        dialog.setWindowTitle("计算域 3D 预览")
+        dialog.resize(900, 700)
+        dialog.setMinimumSize(600, 450)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(0, 0, 0, 0)
+        figure = Figure(figsize=(10, 8), facecolor="#1e1e1e", tight_layout=True)
+        canvas = FigureCanvas(figure)
+        layout.addWidget(canvas)
+        axes = figure.add_subplot(111, projection="3d", facecolor="#1e1e1e")
+        axes.set_title("Domain and STL Preview", color="#d4d4d4", pad=10)
+        self._style_domain_preview_axes(axes, template)
+        domain_points = self._draw_domain_template_wireframe(axes, template)
+        points_for_limits = [domain_points]
+        if self._current_project is not None:
+            for asset in self._context.geometry_import_service.list_assets(self._current_project):
+                if asset.format.upper() != "STL" or not asset.stored_path.exists():
+                    continue
+                try:
+                    points, faces = self._read_stl_preview_mesh(asset.stored_path)
+                except (OSError, ValueError):
+                    continue
+                if points.size == 0 or faces.size == 0:
+                    continue
+                sampled = faces
+                if len(sampled) > 5000:
+                    idx = np.linspace(0, len(sampled) - 1, 5000, dtype=int)
+                    sampled = sampled[idx]
+                polygons = [points[np.asarray(f, dtype=int)] for f in sampled]
+                coll = Poly3DCollection(polygons, facecolors=(0.25, 0.74, 1.0, 0.42), edgecolors=(0.03, 0.18, 0.28, 0.35), linewidths=0.2)
+                axes.add_collection3d(coll)
+                points_for_limits.append(points)
+        all_pts = np.vstack(points_for_limits)
+        mins = all_pts.min(axis=0)
+        maxs = all_pts.max(axis=0)
+        center = (mins + maxs) / 2.0
+        radius = max(float((maxs - mins).max()) / 2.0, 0.55)
+        axes.set_xlim(center[0] - radius, center[0] + radius)
+        axes.set_ylim(center[1] - radius, center[1] + radius)
+        axes.set_zlim(center[2] - radius, center[2] + radius)
+        axes.view_init(elev=24, azim=-55)
+        canvas.draw()
+        dialog.exec()
+
 
     def _refresh_geometry_panel(self) -> None:
         if not hasattr(self, "_geometry_text"):
