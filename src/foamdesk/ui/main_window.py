@@ -1545,11 +1545,14 @@ class MainWindow(QMainWindow):
         import_draw_btn = QPushButton("从绘制几何导入")
         import_draw_btn.clicked.connect(lambda _checked=False: self._import_draw_geometry_domain())
         apply_domain_button.clicked.connect(lambda _checked=False: self._apply_domain_template())
+        read_draw_btn = QPushButton("读取绘制几何")
+        read_draw_btn.clicked.connect(lambda _checked=False: self._read_draw_geometry())
         import_template_stl_button.clicked.connect(lambda _checked=False: self._import_template_stl())
         domain_row = QHBoxLayout()
         domain_row.setSpacing(8)
         domain_row.addWidget(self._domain_template_combo)
         domain_row.addWidget(apply_domain_button)
+        domain_row.addWidget(read_draw_btn)
         domain_row.addWidget(import_draw_btn)
         domain_row.addWidget(import_template_stl_button)
         domain_row.addStretch(1)
@@ -2469,6 +2472,44 @@ class MainWindow(QMainWindow):
         axes.view_init(elev=24, azim=-55)
         canvas.draw()
         dialog.exec()
+
+
+    def _read_draw_geometry(self):
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。"); return
+        dc_path = self._current_project.case_dir / "system" / "domain_config.json"
+        if not dc_path.exists():
+            self._show_error("未找到 domain_config.json，请先在绘制几何页生成 blockMeshDict。"); return
+        import json
+        try:
+            payload = json.loads(dc_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            self._show_error("读取失败：" + str(e)); return
+        if payload.get("key") != "custom_domain":
+            self._show_error("domain_config.json 不是绘制几何生成的自定义域。"); return
+        idx = self._domain_template_combo.findData("custom_domain")
+        if idx < 0:
+            self._domain_template_combo.addItem("手工绘制", "custom_domain")
+            self._domain_template_combo.setCurrentIndex(self._domain_template_combo.count()-1)
+        else:
+            self._domain_template_combo.setCurrentIndex(idx)
+        self._load_domain_template_into_form()
+        self._geometry_text.setPlainText(self._context.geometry_import_service.format_assets(self._current_project))
+        self._refresh_domain_preview()
+        stl_dir = self._current_project.case_dir / "constant" / "triSurface"
+        count = 0
+        for stl_path in sorted(stl_dir.glob("body_*.stl")):
+            try:
+                self._context.geometry_import_service.import_stl(self._current_project, stl_path)
+                count += 1
+            except Exception:
+                pass
+        if count > 0:
+            self._geometry_text.setPlainText(self._context.geometry_import_service.format_assets(self._current_project))
+            self._refresh_domain_preview()
+            self._append_log("读取绘制几何：{} 个几何体已导入。".format(count))
+        self._set_status("已读取绘制几何。" + (" + {} 个 STL。".format(count) if count > 0 else ""))
+        self._append_log("读取绘制几何：计算域 " + str(payload.get("name", "手工绘制")))
 
 
     def _refresh_geometry_panel(self) -> None:
@@ -5318,9 +5359,10 @@ class MainWindow(QMainWindow):
                 for v0,v1,v2 in tris:
                     u = _np.array(v1)-_np.array(v0); v = _np.array(v2)-_np.array(v0)
                     n = _np.cross(u,v); n = n/(_np.linalg.norm(n)+1e-12)
-                    for vert in (v0,v1,v2):
-                        sf.write(_struct.pack("<3f", *n))
-                        sf.write(_struct.pack("<3f", *vert))
+                    sf.write(_struct.pack("<3f", *n))
+                    sf.write(_struct.pack("<3f", *v0))
+                    sf.write(_struct.pack("<3f", *v1))
+                    sf.write(_struct.pack("<3f", *v2))
                     sf.write(_struct.pack("<H", 0))
             self._append_log("STL 已导出: " + stl_name + " (" + str(len(tris)) + " 三角形)")
         self._set_status("blockMeshDict + STL 已生成。")
