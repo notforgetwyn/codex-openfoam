@@ -1377,8 +1377,10 @@ class MainWindow(QMainWindow):
         vh = QHBoxLayout()
         vh.addWidget(QLabel("顶点列表"))
         add_v = QPushButton("+ 添加")
+        csv_v = QPushButton("导入CSV")
+        csv_v.clicked.connect(self._import_vertices_csv)
         del_v = QPushButton("- 删除")
-        vh.addStretch(1); vh.addWidget(add_v); vh.addWidget(del_v)
+        vh.addStretch(1); vh.addWidget(add_v); clear_v = QPushButton("清空"); clear_v.clicked.connect(self._clear_all_vertices); vh.addWidget(del_v); vh.addWidget(clear_v); vh.addWidget(csv_v)
         layout.addLayout(vh)
 
         self._vertex_table = QTableWidget(0, 3)
@@ -1407,7 +1409,9 @@ class MainWindow(QMainWindow):
         ef.addWidget(QLabel("起点")); ef.addWidget(self._edge_start)
         ef.addWidget(QLabel("终点")); ef.addWidget(self._edge_end)
         ef.addWidget(QLabel("插值点")); ef.addWidget(self._edge_interp)
-        ef.addWidget(ae); ef.addStretch(1)
+        csv_e = QPushButton("导入CSV")
+        csv_e.clicked.connect(self._import_edges_csv)
+        ef.addWidget(ae); ef.addWidget(csv_e); ef.addStretch(1)
         layout.addLayout(ef)
 
         self._edge_list = QTextEdit()
@@ -1416,7 +1420,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._edge_list)
         de_btn = QPushButton("删除选中边")
         de_btn.clicked.connect(self._delete_selected_edge)
-        layout.addWidget(de_btn)
+        clr_e = QPushButton("清空边")
+        clr_e.clicked.connect(self._clear_all_edges)
+        er = QHBoxLayout(); er.setSpacing(6)
+        er.addWidget(de_btn); er.addWidget(clr_e); er.addStretch(1)
+        layout.addLayout(er)
         self._edge_defs = []
 
         self._block_widget = QWidget()
@@ -1534,12 +1542,15 @@ class MainWindow(QMainWindow):
         self._domain_template_combo.currentIndexChanged.connect(self._refresh_domain_template_hint)
         apply_domain_button = QPushButton("应用计算域模板")
         import_template_stl_button = QPushButton("一键导入模板 STL")
+        import_draw_btn = QPushButton("从绘制几何导入")
+        import_draw_btn.clicked.connect(lambda _checked=False: self._import_draw_geometry_domain())
         apply_domain_button.clicked.connect(lambda _checked=False: self._apply_domain_template())
         import_template_stl_button.clicked.connect(lambda _checked=False: self._import_template_stl())
         domain_row = QHBoxLayout()
         domain_row.setSpacing(8)
         domain_row.addWidget(self._domain_template_combo)
         domain_row.addWidget(apply_domain_button)
+        domain_row.addWidget(import_draw_btn)
         domain_row.addWidget(import_template_stl_button)
         domain_row.addStretch(1)
         domain_widget = QWidget()
@@ -1547,60 +1558,7 @@ class MainWindow(QMainWindow):
         domain_form.addRow("计算域模板", domain_widget)
         domain_form.addRow("应用状态", self._domain_apply_state_label)
         domain_form.addRow("模板说明", self._domain_template_hint)
-        custom_domain_size_row = QHBoxLayout()
-        custom_domain_size_row.setSpacing(8)
-        custom_domain_cells_row = QHBoxLayout()
-        custom_domain_cells_row.setSpacing(8)
-        self._domain_length_x_input = QDoubleSpinBox()
-        self._domain_length_y_input = QDoubleSpinBox()
-        self._domain_length_z_input = QDoubleSpinBox()
-        for input_widget in (
-            self._domain_length_x_input,
-            self._domain_length_y_input,
-            self._domain_length_z_input,
-        ):
-            input_widget.setRange(0.01, 100000.0)
-            input_widget.setDecimals(3)
-            input_widget.setSingleStep(0.5)
-            input_widget.setValue(1.0)
-        self._domain_cells_x_input = QSpinBox()
-        self._domain_cells_y_input = QSpinBox()
-        self._domain_cells_z_input = QSpinBox()
-        for input_widget in (
-            self._domain_cells_x_input,
-            self._domain_cells_y_input,
-            self._domain_cells_z_input,
-        ):
-            input_widget.setRange(1, 100000)
-            input_widget.setValue(10)
-        apply_custom_domain_button = QPushButton("应用自定义计算域")
-        apply_custom_domain_button.clicked.connect(lambda _checked=False: self._apply_custom_domain())
-        for label, input_widget in (
-            ("Lx", self._domain_length_x_input),
-            ("Ly", self._domain_length_y_input),
-            ("Lz", self._domain_length_z_input),
-        ):
-            input_widget.setMinimumWidth(96)
-            custom_domain_size_row.addWidget(QLabel(label))
-            custom_domain_size_row.addWidget(input_widget)
-        custom_domain_size_row.addStretch(1)
-        for label, input_widget in (
-            ("Nx", self._domain_cells_x_input),
-            ("Ny", self._domain_cells_y_input),
-            ("Nz", self._domain_cells_z_input),
-        ):
-            input_widget.setMinimumWidth(96)
-            custom_domain_cells_row.addWidget(QLabel(label))
-            custom_domain_cells_row.addWidget(input_widget)
-        custom_domain_cells_row.addWidget(apply_custom_domain_button)
-        custom_domain_cells_row.addStretch(1)
-        custom_domain_widget = QWidget()
-        custom_domain_layout = QVBoxLayout(custom_domain_widget)
-        custom_domain_layout.setContentsMargins(0, 0, 0, 0)
-        custom_domain_layout.setSpacing(6)
-        custom_domain_layout.addLayout(custom_domain_size_row)
-        custom_domain_layout.addLayout(custom_domain_cells_row)
-        domain_form.addRow("自定义尺寸/网格", custom_domain_widget)
+
 
         boundary_row_1 = QHBoxLayout()
         boundary_row_1.setSpacing(8)
@@ -5051,7 +5009,13 @@ class MainWindow(QMainWindow):
     def _new_geo_object(self):
         self._save_current_object()
         name = "几何体" + str(len(self._geo_objects))
-        dv = [(0,0,0),(1,0,0),(1,1,0),(0,1,0),(0,0,1),(1,0,1),(1,1,1),(0,1,1)]
+        domain_verts = self._geo_objects[0]["verts"]
+        xs = [v[0] for v in domain_verts]; ys = [v[1] for v in domain_verts]; zs = [v[2] for v in domain_verts]
+        s = 0.25  # half-size = 50% of domain = 0.25 from center
+        dx = (max(xs)-min(xs))*s; dy = (max(ys)-min(ys))*s; dz = (max(zs)-min(zs))*s
+        cx = (min(xs)+max(xs))/2; cy = (min(ys)+max(ys))/2; cz = (min(zs)+max(zs))/2
+        dv = [(cx-dx,cy-dy,cz-dz),(cx+dx,cy-dy,cz-dz),(cx+dx,cy+dy,cz-dz),(cx-dx,cy+dy,cz-dz),
+              (cx-dx,cy-dy,cz+dz),(cx+dx,cy-dy,cz+dz),(cx+dx,cy+dy,cz+dz),(cx-dx,cy+dy,cz+dz)]
         self._geo_objects.append({"name":name,"verts":list(dv),"edges":[],"is_domain":False})
         self._active_obj_idx = len(self._geo_objects) - 1
         self._load_active_object_to_ui()
@@ -5069,6 +5033,62 @@ class MainWindow(QMainWindow):
         self._refresh_draw_geo_preview()
 
     # --- Vertex helpers ---
+    def _import_vertices_csv(self):
+        fp, _ = QFileDialog.getOpenFileName(self, "导入顶点 CSV", "", "CSV (*.csv)")
+        if not fp: return
+        import csv
+        with open(fp, newline="") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                clean = [v.strip() for v in row if v.strip()]
+                if len(clean) >= 3:
+                    try:
+                        x, y, z = float(clean[0]), float(clean[1]), float(clean[2])
+                        self._add_vertex_row(x, y, z)
+                    except ValueError:
+                        continue
+        self._save_vertex_table()
+        self._refresh_draw_geo_preview()
+
+    def _import_edges_csv(self):
+        fp, _ = QFileDialog.getOpenFileName(self, "导入边 CSV", "", "CSV (*.csv)")
+        if not fp: return
+        import csv
+        with open(fp, newline="") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                clean = [v.strip() for v in row if v.strip()]
+                if len(clean) < 3: continue
+                etype = clean[0]
+                if etype not in ("arc","spline","polyLine","BSpline"): continue
+                try:
+                    s = int(clean[1]); e = int(clean[2])
+                    interp = " ".join(clean[3:]) if len(clean) > 3 else ""
+                    self._edge_defs.append((etype, s, e, interp))
+                except ValueError:
+                    continue
+        if self._geo_objects:
+            self._geo_objects[self._active_obj_idx]["edges"] = list(self._edge_defs)
+        self._update_edge_list()
+        self._refresh_draw_geo_preview()
+
+
+    def _clear_all_vertices(self):
+        self._vertex_table.blockSignals(True)
+        while self._vertex_table.rowCount() > 0:
+            self._vertex_table.removeRow(0)
+        self._vertex_table.blockSignals(False)
+        self._save_vertex_table()
+        self._refresh_draw_geo_preview()
+
+    def _clear_all_edges(self):
+        self._edge_defs = []
+        if self._geo_objects:
+            self._geo_objects[self._active_obj_idx]["edges"] = []
+        self._update_edge_list()
+        self._refresh_draw_geo_preview()
+
+
     def _add_vertex_row(self, x=0.0, y=0.0, z=0.0):
         r = self._vertex_table.rowCount()
         self._vertex_table.insertRow(r)
