@@ -1005,14 +1005,10 @@ class MainWindow(QMainWindow):
         case_menu.addAction("打开当前 Case 目录", self._show_current_case_path)
 
         geometry_menu = menu_bar.addMenu("几何/CAD")
-        geometry_menu.addAction("打开几何/CAD 页", self._open_geometry_tab)
-        geometry_menu.addAction("导入 STL 几何", self._import_stl_geometry)
         geometry_menu.addAction("生成 snappyHexMeshDict", self._generate_snappy_hex_mesh_dict)
         geometry_menu.addAction("运行 snappyHexMesh", self._run_snappy_hex_mesh)
         geometry_menu.addAction("运行 checkMesh", self._run_check_mesh)
         geometry_menu.addAction("一键前处理", self._run_preprocess_pipeline)
-        geometry_menu.addAction("一键仿真流水线", self._run_simulation_pipeline)
-        geometry_menu.addAction("预览已导入 STL", self._preview_imported_stl)
 
         solver_menu = menu_bar.addMenu("求解器")
         solver_menu.addAction("运行最小仿真", self._run_minimal_simulation)
@@ -1121,7 +1117,6 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.setTabsClosable(False)
         self._workspace_tabs.addTab(self._build_project_home_tab(), "项目主页")
         self._workspace_tabs.addTab(self._build_draw_geometry_tab(), "绘制几何")
-        self._workspace_tabs.addTab(self._build_geometry_tab(), "几何/CAD")
         self._workspace_tabs.addTab(self._build_solver_select_tab(), "求解器选择")
         self._workspace_tabs.addTab(self._build_parameter_tab(), "仿真参数")
         self._workspace_tabs.addTab(self._build_solver_run_tab(), "求解运行")
@@ -2030,11 +2025,11 @@ class MainWindow(QMainWindow):
         return wrapper
 
     def _open_settings_tab(self) -> None:
-        self._workspace_tabs.setCurrentIndex(6)
+        self._workspace_tabs.setCurrentIndex(5)
         self._set_status("已打开设置页。")
 
     def _open_environment_tab(self) -> None:
-        self._workspace_tabs.setCurrentIndex(5)
+        self._workspace_tabs.setCurrentIndex(4)
         self._refresh_environment_panels()
         self._set_status("已打开环境检查页。")
 
@@ -3331,6 +3326,11 @@ class MainWindow(QMainWindow):
 
         if not self._save_case_parameters():
             return
+        try:
+            parameters = self._context.case_parameter_service.load(self._current_project)
+        except (OSError, ValueError) as error:
+            self._show_error(f"读取求解器配置失败：{error}")
+            return
 
         selected_name = self._select_stl_asset_for_snappy()
         if not selected_name:
@@ -3347,15 +3347,16 @@ class MainWindow(QMainWindow):
                 selected_name,
                 self._read_snappy_settings(),
             )
-            synced_fields = self._context.project_service.ensure_field_boundaries(
+            synced_fields = self._context.project_service.ensure_solver_support_files(
                 self._current_project,
+                parameters,
                 ("movingWall", "fixedWalls", "importedGeometry"),
             )
         except (OSError, ValueError) as error:
             self._show_error(f"一键仿真准备失败：{error}")
             return
 
-        self._workspace_tabs.setCurrentIndex(4)
+        self._workspace_tabs.setCurrentIndex(3)
         self._bottom_tabs.setCurrentIndex(0)
         self._task_text.setPlainText("任务状态：一键仿真流水线运行中")
         self._current_process_output = ""
@@ -3375,7 +3376,7 @@ class MainWindow(QMainWindow):
             "echo FOAMDESK_STEP:blockMesh && blockMesh && "
             "echo FOAMDESK_STEP:snappyHexMesh && snappyHexMesh -overwrite && "
             "echo FOAMDESK_STEP:checkMesh && checkMesh && "
-            "echo FOAMDESK_STEP:icoFoam && icoFoam"
+            f"echo FOAMDESK_STEP:{shlex.quote(parameters.solver_name)} && {shlex.quote(parameters.solver_name)}"
         )
         self._foam_process = QProcess(self)
         self._foam_process.setProgram("bash")
@@ -3386,7 +3387,8 @@ class MainWindow(QMainWindow):
         self._foam_process.start()
         self._append_log(f"一键仿真已生成配置：{dict_path}")
         self._append_log(
-            "执行流程：生成 snappyHexMeshDict -> blockMesh -> snappyHexMesh -overwrite -> checkMesh -> icoFoam"
+            "执行流程：生成 snappyHexMeshDict -> blockMesh -> snappyHexMesh -overwrite -> "
+            f"checkMesh -> {parameters.solver_name}"
         )
 
     def _preview_imported_stl(self) -> None:
@@ -3512,6 +3514,7 @@ class MainWindow(QMainWindow):
             parameters = self._read_parameter_inputs()
             self._context.project_service.ensure_minimal_case_template(self._current_project)
             self._context.case_parameter_service.save(self._current_project, parameters)
+            solver_files = self._context.project_service.ensure_solver_support_files(self._current_project, parameters)
         except ValueError as error:
             self._show_error(f"参数不合法：{error}")
             return False
@@ -3534,6 +3537,9 @@ class MainWindow(QMainWindow):
             "参数已写入 system/controlDict、system/fvSchemes、system/fvSolution、"
             "constant/physicalProperties 和 system/foamdesk_simulation_config.json。"
         )
+        relative_files = [str(path.relative_to(self._current_project.case_dir)) for path in solver_files]
+        self._append_log("已生成求解器/湍流/patch 边界支持文件：")
+        self._append_log("\n".join(f"- {path}" for path in relative_files))
         self._set_status("参数保存完成。")
         return True
 
@@ -4365,7 +4371,7 @@ class MainWindow(QMainWindow):
             return None
 
     def _show_visualization_feedback(self, title: str, detail: str) -> None:
-        self._workspace_tabs.setCurrentIndex(7)
+        self._workspace_tabs.setCurrentIndex(6)
         if hasattr(self, "_results_text"):
             self._results_text.setPlainText(f"{title}\n\n{detail}")
 
@@ -4471,11 +4477,11 @@ class MainWindow(QMainWindow):
         elif index == 1:
             self._search_projects()
         elif index == 2:
-            self._workspace_tabs.setCurrentIndex(4)
+            self._workspace_tabs.setCurrentIndex(3)
             self._bottom_tabs.setCurrentIndex(1)
             self._set_status("已切换到任务视图。")
         elif index == 3:
-            self._workspace_tabs.setCurrentIndex(7)
+            self._workspace_tabs.setCurrentIndex(6)
             self._refresh_results_panel()
             self._set_status("已切换到结果视图。")
 
@@ -4735,6 +4741,11 @@ class MainWindow(QMainWindow):
 
         if not self._save_case_parameters():
             return
+        try:
+            parameters = self._context.case_parameter_service.load(self._current_project)
+        except (OSError, ValueError) as error:
+            self._show_error(f"读取求解器配置失败：{error}")
+            return
 
         repaired_files = self._context.project_service.ensure_minimal_case_template(self._current_project)
         if repaired_files:
@@ -4747,7 +4758,7 @@ class MainWindow(QMainWindow):
             self._show_error("当前 case 缺少 system/blockMeshDict。")
             return
 
-        self._workspace_tabs.setCurrentIndex(4)
+        self._workspace_tabs.setCurrentIndex(3)
         self._bottom_tabs.setCurrentIndex(0)
         self._task_text.setPlainText("任务状态：最小仿真运行中")
         self._current_process_output = ""
@@ -4759,7 +4770,7 @@ class MainWindow(QMainWindow):
         command = (
             f"source {shlex.quote(status.env_script_path)} >/dev/null 2>&1 && "
             f"cd {shlex.quote(str(self._current_project.case_dir))} && "
-            "blockMesh && icoFoam"
+            f"blockMesh && {shlex.quote(parameters.solver_name)}"
         )
         self._foam_process = QProcess(self)
         self._foam_process.setProgram("bash")
@@ -4769,7 +4780,7 @@ class MainWindow(QMainWindow):
         self._foam_process.finished.connect(self._on_process_finished)
         self._foam_process.start()
         self._append_log(f"启动最小仿真：{self._current_project.case_dir}")
-        self._append_log("执行流程：blockMesh -> icoFoam")
+        self._append_log(f"执行流程：blockMesh -> {parameters.solver_name}")
 
     def _stop_current_process(self) -> None:
         if not self._foam_process or self._foam_process.state() == QProcess.ProcessState.NotRunning:

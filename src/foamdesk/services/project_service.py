@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from foamdesk.domain.models import SimulationProject
+from foamdesk.domain.models import SimulationParameters, SimulationProject
 from foamdesk.services.settings_service import AppSettingsService
 
 
@@ -194,6 +194,69 @@ class ProjectService:
             ),
             encoding="utf-8",
         )
+        written_files.append(config_path)
+        return written_files
+
+    def ensure_solver_support_files(
+        self,
+        project: SimulationProject,
+        parameters: SimulationParameters,
+        boundary_names: tuple[str, ...] | None = None,
+    ) -> list[Path]:
+        """Generate solver-specific field files using the current patch names."""
+        boundary_names = boundary_names or self._extract_boundary_names(project.case_dir / "system" / "blockMeshDict")
+        if not boundary_names:
+            boundary_names = ("inlet", "outlet", "fixedWalls")
+        settings = self.load_boundary_conditions(project)
+        zero_dir = project.case_dir / "0"
+        constant_dir = project.case_dir / "constant"
+        zero_dir.mkdir(parents=True, exist_ok=True)
+        constant_dir.mkdir(parents=True, exist_ok=True)
+
+        written_files: list[Path] = []
+        files = {
+            zero_dir / "U": self._default_velocity_field(boundary_names, settings),
+            zero_dir / "p": self._default_pressure_field(boundary_names, settings),
+            constant_dir / "turbulenceProperties": self._turbulence_properties(parameters),
+        }
+        if parameters.turbulence_model != "laminar":
+            files.update(
+                {
+                    zero_dir / "k": self._default_turbulence_scalar_field(
+                        "k",
+                        "[0 2 -2 0 0 0 0]",
+                        "0.01",
+                        boundary_names,
+                    ),
+                    zero_dir / "epsilon": self._default_turbulence_scalar_field(
+                        "epsilon",
+                        "[0 2 -3 0 0 0 0]",
+                        "0.01",
+                        boundary_names,
+                    ),
+                    zero_dir / "nut": self._default_nut_field(boundary_names),
+                }
+            )
+
+        for path, content in files.items():
+            path.write_text(content, encoding="utf-8")
+            written_files.append(path)
+
+        patch_config = {
+            "solver": parameters.solver_name,
+            "turbulence_model": parameters.turbulence_model,
+            "patches": [
+                {
+                    "name": name,
+                    "role": self._boundary_role(name),
+                    "U": self._velocity_boundary_type(name, settings),
+                    "p": self._pressure_boundary_type(name),
+                }
+                for name in boundary_names
+            ],
+        }
+        config_path = project.case_dir / "system" / "foamdesk_patch_boundary_config.json"
+        config_path.write_text(json.dumps(patch_config, ensure_ascii=False, indent=2), encoding="utf-8")
         written_files.append(config_path)
         return written_files
 
@@ -425,6 +488,16 @@ class ProjectService:
             pressure_field.write_text(self._default_pressure_field(boundary_names), encoding="utf-8")
             written_files.append(pressure_field)
         return written_files
+
+    def _boundary_role(self, name: str) -> str:
+        normalized_name = name.lower()
+        if "inlet" in normalized_name or "movingwall" in normalized_name:
+            return "inlet"
+        if "outlet" in normalized_name:
+            return "outlet"
+        if "symmetry" in normalized_name or "symmetryplane" in normalized_name:
+            return "symmetry"
+        return "wall"
 
     def _extract_boundary_names(self, block_mesh_dict: Path) -> tuple[str, ...]:
         if not block_mesh_dict.exists():
@@ -673,8 +746,8 @@ __BOUNDARY_FIELD__
 """.replace("__BOUNDARY_FIELD__", boundary_field)
 
     def _velocity_boundary_entry(self, name: str, settings: BoundaryConditionSettings) -> str:
-        normalized_name = name.lower()
-        if "movingwall" in normalized_name or "inlet" in normalized_name:
+        boundary_type = self._velocity_boundary_type(name, settings)
+        if boundary_type == "fixedValue":
             ux, uy, uz = settings.inlet_velocity
             return f"""    {name}
     {{
@@ -682,30 +755,188 @@ __BOUNDARY_FIELD__
         value           uniform ({ux:g} {uy:g} {uz:g});
     }}
 """
-        if "outlet" in normalized_name:
+        if boundary_type == "zeroGradient":
             return f"""    {name}
     {{
         type            zeroGradient;
     }}
 """
+        if boundary_type == "symmetryPlane":
+            return f"""    {name}
+    {{
+        type            symmetryPlane;
+    }}
+"""
         return f"""    {name}
     {{
-        type            {settings.wall_type};
+        type            {boundary_type};
     }}
 """
 
     def _pressure_boundary_entry(self, name: str, settings: BoundaryConditionSettings) -> str:
-        normalized_name = name.lower()
-        if "outlet" in normalized_name:
+        boundary_type = self._pressure_boundary_type(name)
+        if boundary_type == "fixedValue":
             return f"""    {name}
     {{
         type            fixedValue;
         value           uniform {settings.outlet_pressure:g};
     }}
 """
+        if boundary_type == "symmetryPlane":
+            return f"""    {name}
+    {{
+        type            symmetryPlane;
+    }}
+"""
         return f"""    {name}
     {{
         type            zeroGradient;
+    }}
+"""
+
+    def _velocity_boundary_type(self, name: str, settings: BoundaryConditionSettings) -> str:
+        role = self._boundary_role(name)
+        if role == "inlet":
+            return "fixedValue"
+        if role == "outlet":
+            return "zeroGradient"
+        if role == "symmetry":
+            return "symmetryPlane"
+        return settings.wall_type
+
+    def _pressure_boundary_type(self, name: str) -> str:
+        role = self._boundary_role(name)
+        if role == "outlet":
+            return "fixedValue"
+        if role == "symmetry":
+            return "symmetryPlane"
+        return "zeroGradient"
+
+    def _turbulence_properties(self, parameters: SimulationParameters) -> str:
+        if parameters.turbulence_model == "laminar":
+            return """FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      turbulenceProperties;
+}
+
+simulationType  laminar;
+"""
+        return """FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      turbulenceProperties;
+}
+
+simulationType  RAS;
+
+RAS
+{
+    model           kEpsilon;
+    turbulence      on;
+    printCoeffs     on;
+}
+"""
+
+    def _default_turbulence_scalar_field(
+        self,
+        object_name: str,
+        dimensions: str,
+        internal_value: str,
+        boundary_names: tuple[str, ...],
+    ) -> str:
+        boundary_field = "\n".join(
+            self._turbulence_scalar_boundary_entry(name, object_name, internal_value)
+            for name in boundary_names
+        )
+        return f"""FoamFile
+{{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    object      {object_name};
+}}
+
+dimensions      {dimensions};
+internalField   uniform {internal_value};
+
+boundaryField
+{{
+{boundary_field}
+}}
+"""
+
+    def _turbulence_scalar_boundary_entry(self, name: str, object_name: str, value: str) -> str:
+        role = self._boundary_role(name)
+        if role == "inlet":
+            return f"""    {name}
+    {{
+        type            fixedValue;
+        value           uniform {value};
+    }}
+"""
+        if role == "outlet":
+            return f"""    {name}
+    {{
+        type            zeroGradient;
+    }}
+"""
+        if role == "symmetry":
+            return f"""    {name}
+    {{
+        type            symmetryPlane;
+    }}
+"""
+        wall_function = "kqRWallFunction" if object_name == "k" else "epsilonWallFunction"
+        return f"""    {name}
+    {{
+        type            {wall_function};
+        value           uniform {value};
+    }}
+"""
+
+    def _default_nut_field(self, boundary_names: tuple[str, ...]) -> str:
+        boundary_field = "\n".join(self._nut_boundary_entry(name) for name in boundary_names)
+        return f"""FoamFile
+{{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    object      nut;
+}}
+
+dimensions      [0 2 -1 0 0 0 0];
+internalField   uniform 0;
+
+boundaryField
+{{
+{boundary_field}
+}}
+"""
+
+    def _nut_boundary_entry(self, name: str) -> str:
+        role = self._boundary_role(name)
+        if role == "symmetry":
+            return f"""    {name}
+    {{
+        type            symmetryPlane;
+    }}
+"""
+        if role == "wall":
+            return f"""    {name}
+    {{
+        type            nutkWallFunction;
+        value           uniform 0;
+    }}
+"""
+        return f"""    {name}
+    {{
+        type            calculated;
+        value           uniform 0;
     }}
 """
 
