@@ -1923,7 +1923,7 @@ class MainWindow(QMainWindow):
 
         title = QLabel("求解运行")
         title.setStyleSheet("font-size: 22px; font-weight: 600;")
-        description = QLabel("当前阶段执行最小链路：blockMesh -> icoFoam。")
+        description = QLabel("绘制几何 + 计算域 + 求解器 + 参数都配置好后，一键启动仿真。")
         description.setWordWrap(True)
 
         self._solver_status_label = QLabel("状态：空闲")
@@ -1932,13 +1932,14 @@ class MainWindow(QMainWindow):
         self._solver_command_label = QLabel("执行命令：blockMesh && icoFoam")
 
         action_row = QHBoxLayout()
-        run_button = QPushButton("运行最小仿真")
-        stop_button = QPushButton("停止当前任务")
-        refresh_button = QPushButton("刷新摘要")
-        run_button.clicked.connect(lambda _checked=False: self._run_minimal_simulation())
+        start_btn = QPushButton("一键启动仿真")
+        start_btn.setStyleSheet("QPushButton { padding: 14px 32px; font-size: 18px; font-weight: 700; background: #0e639c; color: #ffffff; border: none; border-radius: 6px; } QPushButton:hover { background: #1177bb; }")
+        start_btn.clicked.connect(lambda _checked=False: self._run_full_pipeline())
+        stop_button = QPushButton("停止")
         stop_button.clicked.connect(lambda _checked=False: self._stop_current_process())
+        refresh_button = QPushButton("刷新")
         refresh_button.clicked.connect(lambda _checked=False: self._refresh_solver_run_panel())
-        action_row.addWidget(run_button)
+        action_row.addWidget(start_btn)
         action_row.addWidget(stop_button)
         action_row.addWidget(refresh_button)
         action_row.addStretch(1)
@@ -4864,6 +4865,50 @@ class MainWindow(QMainWindow):
             visible = not normalized or normalized in item.text(0).lower()
             item.setHidden(not visible)
         self._set_status("项目搜索已应用。")
+
+    def _run_full_pipeline(self) -> None:
+        if self._foam_process and self._foam_process.state() != QProcess.ProcessState.NotRunning:
+            self._show_error("已有任务正在运行，请先停止。")
+            return
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return
+        status = self._context.environment_detector.detect()
+        if not status.is_available or not status.env_script_path:
+            self._show_error(f"OpenFOAM 环境不可用：{status.detail}")
+            return
+        env = "source " + shlex.quote(status.env_script_path) + " >/dev/null 2>&1"
+        case = shlex.quote(str(self._current_project.case_dir))
+        solver = self._solver_name_combo.currentData() if hasattr(self, "_solver_name_combo") else "icoFoam"
+        has_stl = False
+        ts = self._current_project.case_dir / "constant" / "triSurface"
+        if ts.exists():
+            for f in ts.iterdir():
+                if f.suffix.lower() == ".stl":
+                    has_stl = True
+                    break
+        steps = ["blockMesh"]
+        if has_stl:
+            steps.append("snappyHexMesh -overwrite")
+        steps.append(solver)
+        cmd = " && ".join(steps)
+        self._bottom_tabs.setCurrentIndex(0)
+        self._task_text.setPlainText("任务状态：全流程仿真运行中")
+        self._current_process_output = ""
+        self._active_process_kind = "full_pipeline"
+        if hasattr(self, "_solver_command_label"):
+            self._solver_command_label.setText("执行命令：" + cmd)
+        self._refresh_solver_run_panel("全流程仿真运行中")
+        self._set_status("全流程仿真运行中。")
+        self._append_log("启动全流程：" + cmd)
+        self._foam_process = QProcess(self)
+        self._foam_process.setProgram("bash")
+        self._foam_process.setArguments(["-lc", env + " && cd " + case + " && " + cmd])
+        self._foam_process.readyReadStandardOutput.connect(self._read_process_stdout)
+        self._foam_process.readyReadStandardError.connect(self._read_process_stderr)
+        self._foam_process.finished.connect(self._on_process_finished)
+        self._foam_process.start()
+
 
     def _run_minimal_simulation(self) -> None:
         if self._foam_process and self._foam_process.state() != QProcess.ProcessState.NotRunning:
