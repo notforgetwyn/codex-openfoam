@@ -1933,7 +1933,7 @@ class MainWindow(QMainWindow):
 
         action_row = QHBoxLayout()
         start_btn = QPushButton("一键启动仿真")
-        start_btn.setStyleSheet("QPushButton { padding: 14px 32px; font-size: 18px; font-weight: 700; background: #0e639c; color: #ffffff; border: none; border-radius: 6px; } QPushButton:hover { background: #1177bb; }")
+        
         start_btn.clicked.connect(lambda _checked=False: self._run_full_pipeline())
         stop_button = QPushButton("停止")
         stop_button.clicked.connect(lambda _checked=False: self._stop_current_process())
