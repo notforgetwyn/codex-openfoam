@@ -938,6 +938,16 @@ class VtkViewerDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
+    TAB_PROJECT_HOME = 0
+    TAB_DRAW_GEOMETRY = 1
+    TAB_SIMULATION_PREPARE = 2
+    TAB_SOLVER_SELECT = 3
+    TAB_PARAMETERS = 4
+    TAB_SOLVER_RUN = 5
+    TAB_ENVIRONMENT = 6
+    TAB_SETTINGS = 7
+    TAB_RESULTS = 8
+
     def __init__(self, context: ApplicationContext, initial_project: SimulationProject | None = None) -> None:
         super().__init__()
         self._context = context
@@ -948,6 +958,7 @@ class MainWindow(QMainWindow):
         self._active_process_kind = "idle"
         self._current_process_output = ""
         self._last_diagnostic_summary = "暂无诊断。"
+        self._suspend_draw_geometry_persist = False
         self._vtk_viewer: VtkViewerDialog | None = None
         self._visual_animation_timer = QTimer(self)
         self._visual_animation_timer.timeout.connect(self._advance_visualization_frame)
@@ -959,6 +970,10 @@ class MainWindow(QMainWindow):
         self._refresh_status_bar()
         if initial_project is not None:
             self._activate_project(initial_project, "已恢复上次项目。")
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self._persist_draw_geometry_state()
+        super().closeEvent(event)
 
     def _build_ui(self) -> None:
         self._build_status_bar()
@@ -1117,6 +1132,7 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.setTabsClosable(False)
         self._workspace_tabs.addTab(self._build_project_home_tab(), "项目主页")
         self._workspace_tabs.addTab(self._build_draw_geometry_tab(), "绘制几何")
+        self._workspace_tabs.addTab(self._build_simulation_prepare_tab(), "仿真准备")
         self._workspace_tabs.addTab(self._build_solver_select_tab(), "求解器选择")
         self._workspace_tabs.addTab(self._build_parameter_tab(), "仿真参数")
         self._workspace_tabs.addTab(self._build_solver_run_tab(), "求解运行")
@@ -1350,8 +1366,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
         layout.addWidget(desc)
 
-        dv = [(0,0,0),(1,0,0),(1,1,0),(0,1,0),(0,0,1),(1,0,1),(1,1,1),(0,1,1)]
-        self._geo_objects = [{"name":"计算域","verts":list(dv),"edges":[],"block_v":[0,1,2,3,4,5,6,7],"is_domain":True,"nx":10,"ny":10,"nz":10,"grading":"1 1 1"}]
+        self._geo_objects = self._default_draw_geometry_objects()
         self._active_obj_idx = 0
 
         obj_row = QHBoxLayout()
@@ -1483,9 +1498,68 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         scroll.setWidget(content)
         root_layout.addWidget(scroll)
+        self._load_draw_geometry_state()
         self._load_active_object_to_ui()
         self._refresh_draw_geo_preview()
         return wrapper
+
+    def _build_simulation_prepare_tab(self) -> QWidget:
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        title = QLabel("仿真准备")
+        title.setStyleSheet("font-size: 22px; font-weight: 600;")
+        description = QLabel(
+            "这个页面连接“绘制几何”到“求解器选择 / 仿真参数 / 求解运行”。"
+            "在绘制几何页生成 blockMeshDict 和 STL 后，先在这里检查并补齐完整仿真所需文件。"
+        )
+        description.setWordWrap(True)
+
+        action_row = QHBoxLayout()
+        refresh_button = QPushButton("刷新准备状态")
+        prepare_button = QPushButton("补齐仿真文件")
+        solver_button = QPushButton("进入求解器选择")
+        parameter_button = QPushButton("进入仿真参数")
+        run_page_button = QPushButton("进入求解运行")
+        start_button = QPushButton("一键启动仿真")
+        refresh_button.clicked.connect(lambda _checked=False: self._refresh_simulation_prepare_panel())
+        prepare_button.clicked.connect(lambda _checked=False: self._prepare_simulation_from_geometry())
+        solver_button.clicked.connect(lambda _checked=False: self._open_solver_select_tab())
+        parameter_button.clicked.connect(lambda _checked=False: self._open_parameter_tab())
+        run_page_button.clicked.connect(lambda _checked=False: self._open_solver_run_tab())
+        start_button.clicked.connect(lambda _checked=False: self._run_simulation_pipeline())
+        for button in (refresh_button, prepare_button, solver_button, parameter_button, run_page_button, start_button):
+            action_row.addWidget(button)
+        action_row.addStretch(1)
+
+        self._simulation_prepare_status = QTextEdit()
+        self._simulation_prepare_status.setReadOnly(True)
+        self._simulation_prepare_status.setMinimumHeight(260)
+        self._simulation_prepare_status.setPlainText("请先新建或打开项目。")
+
+        self._simulation_prepare_flow = QTextEdit()
+        self._simulation_prepare_flow.setReadOnly(True)
+        self._simulation_prepare_flow.setMaximumHeight(180)
+        self._simulation_prepare_flow.setPlainText(
+            "推荐流程：\n"
+            "1. 绘制几何：画计算域和物体，点击“生成 blockMeshDict + STL”。\n"
+            "2. 仿真准备：点击“刷新准备状态”，确认 blockMeshDict、STL、参数文件是否齐全。\n"
+            "3. 仿真准备：点击“补齐仿真文件”，生成 controlDict、fvSchemes、fvSolution、物性和边界字段。\n"
+            "4. 求解器选择：选择 icoFoam / simpleFoam / pisoFoam。\n"
+            "5. 仿真参数：设置时间、步长、写出间隔、密度、粘度和残差。\n"
+            "6. 求解运行：点击一键启动仿真并查看日志。\n"
+        )
+
+        layout.addWidget(title)
+        layout.addWidget(description)
+        layout.addLayout(action_row)
+        layout.addWidget(self._simulation_prepare_status)
+        layout.addWidget(self._simulation_prepare_flow)
+        layout.addStretch(1)
+        return wrapper
+
     def _build_geometry_tab(self) -> QWidget:
         wrapper = QWidget()
         root_layout = QVBoxLayout(wrapper)
@@ -2025,16 +2099,36 @@ class MainWindow(QMainWindow):
         return wrapper
 
     def _open_settings_tab(self) -> None:
-        self._workspace_tabs.setCurrentIndex(5)
+        self._workspace_tabs.setCurrentIndex(self.TAB_SETTINGS)
         self._set_status("已打开设置页。")
 
     def _open_environment_tab(self) -> None:
-        self._workspace_tabs.setCurrentIndex(4)
+        self._workspace_tabs.setCurrentIndex(self.TAB_ENVIRONMENT)
         self._refresh_environment_panels()
         self._set_status("已打开环境检查页。")
 
+    def _open_solver_select_tab(self) -> None:
+        self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_SELECT)
+        self._load_case_parameters()
+        self._set_status("已打开求解器选择页。")
+
+    def _open_parameter_tab(self) -> None:
+        self._workspace_tabs.setCurrentIndex(self.TAB_PARAMETERS)
+        self._load_case_parameters()
+        self._set_status("已打开仿真参数页。")
+
+    def _open_solver_run_tab(self) -> None:
+        self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_RUN)
+        self._refresh_solver_run_panel()
+        self._set_status("已打开求解运行页。")
+
+    def _open_simulation_prepare_tab(self) -> None:
+        self._workspace_tabs.setCurrentIndex(self.TAB_SIMULATION_PREPARE)
+        self._refresh_simulation_prepare_panel()
+        self._set_status("已打开仿真准备页。")
+
     def _open_geometry_tab(self) -> None:
-        self._workspace_tabs.setCurrentIndex(2)
+        self._workspace_tabs.setCurrentIndex(self.TAB_DRAW_GEOMETRY)
         self._refresh_geometry_panel()
         self._set_status("已打开几何/CAD 页。")
 
@@ -2065,7 +2159,7 @@ class MainWindow(QMainWindow):
             return
         self._append_log(f"STL 几何已导入：{asset.stored_path}")
         self._refresh_geometry_panel()
-        self._workspace_tabs.setCurrentIndex(2)
+        self._workspace_tabs.setCurrentIndex(self.TAB_DRAW_GEOMETRY)
         self._set_status("STL 几何导入完成。")
 
     def _read_stl_transform_dialog(
@@ -3131,7 +3225,7 @@ class MainWindow(QMainWindow):
             f"addLayers={self._snappy_add_layers_checkbox.isChecked()}"
         )
         self._refresh_geometry_panel()
-        self._workspace_tabs.setCurrentIndex(2)
+        self._workspace_tabs.setCurrentIndex(self.TAB_SIMULATION_PREPARE)
         self._set_status("snappyHexMeshDict 生成完成。")
 
     def _select_stl_asset_for_snappy(self) -> str | None:
@@ -3186,7 +3280,7 @@ class MainWindow(QMainWindow):
             self._show_error("当前 Case 缺少 system/blockMeshDict，snappyHexMesh 需要先有背景网格。")
             return
 
-        self._workspace_tabs.setCurrentIndex(2)
+        self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_RUN)
         self._bottom_tabs.setCurrentIndex(0)
         self._task_text.setPlainText("任务状态：snappyHexMesh 运行中")
         self._current_process_output = ""
@@ -3228,7 +3322,7 @@ class MainWindow(QMainWindow):
             self._show_error("当前 Case 还没有网格，请先运行 blockMesh 或 snappyHexMesh。")
             return
 
-        self._workspace_tabs.setCurrentIndex(2)
+        self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_RUN)
         self._bottom_tabs.setCurrentIndex(0)
         self._task_text.setPlainText("任务状态：checkMesh 运行中")
         self._current_process_output = ""
@@ -3284,7 +3378,7 @@ class MainWindow(QMainWindow):
             self._show_error(f"一键前处理无法生成 snappyHexMeshDict：{error}")
             return
 
-        self._workspace_tabs.setCurrentIndex(2)
+        self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_RUN)
         self._bottom_tabs.setCurrentIndex(0)
         self._task_text.setPlainText("任务状态：一键前处理运行中")
         self._current_process_output = ""
@@ -3356,7 +3450,7 @@ class MainWindow(QMainWindow):
             self._show_error(f"一键仿真准备失败：{error}")
             return
 
-        self._workspace_tabs.setCurrentIndex(3)
+        self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_RUN)
         self._bottom_tabs.setCurrentIndex(0)
         self._task_text.setPlainText("任务状态：一键仿真流水线运行中")
         self._current_process_output = ""
@@ -4371,7 +4465,7 @@ class MainWindow(QMainWindow):
             return None
 
     def _show_visualization_feedback(self, title: str, detail: str) -> None:
-        self._workspace_tabs.setCurrentIndex(6)
+        self._workspace_tabs.setCurrentIndex(self.TAB_RESULTS)
         if hasattr(self, "_results_text"):
             self._results_text.setPlainText(f"{title}\n\n{detail}")
 
@@ -4470,18 +4564,108 @@ class MainWindow(QMainWindow):
         )
         self._append_log(f"环境检查完成：{status_flag}，OpenFOAM={status.foam_version or '未知'}")
 
+    def _refresh_simulation_prepare_panel(self) -> None:
+        if not hasattr(self, "_simulation_prepare_status"):
+            return
+        if self._current_project is None:
+            self._simulation_prepare_status.setPlainText("请先新建或打开项目。")
+            return
+
+        case_dir = self._current_project.case_dir
+        required_files = [
+            case_dir / "system" / "blockMeshDict",
+            case_dir / "system" / "controlDict",
+            case_dir / "system" / "fvSchemes",
+            case_dir / "system" / "fvSolution",
+            case_dir / "constant" / "physicalProperties",
+            case_dir / "0" / "U",
+            case_dir / "0" / "p",
+        ]
+        stl_dir = case_dir / "constant" / "triSurface"
+        stl_files = sorted(stl_dir.glob("*.stl")) if stl_dir.exists() else []
+        snappy_dict = case_dir / "system" / "snappyHexMeshDict"
+        draw_state = self._draw_geometry_state_path()
+        missing = [path for path in required_files if not path.exists()]
+
+        try:
+            parameters = self._context.case_parameter_service.load(self._current_project)
+            parameter_text = (
+                f"solver={parameters.solver_name}, endTime={parameters.end_time:g}, "
+                f"deltaT={parameters.delta_t:g}, writeInterval={parameters.write_interval}, "
+                f"rho={parameters.density:g}, nu={parameters.viscosity:g}, turbulence={parameters.turbulence_model}"
+            )
+        except (OSError, ValueError) as error:
+            parameter_text = f"参数尚未完整：{error}"
+
+        lines = [
+            "仿真准备状态",
+            "",
+            f"- 当前项目：{self._current_project.name}",
+            f"- 当前 Case：{self._current_project.case_name}",
+            f"- Case 路径：{case_dir}",
+            f"- 绘制几何草稿：{'已保存' if draw_state and draw_state.exists() else '未保存'}",
+            f"- blockMeshDict：{'已生成' if (case_dir / 'system' / 'blockMeshDict').exists() else '缺失'}",
+            f"- STL 几何：{len(stl_files)} 个" + (f"（{', '.join(path.name for path in stl_files[:5])}）" if stl_files else ""),
+            f"- snappyHexMeshDict：{'已生成' if snappy_dict.exists() else '未生成'}",
+            f"- 参数/求解器：{parameter_text}",
+            "",
+            "完整仿真所需文件检查：",
+        ]
+        for path in required_files:
+            lines.append(f"- {'OK' if path.exists() else '缺失'}：{path.relative_to(case_dir)}")
+
+        if missing:
+            lines.extend(
+                [
+                    "",
+                    "下一步建议：点击“补齐仿真文件”，先生成求解器、参数、物性和边界字段文件。",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "",
+                    "下一步建议：进入“求解器选择”和“仿真参数”确认配置，然后进入“求解运行”启动仿真。",
+                ]
+            )
+        self._simulation_prepare_status.setPlainText("\n".join(lines))
+
+    def _prepare_simulation_from_geometry(self) -> bool:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return False
+        self._persist_draw_geometry_state()
+        try:
+            self._context.project_service.ensure_minimal_case_template(self._current_project)
+            parameters = self._context.case_parameter_service.load(self._current_project)
+            self._context.case_parameter_service.save(self._current_project, parameters)
+            solver_files = self._context.project_service.ensure_solver_support_files(self._current_project, parameters)
+        except (OSError, ValueError) as error:
+            self._show_error(f"仿真准备失败：{error}")
+            return False
+
+        self._append_log("仿真准备完成：已补齐求解器、参数、物性和边界字段文件。")
+        if solver_files:
+            relative_files = [str(path.relative_to(self._current_project.case_dir)) for path in solver_files]
+            self._append_log("\n".join(f"- {path}" for path in relative_files))
+        self._load_case_parameters()
+        self._refresh_solver_run_panel("仿真准备完成")
+        self._refresh_simulation_prepare_panel()
+        self._set_status("仿真准备完成。")
+        return True
+
     def _on_activity_changed(self, index: int) -> None:
         if index == 0:
-            self._workspace_tabs.setCurrentIndex(0)
+            self._workspace_tabs.setCurrentIndex(self.TAB_PROJECT_HOME)
             self._set_status("已切换到资源视图。")
         elif index == 1:
             self._search_projects()
         elif index == 2:
-            self._workspace_tabs.setCurrentIndex(3)
+            self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_RUN)
             self._bottom_tabs.setCurrentIndex(1)
             self._set_status("已切换到任务视图。")
         elif index == 3:
-            self._workspace_tabs.setCurrentIndex(6)
+            self._workspace_tabs.setCurrentIndex(self.TAB_RESULTS)
             self._refresh_results_panel()
             self._set_status("已切换到结果视图。")
 
@@ -4527,12 +4711,14 @@ class MainWindow(QMainWindow):
         self._clear_case_runtime_state()
         self._context.project_service.remember_project(project)
         self._refresh_project_tree()
-        self._workspace_tabs.setCurrentIndex(0)
+        self._workspace_tabs.setCurrentIndex(self.TAB_PROJECT_HOME)
         self._case_label.setText(f"当前 Case: {project.name}/{project.case_name}")
         self._load_case_parameters()
         self._refresh_solver_run_panel()
         self._refresh_results_panel()
         self._refresh_geometry_panel()
+        self._load_draw_geometry_state()
+        self._refresh_simulation_prepare_panel()
         self._restore_project_result_state()
         self._append_log(f"当前项目：{project.path}")
         self._set_status(status_text)
@@ -4758,7 +4944,7 @@ class MainWindow(QMainWindow):
             self._show_error("当前 case 缺少 system/blockMeshDict。")
             return
 
-        self._workspace_tabs.setCurrentIndex(3)
+        self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_RUN)
         self._bottom_tabs.setCurrentIndex(0)
         self._task_text.setPlainText("任务状态：最小仿真运行中")
         self._current_process_output = ""
@@ -4982,7 +5168,7 @@ class MainWindow(QMainWindow):
         if self._current_project is None:
             self._show_error("当前没有打开的项目。")
             return
-        self._workspace_tabs.setCurrentIndex(0)
+        self._workspace_tabs.setCurrentIndex(self.TAB_PROJECT_HOME)
         self._append_log(f"当前 Case 目录：{self._current_project.case_dir}")
         self._set_status("已输出当前 Case 目录。")
 
@@ -5005,6 +5191,106 @@ class MainWindow(QMainWindow):
     def _set_status(self, message: str) -> None:
         self._task_label.setText(f"任务状态: {message}")
         self._append_log(message)
+    # --- Draw geometry persistence ---
+    def _default_draw_geometry_objects(self) -> list[dict]:
+        dv = [(0,0,0),(1,0,0),(1,1,0),(0,1,0),(0,0,1),(1,0,1),(1,1,1),(0,1,1)]
+        return [{"name":"计算域","verts":list(dv),"edges":[],"block_v":[0,1,2,3,4,5,6,7],"is_domain":True,"nx":10,"ny":10,"nz":10,"grading":"1 1 1"}]
+
+    def _draw_geometry_state_path(self) -> Path | None:
+        if self._current_project is None:
+            return None
+        return self._current_project.case_dir / ".foamdesk" / "draw_geometry_state.json"
+
+    def _normalize_draw_geometry_object(self, raw: dict, index: int) -> dict:
+        fallback = self._default_draw_geometry_objects()[0] if index == 0 else {"name":f"几何体{index}","verts":[],"edges":[],"is_domain":False}
+        if not isinstance(raw, dict):
+            raw = fallback
+        obj = dict(raw)
+        obj["name"] = str(obj.get("name") or fallback["name"])
+        verts = []
+        for vert in obj.get("verts", []):
+            if not isinstance(vert, (list, tuple)) or len(vert) < 3:
+                continue
+            try:
+                verts.append((float(vert[0]), float(vert[1]), float(vert[2])))
+            except (TypeError, ValueError):
+                continue
+        obj["verts"] = verts or list(fallback.get("verts", []))
+        edges = []
+        for edge in obj.get("edges", []):
+            if not isinstance(edge, (list, tuple)) or len(edge) < 3:
+                continue
+            try:
+                edges.append((str(edge[0]), int(edge[1]), int(edge[2]), str(edge[3]) if len(edge) > 3 else ""))
+            except (TypeError, ValueError):
+                continue
+        obj["edges"] = edges
+        if index == 0:
+            obj["is_domain"] = True
+            block_v = obj.get("block_v", fallback["block_v"])
+            obj["block_v"] = [int(v) for v in block_v[:8]] if isinstance(block_v, list) else list(fallback["block_v"])
+            while len(obj["block_v"]) < 8:
+                obj["block_v"].append(len(obj["block_v"]))
+            obj["nx"] = max(1, int(obj.get("nx", 10)))
+            obj["ny"] = max(1, int(obj.get("ny", 10)))
+            obj["nz"] = max(1, int(obj.get("nz", 10)))
+            obj["grading"] = str(obj.get("grading") or "1 1 1")
+        else:
+            obj["is_domain"] = False
+        return obj
+
+    def _load_draw_geometry_state(self) -> bool:
+        path = self._draw_geometry_state_path()
+        if path is None or not path.exists() or not hasattr(self, "_obj_combo"):
+            return False
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            self._append_log(f"绘制几何草稿读取失败：{error}")
+            return False
+        raw_objects = data.get("objects", [])
+        if not isinstance(raw_objects, list) or not raw_objects:
+            return False
+        self._suspend_draw_geometry_persist = True
+        try:
+            self._geo_objects = [self._normalize_draw_geometry_object(obj, idx) for idx, obj in enumerate(raw_objects)]
+            self._active_obj_idx = min(max(int(data.get("active_object_index", 0)), 0), len(self._geo_objects) - 1)
+            boundary = data.get("boundary", {}) if isinstance(data.get("boundary", {}), dict) else {}
+            if hasattr(self, "_geo_inlet"):
+                self._geo_inlet.setText(str(boundary.get("inlet", "inlet")))
+                self._geo_outlet.setText(str(boundary.get("outlet", "outlet")))
+                self._geo_walls.setText(str(boundary.get("walls", "fixedWalls")))
+            self._rebuild_obj_combo()
+            self._load_active_object_to_ui()
+            self._refresh_draw_geo_preview()
+        finally:
+            self._suspend_draw_geometry_persist = False
+        self._append_log(f"已恢复绘制几何草稿：{path}")
+        return True
+
+    def _persist_draw_geometry_state(self) -> None:
+        if getattr(self, "_suspend_draw_geometry_persist", False):
+            return
+        path = self._draw_geometry_state_path()
+        if path is None or not hasattr(self, "_vertex_table") or not hasattr(self, "_geo_inlet"):
+            return
+        try:
+            self._save_current_object()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            data = {
+                "version": 1,
+                "active_object_index": self._active_obj_idx,
+                "boundary": {
+                    "inlet": self._geo_inlet.text().strip() or "inlet",
+                    "outlet": self._geo_outlet.text().strip() or "outlet",
+                    "walls": self._geo_walls.text().strip() or "fixedWalls",
+                },
+                "objects": self._geo_objects,
+            }
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except (OSError, ValueError) as error:
+            self._append_log(f"绘制几何草稿保存失败：{error}")
+
     # --- Object management ---
     def _rebuild_obj_combo(self):
         self._obj_combo.blockSignals(True)
@@ -5038,6 +5324,7 @@ class MainWindow(QMainWindow):
         self._load_active_object_to_ui()
         self._rebuild_obj_combo()
         self._refresh_draw_geo_preview()
+        self._persist_draw_geometry_state()
 
     def _load_active_object_to_ui(self):
         obj = self._geo_objects[self._active_obj_idx]
@@ -5073,6 +5360,7 @@ class MainWindow(QMainWindow):
         self._load_active_object_to_ui()
         self._rebuild_obj_combo()
         self._refresh_draw_geo_preview()
+        self._persist_draw_geometry_state()
 
     def _delete_geo_object(self):
         if self._active_obj_idx == 0:
@@ -5083,6 +5371,7 @@ class MainWindow(QMainWindow):
         self._load_active_object_to_ui()
         self._rebuild_obj_combo()
         self._refresh_draw_geo_preview()
+        self._persist_draw_geometry_state()
 
     # --- Vertex helpers ---
     def _import_vertices_csv(self):
@@ -5101,6 +5390,7 @@ class MainWindow(QMainWindow):
                         continue
         self._save_vertex_table()
         self._refresh_draw_geo_preview()
+        self._persist_draw_geometry_state()
 
     def _import_edges_csv(self):
         fp, _ = QFileDialog.getOpenFileName(self, "导入边 CSV", "", "CSV (*.csv)")
@@ -5123,6 +5413,7 @@ class MainWindow(QMainWindow):
             self._geo_objects[self._active_obj_idx]["edges"] = list(self._edge_defs)
         self._update_edge_list()
         self._refresh_draw_geo_preview()
+        self._persist_draw_geometry_state()
 
 
     def _clear_all_vertices(self):
@@ -5132,6 +5423,7 @@ class MainWindow(QMainWindow):
         self._vertex_table.blockSignals(False)
         self._save_vertex_table()
         self._refresh_draw_geo_preview()
+        self._persist_draw_geometry_state()
 
     def _clear_all_edges(self):
         self._edge_defs = []
@@ -5139,6 +5431,7 @@ class MainWindow(QMainWindow):
             self._geo_objects[self._active_obj_idx]["edges"] = []
         self._update_edge_list()
         self._refresh_draw_geo_preview()
+        self._persist_draw_geometry_state()
 
 
     def _add_vertex_row(self, x=0.0, y=0.0, z=0.0):
@@ -5165,6 +5458,7 @@ class MainWindow(QMainWindow):
     def _on_vertex_table_changed(self):
         self._save_vertex_table()
         self._refresh_draw_geo_preview()
+        self._persist_draw_geometry_state()
 
     def _delete_selected_vertex(self):
         rows = set(i.row() for i in self._vertex_table.selectedIndexes())
@@ -5172,6 +5466,7 @@ class MainWindow(QMainWindow):
             self._vertex_table.removeRow(r)
         self._save_vertex_table()
         self._refresh_draw_geo_preview()
+        self._persist_draw_geometry_state()
 
     # --- Edge helpers ---
     def _add_edge_to_current(self):
@@ -5183,6 +5478,7 @@ class MainWindow(QMainWindow):
             self._geo_objects[self._active_obj_idx]["edges"] = list(self._edge_defs)
         self._update_edge_list()
         self._refresh_draw_geo_preview()
+        self._persist_draw_geometry_state()
 
     def _update_edge_list(self):
         lines = []
@@ -5208,12 +5504,14 @@ class MainWindow(QMainWindow):
                 self._geo_objects[self._active_obj_idx]["edges"] = list(self._edge_defs)
             self._edge_list.setPlainText("\n".join(lines))
             self._refresh_draw_geo_preview()
+            self._persist_draw_geometry_state()
 
     # --- Block helpers ---
     def _on_block_vert_changed(self):
         if self._geo_objects and self._active_obj_idx == 0:
             self._geo_objects[0]["block_v"] = [sb.value() for sb in self._block_vert_inputs]
         self._refresh_draw_geo_preview()
+        self._persist_draw_geometry_state()
 
     def _on_cell_changed(self):
         if self._geo_objects and self._active_obj_idx == 0:
@@ -5221,10 +5519,12 @@ class MainWindow(QMainWindow):
             obj["nx"] = self._geo_nx.value()
             obj["ny"] = self._geo_ny.value()
             obj["nz"] = self._geo_nz.value()
+        self._persist_draw_geometry_state()
 
     def _on_grading_changed(self):
         if self._geo_objects and self._active_obj_idx == 0:
             self._geo_objects[0]["grading"] = self._geo_grading.text().strip() or "1 1 1"
+        self._persist_draw_geometry_state()
 
 
     def _draw_edge_in_preview(self, axes, verts, etype, start, end, interp_str):
@@ -5377,10 +5677,10 @@ class MainWindow(QMainWindow):
                     sf.write(_struct.pack("<H", 0))
             self._append_log("STL 已导出: " + stl_name + " (" + str(len(tris)) + " 三角形)")
         self._set_status("blockMeshDict + STL 已生成。")
+        self._persist_draw_geometry_state()
 
     def _reset_draw_geometry(self):
-        dv = [(0,0,0),(1,0,0),(1,1,0),(0,1,0),(0,0,1),(1,0,1),(1,1,1),(0,1,1)]
-        self._geo_objects = [{"name":"计算域","verts":list(dv),"edges":[],"block_v":[0,1,2,3,4,5,6,7],"is_domain":True,"nx":10,"ny":10,"nz":10,"grading":"1 1 1"}]
+        self._geo_objects = self._default_draw_geometry_objects()
         self._active_obj_idx = 0
         self._edge_defs = []
         self._geo_inlet.setText("inlet")
@@ -5389,3 +5689,4 @@ class MainWindow(QMainWindow):
         self._rebuild_obj_combo()
         self._load_active_object_to_ui()
         self._refresh_draw_geo_preview()
+        self._persist_draw_geometry_state()

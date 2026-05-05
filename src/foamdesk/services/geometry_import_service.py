@@ -86,14 +86,12 @@ class GeometryImportService:
 
     def list_assets(self, project: SimulationProject) -> list[GeometryAsset]:
         manifest_path = self._manifest_path(project)
-        if not manifest_path.exists():
-            return []
-        try:
-            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return []
-
         assets: list[GeometryAsset] = []
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+
         for item in payload.get("assets", []):
             try:
                 stored_path = project.case_dir / str(item["stored_path"])
@@ -110,6 +108,27 @@ class GeometryImportService:
                 )
             except (KeyError, TypeError, ValueError):
                 continue
+        known_paths = {asset.stored_path.resolve() for asset in assets if asset.stored_path.exists()}
+        tri_surface_dir = project.case_dir / "constant" / "triSurface"
+        if tri_surface_dir.exists():
+            for stl_path in sorted(tri_surface_dir.glob("*.stl")):
+                try:
+                    resolved_path = stl_path.resolve()
+                except OSError:
+                    continue
+                if resolved_path in known_paths:
+                    continue
+                assets.append(
+                    GeometryAsset(
+                        name=stl_path.name,
+                        format="STL",
+                        source_path=str(stl_path),
+                        stored_path=stl_path,
+                        size_bytes=stl_path.stat().st_size,
+                        imported_at="auto-detected",
+                        transform=StlTransform(),
+                    )
+                )
         return assets
 
     def format_assets(self, project: SimulationProject) -> str:
