@@ -941,13 +941,12 @@ class MainWindow(QMainWindow):
     TAB_PROJECT_HOME = 0
     TAB_DRAW_GEOMETRY = 1
     TAB_SOLVER_PREPARE = 2
-    TAB_PHYSICS_PREPARE = 3
-    TAB_SOLVER_SELECT = 4
-    TAB_PARAMETERS = 5
-    TAB_SOLVER_RUN = 6
-    TAB_ENVIRONMENT = 7
-    TAB_SETTINGS = 8
-    TAB_RESULTS = 9
+    TAB_SOLVER_SELECT = 3
+    TAB_PARAMETERS = 4
+    TAB_SOLVER_RUN = 5
+    TAB_ENVIRONMENT = 6
+    TAB_SETTINGS = 7
+    TAB_RESULTS = 8
 
     def __init__(self, context: ApplicationContext, initial_project: SimulationProject | None = None) -> None:
         super().__init__()
@@ -1133,8 +1132,7 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.setTabsClosable(False)
         self._workspace_tabs.addTab(self._build_project_home_tab(), "项目主页")
         self._workspace_tabs.addTab(self._build_draw_geometry_tab(), "绘制几何")
-        self._workspace_tabs.addTab(self._build_simulation_prepare_tab(), "求解器准备")
-        self._workspace_tabs.addTab(self._build_physics_prepare_tab(), "仿真准备")
+        self._workspace_tabs.addTab(self._build_physics_prepare_tab(), "求解器准备")
         self._workspace_tabs.addTab(self._build_solver_select_tab(), "求解器选择")
         self._workspace_tabs.addTab(self._build_parameter_tab(), "仿真参数")
         self._workspace_tabs.addTab(self._build_solver_run_tab(), "求解运行")
@@ -1505,7 +1503,7 @@ class MainWindow(QMainWindow):
         self._refresh_draw_geo_preview()
         return wrapper
 
-    def _build_simulation_prepare_tab(self) -> QWidget:
+    def _build_physics_prepare_tab(self) -> QWidget:
         wrapper = QWidget()
         layout = QVBoxLayout(wrapper)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -1514,73 +1512,13 @@ class MainWindow(QMainWindow):
         title = QLabel("求解器准备")
         title.setStyleSheet("font-size: 22px; font-weight: 600;")
         description = QLabel(
-            "这个页面负责绘制几何之后的求解器前置文件：snappyHexMeshDict、controlDict、"
-            "fvSchemes、fvSolution。后续会把 0/U、0/p 和 physicalProperties 单独拆到仿真准备页。"
+            "这个页面负责启动仿真前的求解器输入准备：0/U、0/p、physicalProperties，"
+            "以及按当前绘制几何自动衔接 snappyHexMeshDict。"
         )
         description.setWordWrap(True)
 
         action_row = QHBoxLayout()
-        refresh_button = QPushButton("刷新准备状态")
-        prepare_button = QPushButton("补齐求解器文件")
-        physics_button = QPushButton("进入仿真准备")
-        solver_button = QPushButton("进入求解器选择")
-        parameter_button = QPushButton("进入仿真参数")
-        run_page_button = QPushButton("进入求解运行")
-        start_button = QPushButton("一键启动仿真")
-        refresh_button.clicked.connect(lambda _checked=False: self._refresh_simulation_prepare_panel())
-        prepare_button.clicked.connect(lambda _checked=False: self._prepare_simulation_from_geometry())
-        physics_button.clicked.connect(lambda _checked=False: self._open_physics_prepare_tab())
-        solver_button.clicked.connect(lambda _checked=False: self._open_solver_select_tab())
-        parameter_button.clicked.connect(lambda _checked=False: self._open_parameter_tab())
-        run_page_button.clicked.connect(lambda _checked=False: self._open_solver_run_tab())
-        start_button.clicked.connect(lambda _checked=False: self._run_simulation_pipeline())
-        for button in (refresh_button, prepare_button, physics_button, solver_button, parameter_button, run_page_button, start_button):
-            action_row.addWidget(button)
-        action_row.addStretch(1)
-
-        self._simulation_prepare_status = QTextEdit()
-        self._simulation_prepare_status.setReadOnly(True)
-        self._simulation_prepare_status.setMinimumHeight(260)
-        self._simulation_prepare_status.setPlainText("请先新建或打开项目。")
-
-        self._simulation_prepare_flow = QTextEdit()
-        self._simulation_prepare_flow.setReadOnly(True)
-        self._simulation_prepare_flow.setMaximumHeight(180)
-        self._simulation_prepare_flow.setPlainText(
-            "推荐流程：\n"
-            "1. 绘制几何：画计算域和物体，点击“生成 blockMeshDict + STL”。\n"
-            "2. 求解器准备：点击“刷新准备状态”，确认 snappyHexMeshDict/controlDict/fvSchemes/fvSolution。\n"
-            "3. 求解器准备：点击“补齐求解器文件”，自动生成上述求解器前置文件。\n"
-            "4. 仿真准备：补齐 0/U、0/p 和 physicalProperties。\n"
-            "5. 求解器选择：选择 icoFoam / simpleFoam / pisoFoam。\n"
-            "6. 仿真参数：设置时间、步长、写出间隔、密度、粘度和残差。\n"
-            "7. 求解运行：点击一键启动仿真并查看日志。\n"
-        )
-
-        layout.addWidget(title)
-        layout.addWidget(description)
-        layout.addLayout(action_row)
-        layout.addWidget(self._simulation_prepare_status)
-        layout.addWidget(self._simulation_prepare_flow)
-        layout.addStretch(1)
-        return wrapper
-
-    def _build_physics_prepare_tab(self) -> QWidget:
-        wrapper = QWidget()
-        layout = QVBoxLayout(wrapper)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-
-        title = QLabel("仿真准备")
-        title.setStyleSheet("font-size: 22px; font-weight: 600;")
-        description = QLabel(
-            "这个页面负责完整仿真中的 5-6：初始/边界条件 0/U、0/p，以及流体物性 "
-            "physicalProperties。求解器字典文件由前一个“求解器准备”页面负责。"
-        )
-        description.setWordWrap(True)
-
-        action_row = QHBoxLayout()
-        refresh_button = QPushButton("刷新仿真准备状态")
+        refresh_button = QPushButton("刷新求解器准备状态")
         prepare_button = QPushButton("补齐边界和物性")
         solver_button = QPushButton("进入求解器选择")
         parameter_button = QPushButton("进入仿真参数")
@@ -1614,7 +1552,7 @@ class MainWindow(QMainWindow):
             "- 0/U：速度初始场和入口/壁面边界条件。\n"
             "- 0/p：压力初始场和出口/壁面边界条件。\n"
             "- constant/physicalProperties：密度、粘度等流体物性。\n\n"
-            "推荐流程：先完成求解器准备，再到本页补齐边界和物性，然后进入求解运行。"
+            "推荐流程：绘制几何后到本页补齐边界和物性，然后进入求解器选择、仿真参数和求解运行。"
         )
 
         layout.addWidget(title)
@@ -2191,13 +2129,13 @@ class MainWindow(QMainWindow):
 
     def _open_simulation_prepare_tab(self) -> None:
         self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_PREPARE)
-        self._refresh_simulation_prepare_panel()
+        self._refresh_physics_prepare_panel()
         self._set_status("已打开求解器准备页。")
 
     def _open_physics_prepare_tab(self) -> None:
-        self._workspace_tabs.setCurrentIndex(self.TAB_PHYSICS_PREPARE)
+        self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_PREPARE)
         self._refresh_physics_prepare_panel()
-        self._set_status("已打开仿真准备页。")
+        self._set_status("已打开求解器准备页。")
 
     def _open_geometry_tab(self) -> None:
         self._workspace_tabs.setCurrentIndex(self.TAB_DRAW_GEOMETRY)
@@ -3236,6 +3174,12 @@ class MainWindow(QMainWindow):
         self._snappy_layer_thickness_input.setValue(settings.final_layer_thickness)
 
     def _read_snappy_settings(self) -> SnappyHexMeshSettings:
+        if not hasattr(self, "_snappy_min_refinement_input"):
+            if self._current_project is not None:
+                settings = self._context.geometry_import_service.load_snappy_settings(self._current_project)
+                if settings is not None:
+                    return settings
+            return SnappyHexMeshSettings()
         min_level = self._snappy_min_refinement_input.value()
         max_level = self._snappy_max_refinement_input.value()
         if max_level < min_level:
@@ -3547,7 +3491,7 @@ class MainWindow(QMainWindow):
             )
             custom_boundary_files = self._apply_boundary_table_to_case(parameters)
         except (OSError, ValueError) as error:
-            self._show_error(f"一键仿真准备失败：{error}")
+            self._show_error(f"一键求解器准备失败：{error}")
             return
 
         self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_RUN)
@@ -3565,7 +3509,7 @@ class MainWindow(QMainWindow):
             self._append_log("\n".join(f"- {path}" for path in relative_fields))
         if custom_boundary_files:
             relative_files = [str(path.relative_to(self._current_project.case_dir)) for path in custom_boundary_files]
-            self._append_log("已应用仿真准备页边界表：")
+            self._append_log("已应用求解器准备页边界表：")
             self._append_log("\n".join(f"- {path}" for path in relative_files))
         if dict_path is not None:
             self._append_log(f"已自动生成 snappyHexMeshDict：{dict_path}")
@@ -4686,111 +4630,6 @@ class MainWindow(QMainWindow):
         )
         self._append_log(f"环境检查完成：{status_flag}，OpenFOAM={status.foam_version or '未知'}")
 
-    def _refresh_simulation_prepare_panel(self) -> None:
-        if not hasattr(self, "_simulation_prepare_status"):
-            return
-        if self._current_project is None:
-            self._simulation_prepare_status.setPlainText("请先新建或打开项目。")
-            return
-
-        case_dir = self._current_project.case_dir
-        stl_dir = case_dir / "constant" / "triSurface"
-        stl_files = sorted(stl_dir.glob("*.stl")) if stl_dir.exists() else []
-        solver_prepare_files = [
-            case_dir / "system" / "controlDict",
-            case_dir / "system" / "fvSchemes",
-            case_dir / "system" / "fvSolution",
-        ]
-        if stl_files:
-            solver_prepare_files.insert(0, case_dir / "system" / "snappyHexMeshDict")
-        future_simulation_prepare_files = [
-            case_dir / "constant" / "physicalProperties",
-            case_dir / "0" / "U",
-            case_dir / "0" / "p",
-        ]
-        snappy_dict = case_dir / "system" / "snappyHexMeshDict"
-        draw_state = self._draw_geometry_state_path()
-        missing = [path for path in solver_prepare_files if not path.exists()]
-
-        try:
-            parameters = self._context.case_parameter_service.load(self._current_project)
-            parameter_text = (
-                f"solver={parameters.solver_name}, endTime={parameters.end_time:g}, "
-                f"deltaT={parameters.delta_t:g}, writeInterval={parameters.write_interval}, "
-                f"rho={parameters.density:g}, nu={parameters.viscosity:g}, turbulence={parameters.turbulence_model}"
-            )
-        except (OSError, ValueError) as error:
-            parameter_text = f"参数尚未完整：{error}"
-
-        lines = [
-            "求解器准备状态",
-            "",
-            f"- 当前项目：{self._current_project.name}",
-            f"- 当前 Case：{self._current_project.case_name}",
-            f"- Case 路径：{case_dir}",
-            f"- 绘制几何草稿：{'已保存' if draw_state and draw_state.exists() else '未保存'}",
-            f"- blockMeshDict：{'已生成' if (case_dir / 'system' / 'blockMeshDict').exists() else '缺失'}",
-            f"- STL 几何：{len(stl_files)} 个" + (f"（{', '.join(path.name for path in stl_files[:5])}）" if stl_files else ""),
-            f"- snappyHexMeshDict：{'已生成' if snappy_dict.exists() else '未生成'}",
-            f"- 参数/求解器：{parameter_text}",
-            "",
-            "本页负责的 1-4 求解器准备文件：",
-        ]
-        for path in solver_prepare_files:
-            lines.append(f"- {'OK' if path.exists() else '缺失'}：{path.relative_to(case_dir)}")
-        lines.extend(["", "后续会拆到仿真准备页的 5-6 文件："])
-        for path in future_simulation_prepare_files:
-            lines.append(f"- {'OK' if path.exists() else '缺失'}：{path.relative_to(case_dir)}")
-
-        if missing:
-            lines.extend(
-                [
-                    "",
-                    "下一步建议：点击“补齐求解器文件”，先生成 snappyHexMeshDict、controlDict、fvSchemes、fvSolution。",
-                ]
-            )
-        else:
-            lines.extend(
-                [
-                    "",
-                    "下一步建议：进入“求解器选择”和“仿真参数”确认配置，然后进入“求解运行”启动仿真。",
-                ]
-            )
-        self._simulation_prepare_status.setPlainText("\n".join(lines))
-
-    def _prepare_simulation_from_geometry(self) -> bool:
-        if self._current_project is None:
-            self._show_error("请先新建或打开项目。")
-            return False
-        self._persist_draw_geometry_state()
-        try:
-            self._context.project_service.ensure_minimal_case_template(self._current_project)
-            parameters = self._context.case_parameter_service.load(self._current_project)
-            self._context.case_parameter_service.save(self._current_project, parameters)
-            selected_name = self._auto_stl_asset_for_snappy()
-            if selected_name:
-                snappy_dict = self._context.geometry_import_service.generate_snappy_hex_mesh_dict(
-                    self._current_project,
-                    selected_name,
-                    self._read_snappy_settings(),
-                )
-                self._append_log(f"已生成 snappyHexMeshDict：{snappy_dict}")
-            solver_files = self._context.project_service.ensure_solver_support_files(self._current_project, parameters)
-        except (OSError, ValueError) as error:
-            self._show_error(f"求解器准备失败：{error}")
-            return False
-
-        self._append_log("求解器准备完成：已补齐 snappyHexMeshDict、controlDict、fvSchemes、fvSolution。")
-        self._append_log("说明：0/U、0/p、physicalProperties 当前仍会临时同步，后续再拆到仿真准备页。")
-        if solver_files:
-            relative_files = [str(path.relative_to(self._current_project.case_dir)) for path in solver_files]
-            self._append_log("\n".join(f"- {path}" for path in relative_files))
-        self._load_case_parameters()
-        self._refresh_solver_run_panel("求解器准备完成")
-        self._refresh_simulation_prepare_panel()
-        self._set_status("求解器准备完成。")
-        return True
-
     def _refresh_physics_prepare_panel(self) -> None:
         if not hasattr(self, "_physics_prepare_status"):
             return
@@ -4815,14 +4654,14 @@ class MainWindow(QMainWindow):
             parameter_text = f"参数尚未完整：{error}"
 
         lines = [
-            "仿真准备状态",
+            "求解器准备状态",
             "",
             f"- 当前项目：{self._current_project.name}",
             f"- 当前 Case：{self._current_project.case_name}",
             f"- Case 路径：{case_dir}",
             f"- 参数/物性来源：{parameter_text}",
             "",
-            "本页负责的 5-6 仿真准备文件：",
+            "本页负责的边界条件和物性文件：",
         ]
         for path in physics_files:
             lines.append(f"- {'OK' if path.exists() else '缺失'}：{path.relative_to(case_dir)}")
@@ -4858,18 +4697,18 @@ class MainWindow(QMainWindow):
             )
             custom_files = self._apply_boundary_table_to_case(parameters)
         except (OSError, ValueError) as error:
-            self._show_error(f"仿真准备失败：{error}")
+            self._show_error(f"求解器准备失败：{error}")
             return False
 
-        self._append_log("仿真准备完成：已补齐 0/U、0/p 和 physicalProperties。")
+        self._append_log("求解器准备完成：已补齐 0/U、0/p 和 physicalProperties。")
         written_files = list(dict.fromkeys([*synced_files, *custom_files]))
         if written_files:
             relative_files = [str(path.relative_to(self._current_project.case_dir)) for path in written_files]
             self._append_log("\n".join(f"- {path}" for path in relative_files))
         self._load_case_parameters()
         self._refresh_physics_prepare_panel()
-        self._refresh_solver_run_panel("仿真准备完成")
-        self._set_status("仿真准备完成。")
+        self._refresh_solver_run_panel("求解器准备完成")
+        self._set_status("求解器准备完成。")
         return True
 
     def _physics_boundary_config_path(self) -> Path | None:
@@ -5137,7 +4976,6 @@ boundaryField
         self._refresh_results_panel()
         self._refresh_geometry_panel()
         self._load_draw_geometry_state()
-        self._refresh_simulation_prepare_panel()
         self._refresh_physics_prepare_panel()
         self._restore_project_result_state()
         self._append_log(f"当前项目：{project.path}")
