@@ -1520,17 +1520,9 @@ class MainWindow(QMainWindow):
         action_row = QHBoxLayout()
         refresh_button = QPushButton("刷新求解器准备状态")
         prepare_button = QPushButton("补齐边界和物性")
-        solver_button = QPushButton("进入求解器选择")
-        parameter_button = QPushButton("进入仿真参数")
-        run_page_button = QPushButton("进入求解运行")
-        start_button = QPushButton("一键启动仿真")
         refresh_button.clicked.connect(lambda _checked=False: self._refresh_physics_prepare_panel())
         prepare_button.clicked.connect(lambda _checked=False: self._prepare_physics_files())
-        solver_button.clicked.connect(lambda _checked=False: self._open_solver_select_tab())
-        parameter_button.clicked.connect(lambda _checked=False: self._open_parameter_tab())
-        run_page_button.clicked.connect(lambda _checked=False: self._open_solver_run_tab())
-        start_button.clicked.connect(lambda _checked=False: self._run_simulation_pipeline())
-        for button in (refresh_button, prepare_button, solver_button, parameter_button, run_page_button, start_button):
+        for button in (refresh_button, prepare_button):
             action_row.addWidget(button)
         action_row.addStretch(1)
 
@@ -4680,8 +4672,12 @@ class MainWindow(QMainWindow):
                     "下一步建议：进入“求解器选择”和“仿真参数”确认配置，然后进入“求解运行”。",
                 ]
             )
-        self._physics_prepare_status.setPlainText("\n".join(lines))
         self._populate_boundary_table()
+        row_count = self._boundary_table.rowCount() if hasattr(self, "_boundary_table") else 0
+        lines.extend(["", f"Patch 表格：已刷新 {row_count} 个边界。"])
+        self._physics_prepare_status.setPlainText("\n".join(lines))
+        self._set_status(f"求解器准备状态已刷新，发现 {row_count} 个边界。")
+        self._append_log(f"求解器准备状态已刷新：{self._current_project.name}/{self._current_project.case_name}，patch={row_count}")
 
     def _prepare_physics_files(self) -> bool:
         if self._current_project is None:
@@ -4724,6 +4720,8 @@ class MainWindow(QMainWindow):
                 self._current_project.case_dir / "system" / "blockMeshDict"
             )
         )
+        if not names:
+            names = ["inlet", "outlet", "fixedWalls"]
         stl_dir = self._current_project.case_dir / "constant" / "triSurface"
         if stl_dir.exists() and any(path.suffix.lower() == ".stl" for path in stl_dir.iterdir()):
             if "importedGeometry" not in names:
@@ -5379,6 +5377,11 @@ boundaryField
     def _update_diagnostics(self, exit_code: int) -> None:
         diagnostics = self._context.log_diagnostic_service.diagnose(self._current_process_output)
         summary = self._context.log_diagnostic_service.format_diagnostics(diagnostics)
+        fatal_block = self._context.log_diagnostic_service.extract_fatal_error_block(
+            self._current_process_output
+        )
+        if fatal_block:
+            summary = f"{summary}\n\nOpenFOAM 原始致命错误：\n{fatal_block}"
         self._last_diagnostic_summary = f"退出码：{exit_code}\n\n{summary}"
         self._problem_text.setPlainText(self._last_diagnostic_summary)
         self._bottom_tabs.setCurrentIndex(2)
@@ -5841,11 +5844,23 @@ boundaryField
             self._show_error("计算域至少需要 8 个顶点。"); return
         nx = domain.get("nx",10); ny = domain.get("ny",10); nz = domain.get("nz",10)
         grading = domain.get("grading","1 1 1")
-        bv = domain.get("block_v",[0,1,2,3,4,5,6,7])
-        vl = "\n".join("    ({} {} {})".format(x,y,z) for x,y,z in verts)
+        xs = [v[0] for v in verts]; ys = [v[1] for v in verts]; zs = [v[2] for v in verts]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        min_z, max_z = min(zs), max(zs)
+        mesh_verts = [
+            (min_x, min_y, min_z),
+            (max_x, min_y, min_z),
+            (max_x, max_y, min_z),
+            (min_x, max_y, min_z),
+            (min_x, min_y, max_z),
+            (max_x, min_y, max_z),
+            (max_x, max_y, max_z),
+            (min_x, max_y, max_z),
+        ]
+        bv = [0,1,2,3,4,5,6,7]
+        vl = "\n".join("    ({} {} {})".format(x,y,z) for x,y,z in mesh_verts)
         el = ""
-        for et,s,e,ip in domain.get("edges",[]):
-            el += "    {} {} {} ({})\n".format(et,s,e,ip) if ip else "    {} {} {}\n".format(et,s,e)
         bl_line = "    hex ({}) ({} {} {}) simpleGrading ({})\n".format(" ".join(str(v) for v in bv), nx, ny, nz, grading)
         il = self._geo_inlet.text().strip() or "inlet"
         ol = self._geo_outlet.text().strip() or "outlet"
@@ -5861,7 +5876,6 @@ boundaryField
         bp = self._current_project.case_dir / "system" / "blockMeshDict"
         bp.parent.mkdir(parents=True, exist_ok=True)
         bp.write_text(bm, encoding="utf-8")
-        xs = [v[0] for v in verts]; ys = [v[1] for v in verts]; zs = [v[2] for v in verts]
         size = (max(xs)-min(xs), max(ys)-min(ys), max(zs)-min(zs))
         import json as _json
         dc_path = self._current_project.case_dir / "system" / "domain_config.json"

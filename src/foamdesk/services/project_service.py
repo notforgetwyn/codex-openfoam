@@ -541,10 +541,10 @@ class ProjectService:
 
     def _block_mesh_dict_for_template(self, template: ComputationDomainTemplate) -> str:
         cell_x, cell_y, cell_z = template.cells
-        vertices = self.domain_vertices(template)
+        vertices = self._block_mesh_vertices_for_template(template)
         vertex_lines = "\n".join(f"    ({x:g} {y:g} {z:g})" for x, y, z in vertices)
-        edge_lines = self.domain_edge_lines(template)
-        block_indices = "0 3 2 1 4 7 6 5" if template.shape == "bend" else "0 1 2 3 4 5 6 7"
+        edge_lines = ""
+        block_indices = "0 1 2 3 4 5 6 7"
         return f"""FoamFile
 {{
     version     2.0;
@@ -599,6 +599,22 @@ mergePatchPairs
 (
 );
 """
+
+    def _block_mesh_vertices_for_template(
+        self, template: ComputationDomainTemplate
+    ) -> tuple[tuple[float, float, float], ...]:
+        """Use a positive-volume box mesh for OpenFOAM; curved shapes stay as preview geometry."""
+        length_x, length_y, length_z = template.size
+        return (
+            (0.0, 0.0, 0.0),
+            (length_x, 0.0, 0.0),
+            (length_x, length_y, 0.0),
+            (0.0, length_y, 0.0),
+            (0.0, 0.0, length_z),
+            (length_x, 0.0, length_z),
+            (length_x, length_y, length_z),
+            (0.0, length_y, length_z),
+        )
 
     def domain_vertices(self, template: ComputationDomainTemplate) -> tuple[tuple[float, float, float], ...]:
         length_x, length_y, length_z = template.size
@@ -978,9 +994,9 @@ startFrom       startTime;
 startTime       0;
 stopAt          endTime;
 endTime         0.5;
-deltaT          0.005;
+deltaT          0.001;
 writeControl    timeStep;
-writeInterval   20;
+writeInterval   100;
 purgeWrite      0;
 writeFormat     ascii;
 writePrecision  6;

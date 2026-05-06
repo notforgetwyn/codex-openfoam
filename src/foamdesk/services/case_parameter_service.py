@@ -13,8 +13,8 @@ class OpenFoamCaseParameterService:
     DEFAULT_PARAMETERS = SimulationParameters(
         solver_name="icoFoam",
         end_time=0.5,
-        delta_t=0.005,
-        write_interval=20,
+        delta_t=0.001,
+        write_interval=100,
         max_iterations=100,
         residual_tolerance=1e-6,
         density=1.0,
@@ -285,6 +285,12 @@ solvers
         relTol          {rel_tol};
     }}
 
+    pFinal
+    {{
+        $p;
+        relTol          0;
+    }}
+
     U
     {{
         solver          smoothSolver;
@@ -298,6 +304,8 @@ PISO
 {{
     nCorrectors     2;
     nNonOrthogonalCorrectors 0;
+    pRefCell        0;
+    pRefValue       0;
 }}
 
 SIMPLE
