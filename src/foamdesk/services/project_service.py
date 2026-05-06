@@ -966,6 +966,8 @@ boundaryField
 }
 
 nu              [0 2 -1 0 0 0 0] 0.01;
+rho             [1 -3 0 0 0 0 0] 1;
+mu              [1 -1 -1 0 0 0 0] 0.01;
 """
 
     def _default_physical_properties(self) -> str:
@@ -978,6 +980,8 @@ nu              [0 2 -1 0 0 0 0] 0.01;
 }
 
 nu              [0 2 -1 0 0 0 0] 0.01;
+rho             [1 -3 0 0 0 0 0] 1;
+mu              [1 -1 -1 0 0 0 0] 0.01;
 """
 
     def _default_control_dict(self) -> str:

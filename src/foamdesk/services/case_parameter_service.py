@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from foamdesk.domain.models import SimulationParameters, SimulationProject
@@ -10,6 +11,29 @@ from foamdesk.domain.models import SimulationParameters, SimulationProject
 class OpenFoamCaseParameterService:
     """Reads and writes the first editable OpenFOAM case parameters."""
 
+    MATERIAL_PRESETS = {
+        "air": {
+            "label": "空气",
+            "density": 1.225,
+            "viscosity": 1.5e-5,
+        },
+        "water": {
+            "label": "水",
+            "density": 998.2,
+            "viscosity": 1.004e-6,
+        },
+        "oil": {
+            "label": "机油",
+            "density": 850.0,
+            "viscosity": 1.0e-4,
+        },
+        "custom": {
+            "label": "自定义流体",
+            "density": 1.0,
+            "viscosity": 0.01,
+        },
+    }
+
     DEFAULT_PARAMETERS = SimulationParameters(
         solver_name="icoFoam",
         end_time=0.5,
@@ -17,8 +41,10 @@ class OpenFoamCaseParameterService:
         write_interval=100,
         max_iterations=100,
         residual_tolerance=1e-6,
+        material_name="custom",
         density=1.0,
         viscosity=0.01,
+        dynamic_viscosity=0.01,
         turbulence_model="laminar",
         numeric_scheme="stable",
         fv_solution_preset="default",
@@ -46,8 +72,19 @@ class OpenFoamCaseParameterService:
             ),
             max_iterations=int(config.get("max_iterations", default.max_iterations)),
             residual_tolerance=float(config.get("residual_tolerance", default.residual_tolerance)),
+            material_name=str(config.get("material_name", default.material_name)),
             density=float(config.get("density", self._read_density(physical_properties, default.density))),
             viscosity=self._read_viscosity(physical_properties, default.viscosity),
+            dynamic_viscosity=float(
+                config.get(
+                    "dynamic_viscosity",
+                    self._read_dynamic_viscosity(
+                        physical_properties,
+                        self._read_density(physical_properties, default.density)
+                        * self._read_viscosity(physical_properties, default.viscosity),
+                    ),
+                )
+            ),
             turbulence_model=str(config.get("turbulence_model", default.turbulence_model)),
             numeric_scheme=str(config.get("numeric_scheme", default.numeric_scheme)),
             fv_solution_preset=str(config.get("fv_solution_preset", default.fv_solution_preset)),
@@ -65,6 +102,7 @@ class OpenFoamCaseParameterService:
 
         viscosity_value = self._format_float(parameters.viscosity)
         density_value = self._format_float(parameters.density)
+        dynamic_viscosity_value = self._format_float(parameters.dynamic_viscosity)
         for path in (
             project.case_dir / "constant" / "physicalProperties",
             project.case_dir / "constant" / "transportProperties",
@@ -73,8 +111,14 @@ class OpenFoamCaseParameterService:
                 text = path.read_text(encoding="utf-8")
                 text = self._replace_viscosity(text, viscosity_value)
                 text = self._replace_density(text, density_value)
+                text = self._replace_dynamic_viscosity(text, dynamic_viscosity_value)
             else:
-                text = self._default_properties_text(path.stem, viscosity_value, density_value)
+                text = self._default_properties_text(
+                    path.stem,
+                    viscosity_value,
+                    density_value,
+                    dynamic_viscosity_value,
+                )
             path.write_text(text, encoding="utf-8")
         (project.case_dir / "system" / "fvSchemes").write_text(
             self._fv_schemes_text(parameters.numeric_scheme),
@@ -91,6 +135,20 @@ class OpenFoamCaseParameterService:
 
     def defaults(self) -> SimulationParameters:
         return self.DEFAULT_PARAMETERS
+
+    def material_preset(self, material_name: str) -> SimulationParameters:
+        preset = self.MATERIAL_PRESETS.get(material_name)
+        if preset is None:
+            raise ValueError("物性预设必须是 air、water、oil 或 custom。")
+        density = float(preset["density"])
+        viscosity = float(preset["viscosity"])
+        return replace(
+            self.DEFAULT_PARAMETERS,
+            material_name=material_name,
+            density=density,
+            viscosity=viscosity,
+            dynamic_viscosity=density * viscosity,
+        )
 
     def _physical_properties_path(self, project: SimulationProject) -> Path:
         physical_properties = project.case_dir / "constant" / "physicalProperties"
@@ -128,6 +186,12 @@ class OpenFoamCaseParameterService:
             return default
         return float(match.group(1).strip())
 
+    def _read_dynamic_viscosity(self, text: str, default: float) -> float:
+        match = re.search(r"^\s*mu\s+\[[^\]]+\]\s+([^;]+);", text, flags=re.MULTILINE)
+        if not match:
+            return default
+        return float(match.group(1).strip())
+
     def _replace_assignment(self, text: str, key: str, value: str) -> str:
         pattern = rf"(^\s*{re.escape(key)}\s+)([^;]+)(;)"
         replacement = rf"\g<1>{value}\g<3>"
@@ -152,6 +216,14 @@ class OpenFoamCaseParameterService:
             return replaced
         return f"{text.rstrip()}\nrho             [1 -3 0 0 0 0 0] {value};\n"
 
+    def _replace_dynamic_viscosity(self, text: str, value: str) -> str:
+        pattern = r"(^\s*mu\s+\[[^\]]+\]\s+)([^;]+)(;)"
+        replacement = rf"\g<1>{value}\g<3>"
+        replaced, count = re.subn(pattern, replacement, text, count=1, flags=re.MULTILINE)
+        if count:
+            return replaced
+        return f"{text.rstrip()}\nmu              [1 -1 -1 0 0 0 0] {value};\n"
+
     def _validate(self, parameters: SimulationParameters) -> None:
         if parameters.solver_name not in self.SOLVERS:
             raise ValueError("求解器必须是 icoFoam、simpleFoam 或 pisoFoam。")
@@ -167,10 +239,14 @@ class OpenFoamCaseParameterService:
             raise ValueError("最大迭代次数必须大于 0。")
         if parameters.residual_tolerance <= 0:
             raise ValueError("收敛残差必须大于 0。")
+        if parameters.material_name not in self.MATERIAL_PRESETS:
+            raise ValueError("流体类型必须是空气、水、机油或自定义流体。")
         if parameters.density <= 0:
             raise ValueError("流体密度必须大于 0。")
         if parameters.viscosity <= 0:
             raise ValueError("运动粘度必须大于 0。")
+        if parameters.dynamic_viscosity <= 0:
+            raise ValueError("动力粘度必须大于 0。")
         if parameters.turbulence_model not in {"laminar", "RAS kEpsilon"}:
             raise ValueError("湍流模型当前只支持 laminar 或 RAS kEpsilon。")
         if parameters.numeric_scheme not in {"stable", "balanced", "accurate"}:
@@ -198,13 +274,21 @@ class OpenFoamCaseParameterService:
             "solver_name": parameters.solver_name,
             "max_iterations": parameters.max_iterations,
             "residual_tolerance": parameters.residual_tolerance,
+            "material_name": parameters.material_name,
             "density": parameters.density,
+            "dynamic_viscosity": parameters.dynamic_viscosity,
             "turbulence_model": parameters.turbulence_model,
             "numeric_scheme": parameters.numeric_scheme,
             "fv_solution_preset": parameters.fv_solution_preset,
         }
 
-    def _default_properties_text(self, object_name: str, viscosity: str, density: str) -> str:
+    def _default_properties_text(
+        self,
+        object_name: str,
+        viscosity: str,
+        density: str,
+        dynamic_viscosity: str,
+    ) -> str:
         return f"""FoamFile
 {{
     version     2.0;
@@ -215,6 +299,7 @@ class OpenFoamCaseParameterService:
 
 nu              [0 2 -1 0 0 0 0] {viscosity};
 rho             [1 -3 0 0 0 0 0] {density};
+mu              [1 -1 -1 0 0 0 0] {dynamic_viscosity};
 """
 
     def _fv_schemes_text(self, preset: str) -> str:

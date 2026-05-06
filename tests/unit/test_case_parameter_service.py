@@ -21,7 +21,10 @@ def test_case_parameter_service_loads_defaults_from_generated_case(tmp_path: Pat
         end_time=0.5,
         delta_t=0.001,
         write_interval=100,
+        material_name="custom",
+        density=1.0,
         viscosity=0.01,
+        dynamic_viscosity=0.01,
     )
 
 
@@ -36,7 +39,10 @@ def test_case_parameter_service_saves_control_and_viscosity(tmp_path: Path) -> N
             end_time=1.25,
             delta_t=0.01,
             write_interval=10,
+            material_name="water",
+            density=998.2,
             viscosity=0.02,
+            dynamic_viscosity=19.964,
         ),
     )
 
@@ -53,9 +59,28 @@ def test_case_parameter_service_saves_control_and_viscosity(tmp_path: Path) -> N
     assert "writeInterval   10;" in control_dict
     assert "nu              [0 2 -1 0 0 0 0] 0.02;" in physical_properties
     assert "nu              [0 2 -1 0 0 0 0] 0.02;" in transport_properties
+    assert "rho             [1 -3 0 0 0 0 0] 998.2;" in physical_properties
+    assert "mu              [1 -1 -1 0 0 0 0] 19.964;" in physical_properties
     assert "pFinal" in fv_solution
     assert "pRefCell        0;" in fv_solution
     assert "pRefValue       0;" in fv_solution
+
+    saved_parameters = service.load(project)
+    assert saved_parameters.material_name == "water"
+    assert saved_parameters.dynamic_viscosity == pytest.approx(19.964)
+
+
+def test_case_parameter_service_material_presets() -> None:
+    service = OpenFoamCaseParameterService()
+
+    air = service.material_preset("air")
+    water = service.material_preset("water")
+    oil = service.material_preset("oil")
+
+    assert air.material_name == "air"
+    assert air.dynamic_viscosity == pytest.approx(air.density * air.viscosity)
+    assert water.density > air.density
+    assert oil.viscosity > water.viscosity
 
 
 def test_case_parameter_service_rejects_invalid_values(tmp_path: Path) -> None:

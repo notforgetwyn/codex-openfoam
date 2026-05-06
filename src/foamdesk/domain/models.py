@@ -40,8 +40,10 @@ class SimulationParameters:
     write_interval: int
     max_iterations: int
     residual_tolerance: float
+    material_name: str
     density: float
     viscosity: float
+    dynamic_viscosity: float
     turbulence_model: str
     numeric_scheme: str
     fv_solution_preset: str

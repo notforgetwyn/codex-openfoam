@@ -1274,7 +1274,7 @@ class MainWindow(QMainWindow):
 
         title = QLabel("仿真参数")
         title.setStyleSheet("font-size: 22px; font-weight: 600;")
-        description = QLabel("配置当前 Case 的时间、写出、收敛、流体属性和基础数值参数。")
+        description = QLabel("只配置当前 Case 的 system/controlDict 时间控制参数。")
         description.setWordWrap(True)
 
         form = QFormLayout()
@@ -1282,26 +1282,16 @@ class MainWindow(QMainWindow):
         self._delta_t_input = QLineEdit()
         self._write_interval_input = QSpinBox()
         self._write_interval_input.setRange(1, 1000000)
-        self._max_iterations_input = QSpinBox()
-        self._max_iterations_input.setRange(1, 10000000)
-        self._max_iterations_input.setValue(100)
-        self._residual_tolerance_input = QLineEdit()
-        self._density_input = QLineEdit()
-        self._viscosity_input = QLineEdit()
         form.addRow("仿真总时间 endTime", self._end_time_input)
         form.addRow("时间步长 deltaT", self._delta_t_input)
         form.addRow("写出间隔 writeInterval", self._write_interval_input)
-        form.addRow("最大迭代次数", self._max_iterations_input)
-        form.addRow("收敛残差", self._residual_tolerance_input)
-        form.addRow("流体密度 rho", self._density_input)
-        form.addRow("运动粘度 nu", self._viscosity_input)
 
         button_row = QHBoxLayout()
         load_button = QPushButton("加载当前项目参数")
         save_button = QPushButton("保存参数到 Case")
         default_button = QPushButton("恢复默认参数")
         load_button.clicked.connect(lambda _checked=False: self._load_case_parameters())
-        save_button.clicked.connect(lambda _checked=False: self._save_case_parameters())
+        save_button.clicked.connect(lambda _checked=False: self._save_control_dict_parameters())
         default_button.clicked.connect(lambda _checked=False: self._restore_default_parameters())
         button_row.addWidget(load_button)
         button_row.addWidget(save_button)
@@ -1317,11 +1307,8 @@ class MainWindow(QMainWindow):
             "参数说明：\n"
             "- endTime：仿真总时间，越大运行越久。\n"
             "- deltaT：每一步的时间步长，越小越稳定但更慢。\n"
-            "- writeInterval：每隔多少步写一次结果。\n"
-            "- 最大迭代次数：稳态求解时常用，可作为后续 simpleFoam 控制依据。\n"
-            "- 收敛残差：越小代表要求越严格。\n"
-            "- rho：流体密度，例如空气约 1.225 kg/m^3。\n"
-            "- nu：运动粘度，例如空气约 1.5e-5 m^2/s。"
+            "- writeInterval：每隔多少步写一次结果。\n\n"
+            "注意：0/U、0/p、patch 边界和流体物性请到“求解器准备”页面配置。"
         )
 
         layout.addWidget(title)
@@ -1531,6 +1518,27 @@ class MainWindow(QMainWindow):
         self._physics_prepare_status.setMinimumHeight(150)
         self._physics_prepare_status.setPlainText("请先新建或打开项目。")
 
+        material_form = QFormLayout()
+        self._material_combo = QComboBox()
+        self._material_combo.addItem("空气 air", "air")
+        self._material_combo.addItem("水 water", "water")
+        self._material_combo.addItem("机油 oil", "oil")
+        self._material_combo.addItem("自定义流体 custom", "custom")
+        self._material_combo.currentIndexChanged.connect(lambda _index: self._apply_material_preset())
+        self._density_input = QLineEdit()
+        self._viscosity_input = QLineEdit()
+        self._dynamic_viscosity_input = QLineEdit()
+        material_row = QHBoxLayout()
+        calc_mu_button = QPushButton("按 rho × nu 计算 mu")
+        calc_mu_button.clicked.connect(lambda _checked=False: self._calculate_dynamic_viscosity())
+        material_row.addWidget(self._material_combo)
+        material_row.addWidget(calc_mu_button)
+        material_row.addStretch(1)
+        material_form.addRow("流体类型", material_row)
+        material_form.addRow("流体密度 rho", self._density_input)
+        material_form.addRow("运动粘度 nu", self._viscosity_input)
+        material_form.addRow("动力粘度 mu", self._dynamic_viscosity_input)
+
         self._boundary_table = QTableWidget(0, 6)
         self._boundary_table.setHorizontalHeaderLabels(["Patch", "角色", "U 类型", "U 值", "p 类型", "p 值"])
         self._boundary_table.horizontalHeader().setStretchLastSection(True)
@@ -1551,6 +1559,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(description)
         layout.addLayout(action_row)
         layout.addWidget(self._physics_prepare_status)
+        layout.addWidget(QLabel("流体物性文件"))
+        layout.addLayout(material_form)
         layout.addWidget(QLabel("Patch 边界条件表"))
         layout.addWidget(self._boundary_table)
         layout.addWidget(self._physics_prepare_flow)
@@ -3582,10 +3592,15 @@ class MainWindow(QMainWindow):
         self._end_time_input.setEnabled(enabled)
         self._delta_t_input.setEnabled(enabled)
         self._write_interval_input.setEnabled(enabled)
-        self._max_iterations_input.setEnabled(enabled)
-        self._residual_tolerance_input.setEnabled(enabled)
+        self._set_physics_prepare_inputs_enabled(enabled)
+
+    def _set_physics_prepare_inputs_enabled(self, enabled: bool) -> None:
+        if not hasattr(self, "_material_combo"):
+            return
+        self._material_combo.setEnabled(enabled)
         self._density_input.setEnabled(enabled)
         self._viscosity_input.setEnabled(enabled)
+        self._dynamic_viscosity_input.setEnabled(enabled)
 
     def _set_solver_inputs_enabled(self, enabled: bool) -> None:
         if not hasattr(self, "_solver_name_combo"):
@@ -3603,25 +3618,72 @@ class MainWindow(QMainWindow):
         self._end_time_input.setText(f"{parameters.end_time:.12g}")
         self._delta_t_input.setText(f"{parameters.delta_t:.12g}")
         self._write_interval_input.setValue(parameters.write_interval)
-        self._max_iterations_input.setValue(parameters.max_iterations)
-        self._residual_tolerance_input.setText(f"{parameters.residual_tolerance:.12g}")
-        self._density_input.setText(f"{parameters.density:.12g}")
-        self._viscosity_input.setText(f"{parameters.viscosity:.12g}")
+        if hasattr(self, "_material_combo"):
+            self._material_combo.blockSignals(True)
+            self._set_combo_value(self._material_combo, parameters.material_name)
+            self._material_combo.blockSignals(False)
+            self._density_input.setText(f"{parameters.density:.12g}")
+            self._viscosity_input.setText(f"{parameters.viscosity:.12g}")
+            self._dynamic_viscosity_input.setText(f"{parameters.dynamic_viscosity:.12g}")
 
     def _read_parameter_inputs(self) -> SimulationParameters:
+        base = self._context.case_parameter_service.defaults()
+        if self._current_project is not None:
+            try:
+                base = self._context.case_parameter_service.load(self._current_project)
+            except (OSError, ValueError):
+                pass
         return SimulationParameters(
-            solver_name=str(self._solver_name_combo.currentData()),
+            solver_name=str(self._solver_name_combo.currentData()) if hasattr(self, "_solver_name_combo") else base.solver_name,
             end_time=float(self._end_time_input.text().strip()),
             delta_t=float(self._delta_t_input.text().strip()),
             write_interval=self._write_interval_input.value(),
-            max_iterations=self._max_iterations_input.value(),
-            residual_tolerance=float(self._residual_tolerance_input.text().strip()),
-            density=float(self._density_input.text().strip()),
-            viscosity=float(self._viscosity_input.text().strip()),
-            turbulence_model=str(self._turbulence_model_combo.currentData()),
-            numeric_scheme=str(self._numeric_scheme_combo.currentData()),
-            fv_solution_preset=str(self._fv_solution_preset_combo.currentData()),
+            max_iterations=base.max_iterations,
+            residual_tolerance=base.residual_tolerance,
+            material_name=str(self._material_combo.currentData()) if hasattr(self, "_material_combo") else base.material_name,
+            density=float(self._density_input.text().strip()) if hasattr(self, "_density_input") else base.density,
+            viscosity=float(self._viscosity_input.text().strip()) if hasattr(self, "_viscosity_input") else base.viscosity,
+            dynamic_viscosity=float(self._dynamic_viscosity_input.text().strip()) if hasattr(self, "_dynamic_viscosity_input") else base.dynamic_viscosity,
+            turbulence_model=str(self._turbulence_model_combo.currentData()) if hasattr(self, "_turbulence_model_combo") else base.turbulence_model,
+            numeric_scheme=str(self._numeric_scheme_combo.currentData()) if hasattr(self, "_numeric_scheme_combo") else base.numeric_scheme,
+            fv_solution_preset=str(self._fv_solution_preset_combo.currentData()) if hasattr(self, "_fv_solution_preset_combo") else base.fv_solution_preset,
         )
+
+    def _apply_material_preset(self) -> None:
+        if not hasattr(self, "_material_combo"):
+            return
+        material_name = str(self._material_combo.currentData())
+        if material_name == "custom":
+            return
+        try:
+            preset = self._context.case_parameter_service.material_preset(material_name)
+        except ValueError as error:
+            self._show_error(str(error))
+            return
+        self._density_input.setText(f"{preset.density:.12g}")
+        self._viscosity_input.setText(f"{preset.viscosity:.12g}")
+        self._dynamic_viscosity_input.setText(f"{preset.dynamic_viscosity:.12g}")
+        message = "已应用物性预设，点击“补齐边界和物性”后写入 OpenFOAM 物性文件。"
+        if hasattr(self, "_physics_prepare_status"):
+            self._physics_prepare_status.append(message)
+        elif hasattr(self, "_parameter_status_label"):
+            self._parameter_status_label.setText(message)
+
+    def _calculate_dynamic_viscosity(self) -> None:
+        try:
+            density = float(self._density_input.text().strip())
+            viscosity = float(self._viscosity_input.text().strip())
+        except ValueError:
+            self._show_error("rho 和 nu 必须是数字，才能计算 mu。")
+            return
+        self._dynamic_viscosity_input.setText(f"{density * viscosity:.12g}")
+        if hasattr(self, "_material_combo"):
+            self._set_combo_value(self._material_combo, "custom")
+        message = "已按 rho × nu 计算动力粘度 mu。"
+        if hasattr(self, "_physics_prepare_status"):
+            self._physics_prepare_status.append(message)
+        elif hasattr(self, "_parameter_status_label"):
+            self._parameter_status_label.setText(message)
 
     def _set_combo_value(self, combo: QComboBox, value: str) -> None:
         index = combo.findData(value)
@@ -3677,7 +3739,8 @@ class MainWindow(QMainWindow):
         self._parameter_status_label.setText(
             f"参数已保存到 Case：solver={parameters.solver_name}, endTime={parameters.end_time:g}, "
             f"deltaT={parameters.delta_t:g}, writeInterval={parameters.write_interval}, "
-            f"rho={parameters.density:g}, nu={parameters.viscosity:g}"
+            f"material={parameters.material_name}, rho={parameters.density:g}, "
+            f"nu={parameters.viscosity:g}, mu={parameters.dynamic_viscosity:g}"
         )
         if hasattr(self, "_solver_select_status_label"):
             self._solver_select_status_label.setText(
@@ -3693,6 +3756,41 @@ class MainWindow(QMainWindow):
         self._append_log("已生成求解器/湍流/patch 边界支持文件：")
         self._append_log("\n".join(f"- {path}" for path in relative_files))
         self._set_status("参数保存完成。")
+        return True
+
+    def _save_control_dict_parameters(self) -> bool:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return False
+        try:
+            self._context.project_service.ensure_minimal_case_template(self._current_project)
+            end_time = float(self._end_time_input.text().strip())
+            delta_t = float(self._delta_t_input.text().strip())
+            write_interval = self._write_interval_input.value()
+            if end_time <= 0 or delta_t <= 0 or write_interval <= 0:
+                raise ValueError("endTime、deltaT 和 writeInterval 必须大于 0。")
+            if delta_t > end_time:
+                raise ValueError("deltaT 不能大于 endTime。")
+            control_path = self._current_project.case_dir / "system" / "controlDict"
+            control_text = control_path.read_text(encoding="utf-8")
+            parameter_service = self._context.case_parameter_service
+            control_text = parameter_service._replace_assignment(control_text, "endTime", parameter_service._format_float(end_time))
+            control_text = parameter_service._replace_assignment(control_text, "deltaT", parameter_service._format_float(delta_t))
+            control_text = parameter_service._replace_assignment(control_text, "writeInterval", str(write_interval))
+            control_path.write_text(control_text, encoding="utf-8")
+        except ValueError as error:
+            self._show_error(f"controlDict 参数不合法：{error}")
+            return False
+        except OSError as error:
+            self._show_error(f"保存 controlDict 失败：{error}")
+            return False
+
+        self._parameter_status_label.setText(
+            f"controlDict 已保存：endTime={end_time:g}, deltaT={delta_t:g}, writeInterval={write_interval}"
+        )
+        self._append_log("仿真参数页已写入 system/controlDict。")
+        self._refresh_solver_run_panel()
+        self._set_status("controlDict 参数保存完成。")
         return True
 
     def _restore_default_parameters(self) -> None:
@@ -3735,8 +3833,10 @@ class MainWindow(QMainWindow):
             f"- writeInterval：{parameters.write_interval}\n"
             f"- maxIterations：{parameters.max_iterations}\n"
             f"- residualTolerance：{parameters.residual_tolerance:g}\n"
+            f"- material：{parameters.material_name}\n"
             f"- rho：{parameters.density:g}\n"
             f"- nu：{parameters.viscosity:g}\n"
+            f"- mu：{parameters.dynamic_viscosity:g}\n"
             f"- turbulence：{parameters.turbulence_model}\n"
             f"- fvSchemes：{parameters.numeric_scheme}\n"
             f"- fvSolution：{parameters.fv_solution_preset}\n"
@@ -4685,7 +4785,7 @@ class MainWindow(QMainWindow):
             return False
         try:
             self._context.project_service.ensure_minimal_case_template(self._current_project)
-            parameters = self._context.case_parameter_service.load(self._current_project)
+            parameters = self._read_parameter_inputs()
             self._context.case_parameter_service.save(self._current_project, parameters)
             synced_files = self._context.project_service.ensure_solver_support_files(
                 self._current_project,
@@ -4828,6 +4928,7 @@ class MainWindow(QMainWindow):
                 "physicalProperties",
                 self._context.case_parameter_service._format_float(parameters.viscosity),
                 self._context.case_parameter_service._format_float(parameters.density),
+                self._context.case_parameter_service._format_float(parameters.dynamic_viscosity),
             ),
             encoding="utf-8",
         )

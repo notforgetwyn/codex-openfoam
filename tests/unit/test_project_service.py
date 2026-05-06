@@ -31,7 +31,8 @@ def test_project_service_creates_project_with_case_template(tmp_path: Path) -> N
     velocity_field = (project.case_dir / "0" / "U").read_text(encoding="utf-8")
     assert "application     icoFoam;" in control_dict
     assert "pRefCell" in fv_solution
-    assert "movingWall" in velocity_field
+    assert "inlet" in velocity_field
+    assert "fixedWalls" in velocity_field
 
 
 def test_project_service_rejects_duplicate_project(tmp_path: Path) -> None:
@@ -100,7 +101,9 @@ def test_project_service_backfills_missing_minimal_case_files(tmp_path: Path) ->
     assert velocity_field in repaired_files
     assert missing_control_dict.exists()
     assert missing_physical_properties.exists()
-    assert "movingWall" in velocity_field.read_text(encoding="utf-8")
+    repaired_velocity = velocity_field.read_text(encoding="utf-8")
+    assert "inlet" in repaired_velocity
+    assert "fixedWalls" in repaired_velocity
 
 
 def test_project_service_syncs_fields_with_legacy_boundary_names(tmp_path: Path) -> None:
