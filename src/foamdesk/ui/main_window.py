@@ -940,7 +940,7 @@ class VtkViewerDialog(QDialog):
 class MainWindow(QMainWindow):
     TAB_PROJECT_HOME = 0
     TAB_DRAW_GEOMETRY = 1
-    TAB_SIMULATION_PREPARE = 2
+    TAB_SOLVER_PREPARE = 2
     TAB_SOLVER_SELECT = 3
     TAB_PARAMETERS = 4
     TAB_SOLVER_RUN = 5
@@ -1132,7 +1132,7 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.setTabsClosable(False)
         self._workspace_tabs.addTab(self._build_project_home_tab(), "项目主页")
         self._workspace_tabs.addTab(self._build_draw_geometry_tab(), "绘制几何")
-        self._workspace_tabs.addTab(self._build_simulation_prepare_tab(), "仿真准备")
+        self._workspace_tabs.addTab(self._build_simulation_prepare_tab(), "求解器准备")
         self._workspace_tabs.addTab(self._build_solver_select_tab(), "求解器选择")
         self._workspace_tabs.addTab(self._build_parameter_tab(), "仿真参数")
         self._workspace_tabs.addTab(self._build_solver_run_tab(), "求解运行")
@@ -1509,17 +1509,17 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
-        title = QLabel("仿真准备")
+        title = QLabel("求解器准备")
         title.setStyleSheet("font-size: 22px; font-weight: 600;")
         description = QLabel(
-            "这个页面连接“绘制几何”到“求解器选择 / 仿真参数 / 求解运行”。"
-            "在绘制几何页生成 blockMeshDict 和 STL 后，先在这里检查并补齐完整仿真所需文件。"
+            "这个页面负责绘制几何之后的求解器前置文件：snappyHexMeshDict、controlDict、"
+            "fvSchemes、fvSolution。后续会把 0/U、0/p 和 physicalProperties 单独拆到仿真准备页。"
         )
         description.setWordWrap(True)
 
         action_row = QHBoxLayout()
         refresh_button = QPushButton("刷新准备状态")
-        prepare_button = QPushButton("补齐仿真文件")
+        prepare_button = QPushButton("补齐求解器文件")
         solver_button = QPushButton("进入求解器选择")
         parameter_button = QPushButton("进入仿真参数")
         run_page_button = QPushButton("进入求解运行")
@@ -1545,8 +1545,8 @@ class MainWindow(QMainWindow):
         self._simulation_prepare_flow.setPlainText(
             "推荐流程：\n"
             "1. 绘制几何：画计算域和物体，点击“生成 blockMeshDict + STL”。\n"
-            "2. 仿真准备：点击“刷新准备状态”，确认 blockMeshDict、STL、参数文件是否齐全。\n"
-            "3. 仿真准备：点击“补齐仿真文件”，生成 controlDict、fvSchemes、fvSolution、物性和边界字段。\n"
+            "2. 求解器准备：点击“刷新准备状态”，确认 snappyHexMeshDict/controlDict/fvSchemes/fvSolution。\n"
+            "3. 求解器准备：点击“补齐求解器文件”，自动生成上述求解器前置文件。\n"
             "4. 求解器选择：选择 icoFoam / simpleFoam / pisoFoam。\n"
             "5. 仿真参数：设置时间、步长、写出间隔、密度、粘度和残差。\n"
             "6. 求解运行：点击一键启动仿真并查看日志。\n"
@@ -1775,7 +1775,7 @@ class MainWindow(QMainWindow):
         action_row = QHBoxLayout()
         start_btn = QPushButton("一键启动仿真")
         
-        start_btn.clicked.connect(lambda _checked=False: self._run_full_pipeline())
+        start_btn.clicked.connect(lambda _checked=False: self._run_simulation_pipeline())
         stop_button = QPushButton("停止")
         stop_button.clicked.connect(lambda _checked=False: self._stop_current_process())
         refresh_button = QPushButton("刷新")
@@ -2123,9 +2123,9 @@ class MainWindow(QMainWindow):
         self._set_status("已打开求解运行页。")
 
     def _open_simulation_prepare_tab(self) -> None:
-        self._workspace_tabs.setCurrentIndex(self.TAB_SIMULATION_PREPARE)
+        self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_PREPARE)
         self._refresh_simulation_prepare_panel()
-        self._set_status("已打开仿真准备页。")
+        self._set_status("已打开求解器准备页。")
 
     def _open_geometry_tab(self) -> None:
         self._workspace_tabs.setCurrentIndex(self.TAB_DRAW_GEOMETRY)
@@ -3225,10 +3225,14 @@ class MainWindow(QMainWindow):
             f"addLayers={self._snappy_add_layers_checkbox.isChecked()}"
         )
         self._refresh_geometry_panel()
-        self._workspace_tabs.setCurrentIndex(self.TAB_SIMULATION_PREPARE)
+        self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_PREPARE)
         self._set_status("snappyHexMeshDict 生成完成。")
 
     def _select_stl_asset_for_snappy(self) -> str | None:
+        selected_name = self._auto_stl_asset_for_snappy()
+        if selected_name:
+            self._append_log(f"自动选择 STL：{selected_name}")
+            return selected_name
         if self._current_project is None:
             self._show_error("请先新建或打开项目。")
             return None
@@ -3252,6 +3256,26 @@ class MainWindow(QMainWindow):
         if not ok or not selected_name:
             return None
         return selected_name
+
+    def _auto_stl_asset_for_snappy(self) -> str | None:
+        if self._current_project is None:
+            return None
+        assets = self._context.geometry_import_service.list_assets(self._current_project)
+        stl_assets = [asset for asset in assets if asset.format.upper() == "STL" and asset.stored_path.exists()]
+        if not stl_assets:
+            return None
+        if len(stl_assets) == 1:
+            return stl_assets[0].name
+
+        draw_assets = [
+            asset
+            for asset in stl_assets
+            if asset.name.startswith("body_") or asset.stored_path.name.startswith("body_")
+        ]
+        if draw_assets:
+            newest = max(draw_assets, key=lambda asset: asset.stored_path.stat().st_mtime)
+            return newest.name
+        return None
 
     def _run_snappy_hex_mesh(self) -> None:
         if self._foam_process and self._foam_process.state() != QProcess.ProcessState.NotRunning:
@@ -3426,25 +3450,28 @@ class MainWindow(QMainWindow):
             self._show_error(f"读取求解器配置失败：{error}")
             return
 
-        selected_name = self._select_stl_asset_for_snappy()
-        if not selected_name:
-            return
-
         block_mesh_dict = self._current_project.case_dir / "system" / "blockMeshDict"
         if not block_mesh_dict.exists():
             self._show_error("当前 Case 缺少 system/blockMeshDict，一键仿真需要先有背景网格配置。")
             return
 
+        selected_name = self._auto_stl_asset_for_snappy()
+        has_stl_geometry = selected_name is not None
         try:
-            dict_path = self._context.geometry_import_service.generate_snappy_hex_mesh_dict(
-                self._current_project,
-                selected_name,
-                self._read_snappy_settings(),
-            )
+            if has_stl_geometry:
+                dict_path = self._context.geometry_import_service.generate_snappy_hex_mesh_dict(
+                    self._current_project,
+                    selected_name,
+                    self._read_snappy_settings(),
+                )
+                field_patches = ("movingWall", "fixedWalls", "importedGeometry")
+            else:
+                dict_path = None
+                field_patches = None
             synced_fields = self._context.project_service.ensure_solver_support_files(
                 self._current_project,
                 parameters,
-                ("movingWall", "fixedWalls", "importedGeometry"),
+                field_patches,
             )
         except (OSError, ValueError) as error:
             self._show_error(f"一键仿真准备失败：{error}")
@@ -3461,17 +3488,35 @@ class MainWindow(QMainWindow):
         self._refresh_geometry_panel()
         if synced_fields:
             relative_fields = [str(path.relative_to(self._current_project.case_dir)) for path in synced_fields]
-            self._append_log("已同步 snappy 后求解边界字段：")
+            self._append_log("已同步求解边界字段：")
             self._append_log("\n".join(f"- {path}" for path in relative_fields))
+        if dict_path is not None:
+            self._append_log(f"已自动生成 snappyHexMeshDict：{dict_path}")
+        else:
+            self._append_log("当前 Case 没有 STL，流水线将跳过 snappyHexMesh。")
 
+        command_steps = ["echo FOAMDESK_STEP:blockMesh && blockMesh"]
+        if has_stl_geometry:
+            command_steps.append("echo FOAMDESK_STEP:snappyHexMesh && snappyHexMesh -overwrite")
+        command_steps.extend(
+            [
+                "echo FOAMDESK_STEP:checkMesh && checkMesh",
+                f"echo FOAMDESK_STEP:{shlex.quote(parameters.solver_name)} && {shlex.quote(parameters.solver_name)}",
+            ]
+        )
         command = (
             f"source {shlex.quote(status.env_script_path)} >/dev/null 2>&1 && "
             f"cd {shlex.quote(str(self._current_project.case_dir))} && "
-            "echo FOAMDESK_STEP:blockMesh && blockMesh && "
-            "echo FOAMDESK_STEP:snappyHexMesh && snappyHexMesh -overwrite && "
-            "echo FOAMDESK_STEP:checkMesh && checkMesh && "
-            f"echo FOAMDESK_STEP:{shlex.quote(parameters.solver_name)} && {shlex.quote(parameters.solver_name)}"
+            + " && ".join(command_steps)
         )
+        if hasattr(self, "_solver_command_label"):
+            display_steps = ["blockMesh"]
+            if has_stl_geometry:
+                display_steps.append("snappyHexMesh -overwrite")
+            display_steps.extend(["checkMesh", parameters.solver_name])
+            self._solver_command_label.setText(
+                "执行命令：" + " && ".join(display_steps)
+            )
         self._foam_process = QProcess(self)
         self._foam_process.setProgram("bash")
         self._foam_process.setArguments(["-lc", command])
@@ -4572,20 +4617,23 @@ class MainWindow(QMainWindow):
             return
 
         case_dir = self._current_project.case_dir
-        required_files = [
-            case_dir / "system" / "blockMeshDict",
+        stl_dir = case_dir / "constant" / "triSurface"
+        stl_files = sorted(stl_dir.glob("*.stl")) if stl_dir.exists() else []
+        solver_prepare_files = [
             case_dir / "system" / "controlDict",
             case_dir / "system" / "fvSchemes",
             case_dir / "system" / "fvSolution",
+        ]
+        if stl_files:
+            solver_prepare_files.insert(0, case_dir / "system" / "snappyHexMeshDict")
+        future_simulation_prepare_files = [
             case_dir / "constant" / "physicalProperties",
             case_dir / "0" / "U",
             case_dir / "0" / "p",
         ]
-        stl_dir = case_dir / "constant" / "triSurface"
-        stl_files = sorted(stl_dir.glob("*.stl")) if stl_dir.exists() else []
         snappy_dict = case_dir / "system" / "snappyHexMeshDict"
         draw_state = self._draw_geometry_state_path()
-        missing = [path for path in required_files if not path.exists()]
+        missing = [path for path in solver_prepare_files if not path.exists()]
 
         try:
             parameters = self._context.case_parameter_service.load(self._current_project)
@@ -4598,7 +4646,7 @@ class MainWindow(QMainWindow):
             parameter_text = f"参数尚未完整：{error}"
 
         lines = [
-            "仿真准备状态",
+            "求解器准备状态",
             "",
             f"- 当前项目：{self._current_project.name}",
             f"- 当前 Case：{self._current_project.case_name}",
@@ -4609,16 +4657,19 @@ class MainWindow(QMainWindow):
             f"- snappyHexMeshDict：{'已生成' if snappy_dict.exists() else '未生成'}",
             f"- 参数/求解器：{parameter_text}",
             "",
-            "完整仿真所需文件检查：",
+            "本页负责的 1-4 求解器准备文件：",
         ]
-        for path in required_files:
+        for path in solver_prepare_files:
+            lines.append(f"- {'OK' if path.exists() else '缺失'}：{path.relative_to(case_dir)}")
+        lines.extend(["", "后续会拆到仿真准备页的 5-6 文件："])
+        for path in future_simulation_prepare_files:
             lines.append(f"- {'OK' if path.exists() else '缺失'}：{path.relative_to(case_dir)}")
 
         if missing:
             lines.extend(
                 [
                     "",
-                    "下一步建议：点击“补齐仿真文件”，先生成求解器、参数、物性和边界字段文件。",
+                    "下一步建议：点击“补齐求解器文件”，先生成 snappyHexMeshDict、controlDict、fvSchemes、fvSolution。",
                 ]
             )
         else:
@@ -4639,19 +4690,28 @@ class MainWindow(QMainWindow):
             self._context.project_service.ensure_minimal_case_template(self._current_project)
             parameters = self._context.case_parameter_service.load(self._current_project)
             self._context.case_parameter_service.save(self._current_project, parameters)
+            selected_name = self._auto_stl_asset_for_snappy()
+            if selected_name:
+                snappy_dict = self._context.geometry_import_service.generate_snappy_hex_mesh_dict(
+                    self._current_project,
+                    selected_name,
+                    self._read_snappy_settings(),
+                )
+                self._append_log(f"已生成 snappyHexMeshDict：{snappy_dict}")
             solver_files = self._context.project_service.ensure_solver_support_files(self._current_project, parameters)
         except (OSError, ValueError) as error:
-            self._show_error(f"仿真准备失败：{error}")
+            self._show_error(f"求解器准备失败：{error}")
             return False
 
-        self._append_log("仿真准备完成：已补齐求解器、参数、物性和边界字段文件。")
+        self._append_log("求解器准备完成：已补齐 snappyHexMeshDict、controlDict、fvSchemes、fvSolution。")
+        self._append_log("说明：0/U、0/p、physicalProperties 当前仍会临时同步，后续再拆到仿真准备页。")
         if solver_files:
             relative_files = [str(path.relative_to(self._current_project.case_dir)) for path in solver_files]
             self._append_log("\n".join(f"- {path}" for path in relative_files))
         self._load_case_parameters()
-        self._refresh_solver_run_panel("仿真准备完成")
+        self._refresh_solver_run_panel("求解器准备完成")
         self._refresh_simulation_prepare_panel()
-        self._set_status("仿真准备完成。")
+        self._set_status("求解器准备完成。")
         return True
 
     def _on_activity_changed(self, index: int) -> None:
@@ -4869,47 +4929,7 @@ class MainWindow(QMainWindow):
         self._set_status("项目搜索已应用。")
 
     def _run_full_pipeline(self) -> None:
-        if self._foam_process and self._foam_process.state() != QProcess.ProcessState.NotRunning:
-            self._show_error("已有任务正在运行，请先停止。")
-            return
-        if self._current_project is None:
-            self._show_error("请先新建或打开项目。")
-            return
-        status = self._context.environment_detector.detect()
-        if not status.is_available or not status.env_script_path:
-            self._show_error(f"OpenFOAM 环境不可用：{status.detail}")
-            return
-        env = "source " + shlex.quote(status.env_script_path) + " >/dev/null 2>&1"
-        case = shlex.quote(str(self._current_project.case_dir))
-        solver = self._solver_name_combo.currentData() if hasattr(self, "_solver_name_combo") else "icoFoam"
-        has_stl = False
-        ts = self._current_project.case_dir / "constant" / "triSurface"
-        if ts.exists():
-            for f in ts.iterdir():
-                if f.suffix.lower() == ".stl":
-                    has_stl = True
-                    break
-        steps = ["blockMesh"]
-        if has_stl:
-            steps.append("snappyHexMesh -overwrite")
-        steps.append(solver)
-        cmd = " && ".join(steps)
-        self._bottom_tabs.setCurrentIndex(0)
-        self._task_text.setPlainText("任务状态：全流程仿真运行中")
-        self._current_process_output = ""
-        self._active_process_kind = "full_pipeline"
-        if hasattr(self, "_solver_command_label"):
-            self._solver_command_label.setText("执行命令：" + cmd)
-        self._refresh_solver_run_panel("全流程仿真运行中")
-        self._set_status("全流程仿真运行中。")
-        self._append_log("启动全流程：" + cmd)
-        self._foam_process = QProcess(self)
-        self._foam_process.setProgram("bash")
-        self._foam_process.setArguments(["-lc", env + " && cd " + case + " && " + cmd])
-        self._foam_process.readyReadStandardOutput.connect(self._read_process_stdout)
-        self._foam_process.readyReadStandardError.connect(self._read_process_stderr)
-        self._foam_process.finished.connect(self._on_process_finished)
-        self._foam_process.start()
+        self._run_simulation_pipeline()
 
 
     def _run_minimal_simulation(self) -> None:
@@ -5073,6 +5093,8 @@ class MainWindow(QMainWindow):
             "snappyHexMesh": "snappyHexMesh 贴体网格生成",
             "checkMesh": "checkMesh 网格质量检查",
             "icoFoam": "icoFoam 最小求解",
+            "simpleFoam": "simpleFoam 稳态求解",
+            "pisoFoam": "pisoFoam 瞬态求解",
         }
         matches = re.findall(r"FOAMDESK_STEP:([A-Za-z0-9_]+)", output)
         if not matches:
@@ -5102,7 +5124,7 @@ class MainWindow(QMainWindow):
                 "- 降低 snappy 加密等级或关闭边界层，先得到可用网格。\n"
                 "- 如果非正交角或扭曲度过高，需要调整背景网格、STL 几何质量或 snappy 参数。"
             )
-        if "icoFoam" in failed_step:
+        if any(solver in failed_step for solver in ("icoFoam", "simpleFoam", "pisoFoam")):
             return (
                 "修复建议：\n"
                 "- 检查 `0/U` 和 `0/p` 的边界名称是否和网格 boundary 文件一致。\n"
