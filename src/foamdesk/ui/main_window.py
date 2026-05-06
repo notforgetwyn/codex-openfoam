@@ -941,12 +941,13 @@ class MainWindow(QMainWindow):
     TAB_PROJECT_HOME = 0
     TAB_DRAW_GEOMETRY = 1
     TAB_SOLVER_PREPARE = 2
-    TAB_SOLVER_SELECT = 3
-    TAB_PARAMETERS = 4
-    TAB_SOLVER_RUN = 5
-    TAB_ENVIRONMENT = 6
-    TAB_SETTINGS = 7
-    TAB_RESULTS = 8
+    TAB_PHYSICS_PREPARE = 3
+    TAB_SOLVER_SELECT = 4
+    TAB_PARAMETERS = 5
+    TAB_SOLVER_RUN = 6
+    TAB_ENVIRONMENT = 7
+    TAB_SETTINGS = 8
+    TAB_RESULTS = 9
 
     def __init__(self, context: ApplicationContext, initial_project: SimulationProject | None = None) -> None:
         super().__init__()
@@ -1133,6 +1134,7 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.addTab(self._build_project_home_tab(), "项目主页")
         self._workspace_tabs.addTab(self._build_draw_geometry_tab(), "绘制几何")
         self._workspace_tabs.addTab(self._build_simulation_prepare_tab(), "求解器准备")
+        self._workspace_tabs.addTab(self._build_physics_prepare_tab(), "仿真准备")
         self._workspace_tabs.addTab(self._build_solver_select_tab(), "求解器选择")
         self._workspace_tabs.addTab(self._build_parameter_tab(), "仿真参数")
         self._workspace_tabs.addTab(self._build_solver_run_tab(), "求解运行")
@@ -1520,17 +1522,19 @@ class MainWindow(QMainWindow):
         action_row = QHBoxLayout()
         refresh_button = QPushButton("刷新准备状态")
         prepare_button = QPushButton("补齐求解器文件")
+        physics_button = QPushButton("进入仿真准备")
         solver_button = QPushButton("进入求解器选择")
         parameter_button = QPushButton("进入仿真参数")
         run_page_button = QPushButton("进入求解运行")
         start_button = QPushButton("一键启动仿真")
         refresh_button.clicked.connect(lambda _checked=False: self._refresh_simulation_prepare_panel())
         prepare_button.clicked.connect(lambda _checked=False: self._prepare_simulation_from_geometry())
+        physics_button.clicked.connect(lambda _checked=False: self._open_physics_prepare_tab())
         solver_button.clicked.connect(lambda _checked=False: self._open_solver_select_tab())
         parameter_button.clicked.connect(lambda _checked=False: self._open_parameter_tab())
         run_page_button.clicked.connect(lambda _checked=False: self._open_solver_run_tab())
         start_button.clicked.connect(lambda _checked=False: self._run_simulation_pipeline())
-        for button in (refresh_button, prepare_button, solver_button, parameter_button, run_page_button, start_button):
+        for button in (refresh_button, prepare_button, physics_button, solver_button, parameter_button, run_page_button, start_button):
             action_row.addWidget(button)
         action_row.addStretch(1)
 
@@ -1547,9 +1551,10 @@ class MainWindow(QMainWindow):
             "1. 绘制几何：画计算域和物体，点击“生成 blockMeshDict + STL”。\n"
             "2. 求解器准备：点击“刷新准备状态”，确认 snappyHexMeshDict/controlDict/fvSchemes/fvSolution。\n"
             "3. 求解器准备：点击“补齐求解器文件”，自动生成上述求解器前置文件。\n"
-            "4. 求解器选择：选择 icoFoam / simpleFoam / pisoFoam。\n"
-            "5. 仿真参数：设置时间、步长、写出间隔、密度、粘度和残差。\n"
-            "6. 求解运行：点击一键启动仿真并查看日志。\n"
+            "4. 仿真准备：补齐 0/U、0/p 和 physicalProperties。\n"
+            "5. 求解器选择：选择 icoFoam / simpleFoam / pisoFoam。\n"
+            "6. 仿真参数：设置时间、步长、写出间隔、密度、粘度和残差。\n"
+            "7. 求解运行：点击一键启动仿真并查看日志。\n"
         )
 
         layout.addWidget(title)
@@ -1557,6 +1562,68 @@ class MainWindow(QMainWindow):
         layout.addLayout(action_row)
         layout.addWidget(self._simulation_prepare_status)
         layout.addWidget(self._simulation_prepare_flow)
+        layout.addStretch(1)
+        return wrapper
+
+    def _build_physics_prepare_tab(self) -> QWidget:
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        title = QLabel("仿真准备")
+        title.setStyleSheet("font-size: 22px; font-weight: 600;")
+        description = QLabel(
+            "这个页面负责完整仿真中的 5-6：初始/边界条件 0/U、0/p，以及流体物性 "
+            "physicalProperties。求解器字典文件由前一个“求解器准备”页面负责。"
+        )
+        description.setWordWrap(True)
+
+        action_row = QHBoxLayout()
+        refresh_button = QPushButton("刷新仿真准备状态")
+        prepare_button = QPushButton("补齐边界和物性")
+        solver_button = QPushButton("进入求解器选择")
+        parameter_button = QPushButton("进入仿真参数")
+        run_page_button = QPushButton("进入求解运行")
+        start_button = QPushButton("一键启动仿真")
+        refresh_button.clicked.connect(lambda _checked=False: self._refresh_physics_prepare_panel())
+        prepare_button.clicked.connect(lambda _checked=False: self._prepare_physics_files())
+        solver_button.clicked.connect(lambda _checked=False: self._open_solver_select_tab())
+        parameter_button.clicked.connect(lambda _checked=False: self._open_parameter_tab())
+        run_page_button.clicked.connect(lambda _checked=False: self._open_solver_run_tab())
+        start_button.clicked.connect(lambda _checked=False: self._run_simulation_pipeline())
+        for button in (refresh_button, prepare_button, solver_button, parameter_button, run_page_button, start_button):
+            action_row.addWidget(button)
+        action_row.addStretch(1)
+
+        self._physics_prepare_status = QTextEdit()
+        self._physics_prepare_status.setReadOnly(True)
+        self._physics_prepare_status.setMinimumHeight(150)
+        self._physics_prepare_status.setPlainText("请先新建或打开项目。")
+
+        self._boundary_table = QTableWidget(0, 6)
+        self._boundary_table.setHorizontalHeaderLabels(["Patch", "角色", "U 类型", "U 值", "p 类型", "p 值"])
+        self._boundary_table.horizontalHeader().setStretchLastSection(True)
+        self._boundary_table.setMinimumHeight(220)
+
+        self._physics_prepare_flow = QTextEdit()
+        self._physics_prepare_flow.setReadOnly(True)
+        self._physics_prepare_flow.setMaximumHeight(160)
+        self._physics_prepare_flow.setPlainText(
+            "本页负责：\n"
+            "- 0/U：速度初始场和入口/壁面边界条件。\n"
+            "- 0/p：压力初始场和出口/壁面边界条件。\n"
+            "- constant/physicalProperties：密度、粘度等流体物性。\n\n"
+            "推荐流程：先完成求解器准备，再到本页补齐边界和物性，然后进入求解运行。"
+        )
+
+        layout.addWidget(title)
+        layout.addWidget(description)
+        layout.addLayout(action_row)
+        layout.addWidget(self._physics_prepare_status)
+        layout.addWidget(QLabel("Patch 边界条件表"))
+        layout.addWidget(self._boundary_table)
+        layout.addWidget(self._physics_prepare_flow)
         layout.addStretch(1)
         return wrapper
 
@@ -2126,6 +2193,11 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_PREPARE)
         self._refresh_simulation_prepare_panel()
         self._set_status("已打开求解器准备页。")
+
+    def _open_physics_prepare_tab(self) -> None:
+        self._workspace_tabs.setCurrentIndex(self.TAB_PHYSICS_PREPARE)
+        self._refresh_physics_prepare_panel()
+        self._set_status("已打开仿真准备页。")
 
     def _open_geometry_tab(self) -> None:
         self._workspace_tabs.setCurrentIndex(self.TAB_DRAW_GEOMETRY)
@@ -3473,6 +3545,7 @@ class MainWindow(QMainWindow):
                 parameters,
                 field_patches,
             )
+            custom_boundary_files = self._apply_boundary_table_to_case(parameters)
         except (OSError, ValueError) as error:
             self._show_error(f"一键仿真准备失败：{error}")
             return
@@ -3490,6 +3563,10 @@ class MainWindow(QMainWindow):
             relative_fields = [str(path.relative_to(self._current_project.case_dir)) for path in synced_fields]
             self._append_log("已同步求解边界字段：")
             self._append_log("\n".join(f"- {path}" for path in relative_fields))
+        if custom_boundary_files:
+            relative_files = [str(path.relative_to(self._current_project.case_dir)) for path in custom_boundary_files]
+            self._append_log("已应用仿真准备页边界表：")
+            self._append_log("\n".join(f"- {path}" for path in relative_files))
         if dict_path is not None:
             self._append_log(f"已自动生成 snappyHexMeshDict：{dict_path}")
         else:
@@ -4714,6 +4791,288 @@ class MainWindow(QMainWindow):
         self._set_status("求解器准备完成。")
         return True
 
+    def _refresh_physics_prepare_panel(self) -> None:
+        if not hasattr(self, "_physics_prepare_status"):
+            return
+        if self._current_project is None:
+            self._physics_prepare_status.setPlainText("请先新建或打开项目。")
+            return
+
+        case_dir = self._current_project.case_dir
+        physics_files = [
+            case_dir / "0" / "U",
+            case_dir / "0" / "p",
+            case_dir / "constant" / "physicalProperties",
+        ]
+        missing = [path for path in physics_files if not path.exists()]
+        try:
+            parameters = self._context.case_parameter_service.load(self._current_project)
+            parameter_text = (
+                f"rho={parameters.density:g}, nu={parameters.viscosity:g}, "
+                f"solver={parameters.solver_name}, turbulence={parameters.turbulence_model}"
+            )
+        except (OSError, ValueError) as error:
+            parameter_text = f"参数尚未完整：{error}"
+
+        lines = [
+            "仿真准备状态",
+            "",
+            f"- 当前项目：{self._current_project.name}",
+            f"- 当前 Case：{self._current_project.case_name}",
+            f"- Case 路径：{case_dir}",
+            f"- 参数/物性来源：{parameter_text}",
+            "",
+            "本页负责的 5-6 仿真准备文件：",
+        ]
+        for path in physics_files:
+            lines.append(f"- {'OK' if path.exists() else '缺失'}：{path.relative_to(case_dir)}")
+
+        if missing:
+            lines.extend(
+                [
+                    "",
+                    "下一步建议：点击“补齐边界和物性”，生成 0/U、0/p 和 physicalProperties。",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "",
+                    "下一步建议：进入“求解器选择”和“仿真参数”确认配置，然后进入“求解运行”。",
+                ]
+            )
+        self._physics_prepare_status.setPlainText("\n".join(lines))
+        self._populate_boundary_table()
+
+    def _prepare_physics_files(self) -> bool:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return False
+        try:
+            self._context.project_service.ensure_minimal_case_template(self._current_project)
+            parameters = self._context.case_parameter_service.load(self._current_project)
+            self._context.case_parameter_service.save(self._current_project, parameters)
+            synced_files = self._context.project_service.ensure_solver_support_files(
+                self._current_project,
+                parameters,
+            )
+            custom_files = self._apply_boundary_table_to_case(parameters)
+        except (OSError, ValueError) as error:
+            self._show_error(f"仿真准备失败：{error}")
+            return False
+
+        self._append_log("仿真准备完成：已补齐 0/U、0/p 和 physicalProperties。")
+        written_files = list(dict.fromkeys([*synced_files, *custom_files]))
+        if written_files:
+            relative_files = [str(path.relative_to(self._current_project.case_dir)) for path in written_files]
+            self._append_log("\n".join(f"- {path}" for path in relative_files))
+        self._load_case_parameters()
+        self._refresh_physics_prepare_panel()
+        self._refresh_solver_run_panel("仿真准备完成")
+        self._set_status("仿真准备完成。")
+        return True
+
+    def _physics_boundary_config_path(self) -> Path | None:
+        if self._current_project is None:
+            return None
+        return self._current_project.case_dir / "system" / "foamdesk_boundary_table.json"
+
+    def _physics_boundary_names(self) -> tuple[str, ...]:
+        if self._current_project is None:
+            return ()
+        names = list(
+            self._context.project_service._extract_boundary_names(
+                self._current_project.case_dir / "system" / "blockMeshDict"
+            )
+        )
+        stl_dir = self._current_project.case_dir / "constant" / "triSurface"
+        if stl_dir.exists() and any(path.suffix.lower() == ".stl" for path in stl_dir.iterdir()):
+            if "importedGeometry" not in names:
+                names.append("importedGeometry")
+        return tuple(dict.fromkeys(name for name in names if name.strip()))
+
+    def _default_boundary_row(self, name: str) -> dict:
+        lower = name.lower()
+        if "inlet" in lower:
+            return {"patch": name, "role": "入口", "u_type": "fixedValue", "u_value": "(1 0 0)", "p_type": "zeroGradient", "p_value": ""}
+        if "outlet" in lower:
+            return {"patch": name, "role": "出口", "u_type": "zeroGradient", "u_value": "", "p_type": "fixedValue", "p_value": "0"}
+        if "symmetry" in lower:
+            return {"patch": name, "role": "对称面", "u_type": "symmetryPlane", "u_value": "", "p_type": "symmetryPlane", "p_value": ""}
+        return {"patch": name, "role": "壁面/物体", "u_type": "noSlip", "u_value": "", "p_type": "zeroGradient", "p_value": ""}
+
+    def _load_boundary_table_config(self) -> dict[str, dict]:
+        path = self._physics_boundary_config_path()
+        if path is None or not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        rows = payload.get("patches", [])
+        if not isinstance(rows, list):
+            return {}
+        result = {}
+        for row in rows:
+            if isinstance(row, dict) and row.get("patch"):
+                result[str(row["patch"])] = row
+        return result
+
+    def _populate_boundary_table(self) -> None:
+        if not hasattr(self, "_boundary_table") or self._current_project is None:
+            return
+        names = self._physics_boundary_names()
+        saved_rows = self._load_boundary_table_config()
+        self._boundary_table.blockSignals(True)
+        self._boundary_table.setRowCount(0)
+        for row_index, name in enumerate(names):
+            row = {**self._default_boundary_row(name), **saved_rows.get(name, {})}
+            self._boundary_table.insertRow(row_index)
+            values = [
+                row.get("patch", name),
+                row.get("role", ""),
+                row.get("u_type", ""),
+                row.get("u_value", ""),
+                row.get("p_type", ""),
+                row.get("p_value", ""),
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if column == 0:
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self._boundary_table.setItem(row_index, column, item)
+        self._boundary_table.blockSignals(False)
+
+    def _read_boundary_table_rows(self) -> list[dict]:
+        if not hasattr(self, "_boundary_table"):
+            return []
+        rows = []
+        for row_index in range(self._boundary_table.rowCount()):
+            values = []
+            for column in range(self._boundary_table.columnCount()):
+                item = self._boundary_table.item(row_index, column)
+                values.append(item.text().strip() if item else "")
+            if not values[0]:
+                continue
+            rows.append(
+                {
+                    "patch": values[0],
+                    "role": values[1],
+                    "u_type": values[2] or "zeroGradient",
+                    "u_value": values[3],
+                    "p_type": values[4] or "zeroGradient",
+                    "p_value": values[5],
+                }
+            )
+        return rows
+
+    def _apply_boundary_table_to_case(self, parameters: SimulationParameters) -> list[Path]:
+        if self._current_project is None:
+            return []
+        rows = self._read_boundary_table_rows()
+        if not rows:
+            self._populate_boundary_table()
+            rows = self._read_boundary_table_rows()
+        case_dir = self._current_project.case_dir
+        zero_dir = case_dir / "0"
+        constant_dir = case_dir / "constant"
+        system_dir = case_dir / "system"
+        zero_dir.mkdir(parents=True, exist_ok=True)
+        constant_dir.mkdir(parents=True, exist_ok=True)
+        system_dir.mkdir(parents=True, exist_ok=True)
+        u_path = zero_dir / "U"
+        p_path = zero_dir / "p"
+        physical_path = constant_dir / "physicalProperties"
+        config_path = self._physics_boundary_config_path()
+        u_path.write_text(self._custom_velocity_field(rows), encoding="utf-8")
+        p_path.write_text(self._custom_pressure_field(rows), encoding="utf-8")
+        physical_path.write_text(
+            self._context.case_parameter_service._default_properties_text(
+                "physicalProperties",
+                self._context.case_parameter_service._format_float(parameters.viscosity),
+                self._context.case_parameter_service._format_float(parameters.density),
+            ),
+            encoding="utf-8",
+        )
+        written = [u_path, p_path, physical_path]
+        if config_path is not None:
+            config_path.write_text(
+                json.dumps({"version": 1, "patches": rows}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            written.append(config_path)
+        return written
+
+    def _custom_velocity_field(self, rows: list[dict]) -> str:
+        boundary_field = "\n".join(self._custom_velocity_entry(row) for row in rows)
+        return f"""FoamFile
+{{
+    version     2.0;
+    format      ascii;
+    class       volVectorField;
+    object      U;
+}}
+
+dimensions      [0 1 -1 0 0 0 0];
+internalField   uniform (0 0 0);
+
+boundaryField
+{{
+{boundary_field}
+}}
+"""
+
+    def _custom_pressure_field(self, rows: list[dict]) -> str:
+        boundary_field = "\n".join(self._custom_pressure_entry(row) for row in rows)
+        return f"""FoamFile
+{{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    object      p;
+}}
+
+dimensions      [0 2 -2 0 0 0 0];
+internalField   uniform 0;
+
+boundaryField
+{{
+{boundary_field}
+}}
+"""
+
+    def _custom_velocity_entry(self, row: dict) -> str:
+        patch = row["patch"]
+        boundary_type = row.get("u_type", "zeroGradient")
+        value = row.get("u_value", "").strip() or "(0 0 0)"
+        if boundary_type == "fixedValue":
+            body = f"type            fixedValue;\n        value           uniform {value};"
+        elif boundary_type == "zeroGradient":
+            body = "type            zeroGradient;"
+        elif boundary_type == "symmetryPlane":
+            body = "type            symmetryPlane;"
+        else:
+            body = f"type            {boundary_type};"
+        return f"""    {patch}
+    {{
+        {body}
+    }}"""
+
+    def _custom_pressure_entry(self, row: dict) -> str:
+        patch = row["patch"]
+        boundary_type = row.get("p_type", "zeroGradient")
+        value = row.get("p_value", "").strip() or "0"
+        if boundary_type == "fixedValue":
+            body = f"type            fixedValue;\n        value           uniform {value};"
+        elif boundary_type == "symmetryPlane":
+            body = "type            symmetryPlane;"
+        else:
+            body = "type            zeroGradient;"
+        return f"""    {patch}
+    {{
+        {body}
+    }}"""
+
     def _on_activity_changed(self, index: int) -> None:
         if index == 0:
             self._workspace_tabs.setCurrentIndex(self.TAB_PROJECT_HOME)
@@ -4779,6 +5138,7 @@ class MainWindow(QMainWindow):
         self._refresh_geometry_panel()
         self._load_draw_geometry_state()
         self._refresh_simulation_prepare_panel()
+        self._refresh_physics_prepare_panel()
         self._restore_project_result_state()
         self._append_log(f"当前项目：{project.path}")
         self._set_status(status_text)
