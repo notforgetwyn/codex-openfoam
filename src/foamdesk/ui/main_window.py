@@ -14,7 +14,7 @@ from matplotlib.figure import Figure
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from scipy.interpolate import griddata
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtCore import QProcess, QTimer
+from PySide6.QtCore import QProcess
 from PySide6.QtGui import QFont
 from vtkmodules.vtkCommonCore import vtkPoints
 from vtkmodules.vtkCommonDataModel import vtkPolyData
@@ -57,7 +57,6 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
-    QWidgetAction,
 )
 from vtkmodules.util.numpy_support import vtk_to_numpy
 
@@ -947,6 +946,46 @@ class MainWindow(QMainWindow):
     TAB_ENVIRONMENT = 6
     TAB_SETTINGS = 7
     TAB_RESULTS = 8
+    RESULT_FIELDS = [
+        "U",
+        "mag(U)",
+        "p",
+        "T",
+        "k",
+        "epsilon",
+        "omega",
+        "nut",
+        "yPlus",
+        "wallShearStress",
+        "vorticity",
+        "Q",
+        "alpha.water",
+    ]
+    RESULT_FIELD_UNITS = {
+        "U": "m/s",
+        "mag(U)": "m/s",
+        "p": "m2/s2 或 Pa",
+        "T": "K",
+        "k": "m2/s2",
+        "epsilon": "m2/s3",
+        "omega": "1/s",
+        "nut": "m2/s",
+        "yPlus": "无量纲",
+        "wallShearStress": "Pa 或 m2/s2",
+        "vorticity": "1/s",
+        "Q": "1/s2",
+        "alpha.water": "0-1",
+    }
+    RESULT_DISPLAY_MODES = [
+        "Surface 表面云图",
+        "Slice 切片",
+        "Contour 等值线",
+        "Iso-surface 等值面",
+        "Vector 矢量箭头",
+        "Streamline 流线",
+        "Glyph 箭头",
+        "Volume rendering 体渲染",
+    ]
 
     def __init__(self, context: ApplicationContext, initial_project: SimulationProject | None = None) -> None:
         super().__init__()
@@ -960,8 +999,6 @@ class MainWindow(QMainWindow):
         self._last_diagnostic_summary = "暂无诊断。"
         self._suspend_draw_geometry_persist = False
         self._vtk_viewer: VtkViewerDialog | None = None
-        self._visual_animation_timer = QTimer(self)
-        self._visual_animation_timer.timeout.connect(self._advance_visualization_frame)
         self.setWindowTitle("FoamDesk")
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.resize(1400, 900)
@@ -1855,23 +1892,8 @@ class MainWindow(QMainWindow):
 
         title = QLabel("结果")
         title.setStyleSheet("font-size: 22px; font-weight: 600;")
-        description = QLabel("当前阶段先索引 OpenFOAM 运行产物，后续再接入曲线和云图。")
+        description = QLabel("当前页面按“结果场选择 + 显示方式选择”组织后处理入口。先接入表面云图、切片、矢量箭头和流线。")
         description.setWordWrap(True)
-        refresh_visual_fields_button = QPushButton("刷新可视化字段")
-        load_selected_surface_button = QPushButton("加载所选字段表面图")
-        play_visual_animation_button = QPushButton("播放动画")
-        stop_visual_animation_button = QPushButton("暂停动画")
-        previous_frame_button = QPushButton("上一帧")
-        next_frame_button = QPushButton("下一帧")
-
-        def make_widget_menu_button(title: str, panel: QWidget) -> QPushButton:
-            button = QPushButton(title)
-            menu = QMenu(button)
-            action = QWidgetAction(menu)
-            action.setDefaultWidget(panel)
-            menu.addAction(action)
-            button.setMenu(menu)
-            return button
 
         result_data_button = self._make_menu_button(
             "结果数据",
@@ -1882,156 +1904,8 @@ class MainWindow(QMainWindow):
                 ("导出 Markdown 报告", self._export_markdown_report),
             ],
         )
-        three_d_button = self._make_menu_button(
-            "3D 视图",
-            [
-                ("加载 3D 技术验证场景", self._load_3d_preview_scene),
-                ("加载真实 OpenFOAM 3D Case", self._load_openfoam_3d_case),
-            ],
-        )
-        contour_button = self._make_menu_button(
-            "云图",
-            [
-                ("加载压力云图", self._load_pressure_cloud),
-                ("加载压力表面云图", self._load_pressure_surface_cloud),
-                ("加载所选字段表面图", self._load_selected_field_surface),
-            ],
-        )
-        velocity_button = self._make_menu_button(
-            "速度场",
-            [
-                ("加载速度箭头", self._load_velocity_vectors),
-                ("加载速度切面", self._load_velocity_slice),
-                ("加载连续速度切面", self._load_velocity_slice_contour),
-                ("加载速度流线", self._load_velocity_streamlines),
-            ],
-        )
-        refresh_visual_fields_button.clicked.connect(lambda _checked=False: self._refresh_visualization_selectors())
-        load_selected_surface_button.clicked.connect(lambda _checked=False: self._load_selected_field_surface())
-        play_visual_animation_button.clicked.connect(lambda _checked=False: self._play_visualization_animation())
-        stop_visual_animation_button.clicked.connect(lambda _checked=False: self._stop_visualization_animation())
-        previous_frame_button.clicked.connect(lambda _checked=False: self._step_visualization_frame(-1))
-        next_frame_button.clicked.connect(lambda _checked=False: self._step_visualization_frame(1))
         action_row = QHBoxLayout()
         action_row.addWidget(result_data_button)
-        action_row.addWidget(three_d_button)
-        action_row.addWidget(contour_button)
-        action_row.addWidget(velocity_button)
-        self._visual_field_combo = QComboBox()
-        self._visual_time_combo = QComboBox()
-        self._slice_axis_combo = QComboBox()
-        self._slice_axis_combo.addItems(["自动", "X", "Y", "Z"])
-        self._slice_position_input = QDoubleSpinBox()
-        self._slice_position_input.setRange(0.0, 1.0)
-        self._slice_position_input.setSingleStep(0.05)
-        self._slice_position_input.setDecimals(2)
-        self._slice_position_input.setValue(0.5)
-        self._visual_frame_interval_input = QSpinBox()
-        self._visual_frame_interval_input.setRange(100, 5000)
-        self._visual_frame_interval_input.setValue(800)
-        self._visual_frame_interval_input.setSuffix(" ms")
-        self._streamline_seed_count_input = QSpinBox()
-        self._streamline_seed_count_input.setRange(4, 96)
-        self._streamline_seed_count_input.setSingleStep(4)
-        self._streamline_seed_count_input.setValue(24)
-        self._streamline_length_factor_input = QDoubleSpinBox()
-        self._streamline_length_factor_input.setRange(0.5, 10.0)
-        self._streamline_length_factor_input.setSingleStep(0.25)
-        self._streamline_length_factor_input.setDecimals(2)
-        self._streamline_length_factor_input.setValue(2.5)
-        self._streamline_length_factor_input.setSuffix(" x")
-        self._streamline_step_percent_input = QDoubleSpinBox()
-        self._streamline_step_percent_input.setRange(0.2, 10.0)
-        self._streamline_step_percent_input.setSingleStep(0.2)
-        self._streamline_step_percent_input.setDecimals(1)
-        self._streamline_step_percent_input.setValue(2.0)
-        self._streamline_step_percent_input.setSuffix(" %")
-        self._visual_field_combo.setMinimumWidth(160)
-        self._visual_time_combo.setMinimumWidth(160)
-        self._slice_axis_combo.setMinimumWidth(86)
-        self._slice_position_input.setMaximumWidth(92)
-        self._streamline_seed_count_input.setMaximumWidth(92)
-        self._streamline_length_factor_input.setMaximumWidth(92)
-        self._streamline_step_percent_input.setMaximumWidth(92)
-        field_time_panel = QWidget()
-        field_time_layout = QVBoxLayout(field_time_panel)
-        field_time_layout.setContentsMargins(10, 10, 10, 10)
-        field_time_layout.setSpacing(8)
-        field_row = QHBoxLayout()
-        field_row.addWidget(QLabel("字段"))
-        field_row.addWidget(self._visual_field_combo)
-        time_row = QHBoxLayout()
-        time_row.addWidget(QLabel("时间步"))
-        time_row.addWidget(self._visual_time_combo)
-        field_action_row = QHBoxLayout()
-        field_action_row.addWidget(refresh_visual_fields_button)
-        field_action_row.addWidget(load_selected_surface_button)
-        field_time_layout.addLayout(field_row)
-        field_time_layout.addLayout(time_row)
-        field_time_layout.addLayout(field_action_row)
-
-        slice_panel = QWidget()
-        slice_layout = QVBoxLayout(slice_panel)
-        slice_layout.setContentsMargins(10, 10, 10, 10)
-        slice_layout.setSpacing(8)
-        slice_axis_row = QHBoxLayout()
-        slice_axis_row.addWidget(QLabel("切面"))
-        slice_axis_row.addWidget(self._slice_axis_combo)
-        slice_position_row = QHBoxLayout()
-        slice_position_row.addWidget(QLabel("位置"))
-        slice_position_row.addWidget(self._slice_position_input)
-        slice_hint = QLabel("0.00 最小侧，0.50 中间，1.00 最大侧")
-        slice_hint.setObjectName("sectionHint")
-        slice_layout.addLayout(slice_axis_row)
-        slice_layout.addLayout(slice_position_row)
-        slice_layout.addWidget(slice_hint)
-
-        streamline_panel = QWidget()
-        streamline_layout = QVBoxLayout(streamline_panel)
-        streamline_layout.setContentsMargins(10, 10, 10, 10)
-        streamline_layout.setSpacing(8)
-        seed_row = QHBoxLayout()
-        seed_row.addWidget(QLabel("种子点"))
-        seed_row.addWidget(self._streamline_seed_count_input)
-        length_row = QHBoxLayout()
-        length_row.addWidget(QLabel("追踪长度"))
-        length_row.addWidget(self._streamline_length_factor_input)
-        step_row = QHBoxLayout()
-        step_row.addWidget(QLabel("积分步长"))
-        step_row.addWidget(self._streamline_step_percent_input)
-        streamline_hint = QLabel("种子点越多线越密；追踪长度越大线越长；步长越小越细但更慢。")
-        streamline_hint.setWordWrap(True)
-        streamline_hint.setObjectName("sectionHint")
-        streamline_layout.addLayout(seed_row)
-        streamline_layout.addLayout(length_row)
-        streamline_layout.addLayout(step_row)
-        streamline_layout.addWidget(streamline_hint)
-
-        animation_panel = QWidget()
-        animation_layout = QVBoxLayout(animation_panel)
-        animation_layout.setContentsMargins(10, 10, 10, 10)
-        animation_layout.setSpacing(8)
-        frame_row = QHBoxLayout()
-        frame_row.addWidget(previous_frame_button)
-        frame_row.addWidget(next_frame_button)
-        interval_row = QHBoxLayout()
-        interval_row.addWidget(QLabel("帧间隔"))
-        interval_row.addWidget(self._visual_frame_interval_input)
-        play_row = QHBoxLayout()
-        play_row.addWidget(play_visual_animation_button)
-        play_row.addWidget(stop_visual_animation_button)
-        animation_layout.addLayout(frame_row)
-        animation_layout.addLayout(interval_row)
-        animation_layout.addLayout(play_row)
-
-        field_time_button = make_widget_menu_button("字段时间", field_time_panel)
-        slice_settings_button = make_widget_menu_button("切面设置", slice_panel)
-        streamline_settings_button = make_widget_menu_button("流线设置", streamline_panel)
-        animation_button = make_widget_menu_button("动画控制", animation_panel)
-        action_row.addWidget(field_time_button)
-        action_row.addWidget(slice_settings_button)
-        action_row.addWidget(streamline_settings_button)
-        action_row.addWidget(animation_button)
         action_row.addStretch(1)
         action_bar = QWidget()
         action_bar.setLayout(action_row)
@@ -2043,6 +1917,80 @@ class MainWindow(QMainWindow):
         action_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         action_scroll.setMaximumHeight(58)
         action_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        field_group = QFrame()
+        field_group.setObjectName("sectionFrame")
+        field_layout = QVBoxLayout(field_group)
+        field_layout.setContentsMargins(12, 10, 12, 10)
+        field_layout.setSpacing(8)
+        field_title = QLabel("模块 1：结果场选择")
+        field_title.setStyleSheet("font-size: 17px; font-weight: 600;")
+        field_row = QHBoxLayout()
+        self._result_field_combo = QComboBox()
+        self._result_field_combo.addItems(self.RESULT_FIELDS)
+        self._result_time_combo = QComboBox()
+        self._result_color_min_input = QDoubleSpinBox()
+        self._result_color_min_input.setRange(-1.0e12, 1.0e12)
+        self._result_color_min_input.setDecimals(6)
+        self._result_color_min_input.setValue(0.0)
+        self._result_color_max_input = QDoubleSpinBox()
+        self._result_color_max_input.setRange(-1.0e12, 1.0e12)
+        self._result_color_max_input.setDecimals(6)
+        self._result_color_max_input.setValue(1.0)
+        self._result_unit_label = QLabel("单位：-")
+        self._result_minmax_label = QLabel("最大/最小值：未刷新")
+        refresh_fields_button = QPushButton("刷新字段/时间步")
+        refresh_fields_button.clicked.connect(lambda _checked=False: self._refresh_result_field_panel())
+        self._result_field_combo.currentTextChanged.connect(lambda _text: self._update_result_field_metadata())
+        field_row.addWidget(QLabel("变量"))
+        field_row.addWidget(self._result_field_combo, 2)
+        field_row.addWidget(QLabel("时间步"))
+        field_row.addWidget(self._result_time_combo, 2)
+        field_row.addWidget(QLabel("颜色最小"))
+        field_row.addWidget(self._result_color_min_input, 1)
+        field_row.addWidget(QLabel("颜色最大"))
+        field_row.addWidget(self._result_color_max_input, 1)
+        field_row.addWidget(refresh_fields_button)
+        field_layout.addWidget(field_title)
+        field_layout.addLayout(field_row)
+        field_layout.addWidget(self._result_unit_label)
+        field_layout.addWidget(self._result_minmax_label)
+
+        display_group = QFrame()
+        display_group.setObjectName("sectionFrame")
+        display_layout = QVBoxLayout(display_group)
+        display_layout.setContentsMargins(12, 10, 12, 10)
+        display_layout.setSpacing(8)
+        display_title = QLabel("模块 2：显示方式选择")
+        display_title.setStyleSheet("font-size: 17px; font-weight: 600;")
+        display_row = QHBoxLayout()
+        self._result_display_combo = QComboBox()
+        self._result_display_combo.addItems(self.RESULT_DISPLAY_MODES)
+        self._result_slice_axis_combo = QComboBox()
+        self._result_slice_axis_combo.addItems(["自动", "X", "Y", "Z"])
+        self._result_slice_position_input = QDoubleSpinBox()
+        self._result_slice_position_input.setRange(0.0, 1.0)
+        self._result_slice_position_input.setSingleStep(0.05)
+        self._result_slice_position_input.setDecimals(2)
+        self._result_slice_position_input.setValue(0.5)
+        load_display_button = QPushButton("加载显示")
+        load_display_button.clicked.connect(lambda _checked=False: self._load_selected_result_display())
+        display_row.addWidget(QLabel("显示方式"))
+        display_row.addWidget(self._result_display_combo, 2)
+        display_row.addWidget(QLabel("切面方向"))
+        display_row.addWidget(self._result_slice_axis_combo)
+        display_row.addWidget(QLabel("切面位置"))
+        display_row.addWidget(self._result_slice_position_input)
+        display_row.addWidget(load_display_button)
+        display_hint = QLabel(
+            "已接入：Surface、Slice、Vector、Streamline、Glyph。Contour、Iso-surface、Volume rendering 后续接入 VTK 专项算法。"
+        )
+        display_hint.setWordWrap(True)
+        display_hint.setObjectName("sectionHint")
+        display_layout.addWidget(display_title)
+        display_layout.addLayout(display_row)
+        display_layout.addWidget(display_hint)
+
         self._results_text = QTextEdit()
         self._results_text.setReadOnly(True)
         self._results_text.setPlainText("请先新建或打开项目，然后运行最小仿真。")
@@ -2050,15 +1998,15 @@ class MainWindow(QMainWindow):
         self._residual_figure = Figure(figsize=(6, 3), tight_layout=True)
         self._residual_canvas = FigureCanvas(self._residual_figure)
         self._residual_canvas.setMaximumHeight(220)
-        self._vtk_hint_label = QLabel(
-            "三维视图将以独立窗口打开，避免 WSL 下 VTK 原生控件覆盖 Qt 页面。"
-        )
+        self._vtk_hint_label = QLabel("三维结果仍在独立窗口中打开，避免 WSL 下 VTK 原生控件覆盖 Qt 主页面。")
         self._vtk_hint_label.setWordWrap(True)
         self._vtk_hint_label.setObjectName("sectionHint")
 
         layout.addWidget(title)
         layout.addWidget(description)
         layout.addWidget(action_scroll)
+        layout.addWidget(field_group)
+        layout.addWidget(display_group)
         layout.addWidget(self._results_text, 1)
         layout.addWidget(self._residual_canvas, 2)
         layout.addWidget(self._vtk_hint_label)
@@ -3870,7 +3818,7 @@ class MainWindow(QMainWindow):
             return
 
         self._results_text.setPlainText(self._context.result_index_service.format_index(result_index))
-        self._refresh_visualization_selectors(show_errors=False)
+        self._refresh_result_field_panel(show_errors=False)
         self._append_log("结果索引已刷新。")
         self._set_status("结果索引已刷新。")
 
@@ -4006,393 +3954,203 @@ class MainWindow(QMainWindow):
         self._append_log("残差曲线已绘制。")
         self._set_status("残差曲线已绘制。")
 
-    def _load_3d_preview_scene(self) -> None:
-        self._ensure_vtk_viewer()
-
-        self._show_visualization_feedback(
-            "正在加载 3D 技术验证场景",
-            "该场景不依赖 OpenFOAM 项目，用于验证三维窗口是否能正常渲染。",
-        )
-        self._vtk_viewer.plot_cube()
-        self._append_log("3D 技术验证场景已加载：单位计算域 + 坐标轴。")
-        self._show_visualization_feedback(
-            "3D 技术验证场景已加载",
-            "你应该能在独立 3D 视图窗口中看到蓝色线框立方体和坐标轴。"
-        )
-        self._set_status("3D 技术验证场景已加载。")
-
-    def _load_openfoam_3d_case(self) -> None:
-        if self._current_project is None:
-            self._show_error("请先新建或打开项目。")
+    def _refresh_result_field_panel(self, show_errors: bool = True) -> None:
+        if not hasattr(self, "_result_field_combo"):
             return
-        self._ensure_vtk_viewer()
-
-        self._show_visualization_feedback(
-            "正在加载真实 OpenFOAM 3D Case",
-            f"当前项目：{self._current_project.name}\nCase 路径：{self._current_project.case_dir}",
-        )
+        self._result_time_combo.clear()
+        if self._current_project is None:
+            if show_errors:
+                self._show_error("请先新建或打开项目。")
+            return
         try:
             case_info = self._context.openfoam_vtk_service.inspect(self._current_project)
-            geometry = self._context.openfoam_vtk_service.build_geometry_filter(self._current_project)
         except (OSError, RuntimeError) as error:
-            self._show_error(f"加载 OpenFOAM 3D Case 失败：{error}")
+            if show_errors:
+                self._show_error(f"刷新结果场失败：{error}")
             return
 
-        self._vtk_viewer.plot_polydata_points(geometry.GetOutput(), "真实 OpenFOAM Case 点云")
+        available = set(case_info.point_arrays) | set(case_info.cell_arrays)
+        if "U" in available:
+            available.add("mag(U)")
+        current_field = self._result_field_combo.currentText().strip()
+        self._result_field_combo.blockSignals(True)
+        self._result_field_combo.clear()
+        self._result_field_combo.addItems(self.RESULT_FIELDS)
+        if current_field in self.RESULT_FIELDS:
+            self._result_field_combo.setCurrentText(current_field)
+        elif "p" in available:
+            self._result_field_combo.setCurrentText("p")
+        elif "U" in available:
+            self._result_field_combo.setCurrentText("U")
+        self._result_field_combo.blockSignals(False)
+
+        times = [f"{time:g}" for time in case_info.time_values]
+        self._result_time_combo.addItems(times)
+        if times:
+            self._result_time_combo.setCurrentText(times[-1])
+        self._update_result_field_metadata()
         self._append_log(
-            "真实 OpenFOAM 3D Case 已加载："
-            f"blocks={case_info.block_count}, times={len(case_info.time_values)}, "
-            f"pointArrays={case_info.point_arrays}, cellArrays={case_info.cell_arrays}, "
-            f"marker={case_info.marker_file}"
+            "结果场已刷新："
+            f"fields={sorted(available)}, supported={self.RESULT_FIELDS}, times={times or ['默认']}"
         )
-        self._show_visualization_feedback(
-            "真实 OpenFOAM 3D Case 已加载",
-            "独立 3D 视图窗口显示当前 case 的采样点云。\n"
-            f"blocks：{case_info.block_count}\n"
-            f"时间步数量：{len(case_info.time_values)}\n"
-            f"点字段：{case_info.point_arrays}\n"
-            f"单元字段：{case_info.cell_arrays}",
-        )
-        self._set_status("真实 OpenFOAM 3D Case 已加载。")
+        self._set_status("结果场已刷新。")
 
-    def _load_pressure_cloud(self) -> None:
+    def _update_result_field_metadata(self) -> None:
+        if not hasattr(self, "_result_field_combo"):
+            return
+        field_name = self._result_field_combo.currentText().strip()
+        self._result_unit_label.setText(f"单位：{self.RESULT_FIELD_UNITS.get(field_name, '-')}")
+        if self._current_project is None:
+            self._result_minmax_label.setText("最大/最小值：未选择项目")
+            return
+        try:
+            _output, field_array, display_name, _selected_time, storage = self._load_result_field_data()
+        except (OSError, RuntimeError, ValueError) as error:
+            self._result_minmax_label.setText(f"最大/最小值：暂不可用（{error}）")
+            return
+        values = self._vtk_viewer._scalar_values(field_array) if self._vtk_viewer is not None else self._scalar_values(field_array)
+        if values.size == 0:
+            self._result_minmax_label.setText("最大/最小值：字段为空")
+            return
+        min_value = float(values.min())
+        max_value = float(values.max())
+        self._result_color_min_input.setValue(min_value)
+        self._result_color_max_input.setValue(max_value if max_value != min_value else min_value + 1.0)
+        self._result_minmax_label.setText(
+            f"最大/最小值：{display_name} min={min_value:.6g}, max={max_value:.6g}（{storage} 字段）"
+        )
+
+    def _load_selected_result_display(self) -> None:
         if self._current_project is None:
             self._show_error("请先新建或打开项目。")
             return
+        mode = self._result_display_combo.currentText().strip()
+        try:
+            output, field_array, display_name, selected_time, storage = self._load_result_field_data()
+        except (OSError, RuntimeError, ValueError) as error:
+            self._show_error(f"加载结果显示失败：{error}")
+            return
+
         self._ensure_vtk_viewer()
-
-        self._show_visualization_feedback(
-            "正在加载压力云图",
-            f"当前项目：{self._current_project.name}\n目标字段：p\nCase 路径：{self._current_project.case_dir}",
-        )
-        try:
-            case_info = self._context.openfoam_vtk_service.inspect(self._current_project)
-            geometry = self._context.openfoam_vtk_service.build_geometry_filter(self._current_project)
-        except (OSError, RuntimeError) as error:
-            self._show_error(f"加载压力云图失败：{error}")
-            return
-
-        output = geometry.GetOutput()
-        point_pressure = output.GetPointData().GetArray("p")
-        cell_pressure = output.GetCellData().GetArray("p")
-        if point_pressure is None and cell_pressure is None:
-            self._show_error(
-                "当前 VTK 输出中没有压力字段 p。"
-                f"可用点字段：{case_info.point_arrays}；可用单元字段：{case_info.cell_arrays}"
+        color_range = self._selected_result_color_range(field_array)
+        if mode.startswith("Surface"):
+            if storage != "point":
+                self._show_error(f"{display_name} 当前是单元字段，Surface v1 先支持点字段。后续会增加单元字段转点字段。")
+                return
+            face_count = self._vtk_viewer.plot_field_surface(output, field_array, color_range, display_name)
+            self._finish_result_visualization(
+                f"Surface 表面云图已加载：field={display_name}, time={selected_time}, faces={face_count}, range={color_range}"
             )
             return
-
-        if point_pressure is not None:
-            scalar_range = point_pressure.GetRange()
-        else:
-            scalar_range = cell_pressure.GetRange()
-        if scalar_range[0] == scalar_range[1]:
-            scalar_range = (scalar_range[0] - 1.0, scalar_range[1] + 1.0)
-        if point_pressure is None:
-            self._show_error("当前阶段的稳定 3D 视图先支持点字段压力云图，单元字段压力云图后续接入。")
-            return
-        self._vtk_viewer.plot_pressure_points(geometry.GetOutput(), point_pressure, scalar_range)
-        self._append_log(
-            "压力云图已加载："
-            f"pRange=({scalar_range[0]:.6g}, {scalar_range[1]:.6g}), "
-            f"times={case_info.time_values}"
-        )
-        self._show_visualization_feedback(
-            "压力云图已加载",
-            "独立 3D 视图窗口显示字段 p 的点云标量着色结果。\n"
-            f"pRange：({scalar_range[0]:.6g}, {scalar_range[1]:.6g})\n"
-            f"时间步：{case_info.time_values}\n"
-            "如果画面几乎是单色，通常表示当前最小算例的压力场变化很小或为常量。",
-        )
-        self._set_status("压力云图已加载。")
-
-    def _load_pressure_surface_cloud(self) -> None:
-        if self._current_project is None:
-            self._show_error("请先新建或打开项目。")
-            return
-        self._ensure_vtk_viewer()
-
-        self._show_visualization_feedback(
-            "正在加载压力表面云图",
-            f"当前项目：{self._current_project.name}\n目标字段：p\nCase 路径：{self._current_project.case_dir}",
-        )
-        try:
-            case_info = self._context.openfoam_vtk_service.inspect(self._current_project)
-            geometry = self._context.openfoam_vtk_service.build_geometry_filter(self._current_project)
-        except (OSError, RuntimeError) as error:
-            self._show_error(f"加载压力表面云图失败：{error}")
-            return
-
-        output = geometry.GetOutput()
-        point_pressure = output.GetPointData().GetArray("p")
-        if point_pressure is None:
-            self._show_error(
-                "当前稳定表面云图 v1 需要点字段 p。"
-                f"可用点字段：{case_info.point_arrays}；可用单元字段：{case_info.cell_arrays}"
+        if mode.startswith("Vector") or mode.startswith("Glyph"):
+            vector_array = output.GetPointData().GetArray("U")
+            if vector_array is None:
+                self._show_error("矢量箭头/Glyph 当前需要点字段 U。请先确认当前 Case 输出了 U。")
+                return
+            count, speed_range = self._vtk_viewer.plot_velocity_vectors(output, vector_array)
+            self._finish_result_visualization(
+                f"{mode} 已加载：time={selected_time}, arrows={count}, speedRange={speed_range}"
             )
             return
-
-        scalar_range = point_pressure.GetRange()
-        if scalar_range[0] == scalar_range[1]:
-            scalar_range = (scalar_range[0] - 1.0, scalar_range[1] + 1.0)
-        face_count = self._vtk_viewer.plot_pressure_surface(output, point_pressure, scalar_range)
-        self._append_log(
-            "压力表面云图已加载："
-            f"faces={face_count}, pRange=({scalar_range[0]:.6g}, {scalar_range[1]:.6g}), "
-            f"times={case_info.time_values}"
-        )
-        self._show_visualization_feedback(
-            "压力表面云图已加载",
-            "独立 3D 视图窗口显示外表面面片，并按字段 p 进行连续表面着色。\n"
-            f"面片数量：{face_count}\n"
-            f"pRange：({scalar_range[0]:.6g}, {scalar_range[1]:.6g})\n"
-            f"时间步：{case_info.time_values}\n"
-            "当前最小方盒子算例压力接近常量，所以颜色变化可能仍然不明显。",
-        )
-        self._set_status("压力表面云图已加载。")
-
-    def _load_velocity_vectors(self) -> None:
-        if self._current_project is None:
-            self._show_error("请先新建或打开项目。")
-            return
-        selected_time = self._visual_time_combo.currentText().strip() or "默认"
-        time_value = self._selected_visualization_time()
-        self._ensure_vtk_viewer()
-        self._show_visualization_feedback(
-            "正在加载速度箭头",
-            f"字段：U\n时间步：{selected_time}\nCase 路径：{self._current_project.case_dir}",
-        )
-        try:
-            case_info = self._context.openfoam_vtk_service.inspect(self._current_project)
-            geometry = self._context.openfoam_vtk_service.build_geometry_filter(
-                self._current_project,
-                time_value=time_value,
-            )
-        except (OSError, RuntimeError) as error:
-            self._show_error(f"加载速度箭头失败：{error}")
-            return
-
-        output = geometry.GetOutput()
-        velocity_array = output.GetPointData().GetArray("U")
-        if velocity_array is None:
-            self._show_error(
-                "当前速度箭头 v1 需要点字段 U。"
-                f"可用点字段：{case_info.point_arrays}；可用单元字段：{case_info.cell_arrays}"
-            )
-            return
-
-        arrow_count, speed_range = self._vtk_viewer.plot_velocity_vectors(output, velocity_array)
-        self._append_log(
-            "速度箭头已加载："
-            f"time={selected_time}, arrows={arrow_count}, "
-            f"speedRange=({speed_range[0]:.6g}, {speed_range[1]:.6g})"
-        )
-        self._show_visualization_feedback(
-            "速度箭头已加载",
-            "独立 3D 视图窗口显示字段 U 的方向箭头。\n"
-            "箭头方向表示流体速度方向，箭头颜色表示速度大小 |U|。\n"
-            f"时间步：{selected_time}\n"
-            f"箭头数量：{arrow_count}\n"
-            f"速度范围：({speed_range[0]:.6g}, {speed_range[1]:.6g})\n"
-            "说明：为避免界面卡顿，当前会对速度点做采样显示。",
-        )
-        self._set_status("速度箭头已加载。")
-
-    def _load_velocity_slice(self) -> None:
-        if self._current_project is None:
-            self._show_error("请先新建或打开项目。")
-            return
-        selected_time = self._visual_time_combo.currentText().strip() or "默认"
-        time_value = self._selected_visualization_time()
-        requested_axis = self._slice_axis_combo.currentText().strip() if hasattr(self, "_slice_axis_combo") else "自动"
-        requested_position = self._slice_position_input.value() if hasattr(self, "_slice_position_input") else 0.5
-        slice_mode = "自动选择速度变化最明显的切面" if requested_axis == "自动" else f"{requested_axis} 方向切面"
-        self._ensure_vtk_viewer()
-        self._show_visualization_feedback(
-            "正在加载速度切面",
-            f"字段：U\n切面：{slice_mode}\n位置：{requested_position:.2f}\n时间步：{selected_time}\nCase 路径：{self._current_project.case_dir}",
-        )
-        try:
-            case_info = self._context.openfoam_vtk_service.inspect(self._current_project)
-            geometry = self._context.openfoam_vtk_service.build_geometry_filter(
-                self._current_project,
-                time_value=time_value,
-            )
-        except (OSError, RuntimeError) as error:
-            self._show_error(f"加载速度切面失败：{error}")
-            return
-
-        output = geometry.GetOutput()
-        velocity_array = output.GetPointData().GetArray("U")
-        if velocity_array is None:
-            self._show_error(
-                "当前速度切面 v1 需要点字段 U。"
-                f"可用点字段：{case_info.point_arrays}；可用单元字段：{case_info.cell_arrays}"
-            )
-            return
-
-        point_count, slice_axis, slice_center, speed_range = self._vtk_viewer.plot_velocity_slice(
-            output,
-            velocity_array,
-            None if requested_axis == "自动" else requested_axis,
-            requested_position,
-        )
-        self._append_log(
-            "速度切面已加载："
-            f"time={selected_time}, requestedAxis={requested_axis}, position={requested_position:.2f}, "
-            f"resolvedAxis={slice_axis}, center={slice_center:.6g}, points={point_count}, "
-            f"speedRange=({speed_range[0]:.6g}, {speed_range[1]:.6g})"
-        )
-        self._show_visualization_feedback(
-            "速度切面已加载",
-            "独立 3D 视图窗口显示速度大小 |U| 的指定切面。\n"
-            "可以把它理解成：用一把刀从计算区域中间切开，只看切面附近的流速分布。\n"
-            f"请求方向：{requested_axis}\n"
-            f"实际方向：{slice_axis}\n"
-            f"归一化位置：{requested_position:.2f}\n"
-            f"切面位置：{slice_axis}={slice_center:.6g}\n"
-            f"时间步：{selected_time}\n"
-            f"切面点数：{point_count}\n"
-            f"速度范围：({speed_range[0]:.6g}, {speed_range[1]:.6g})\n"
-            "说明：位置 0.00 表示该方向最小坐标侧，1.00 表示最大坐标侧；当前仍是点采样切面。",
-        )
-        self._set_status("速度切面已加载。")
-
-    def _load_velocity_slice_contour(self) -> None:
-        if self._current_project is None:
-            self._show_error("请先新建或打开项目。")
-            return
-        selected_time = self._visual_time_combo.currentText().strip() or "默认"
-        time_value = self._selected_visualization_time()
-        requested_axis = self._slice_axis_combo.currentText().strip() if hasattr(self, "_slice_axis_combo") else "自动"
-        requested_position = self._slice_position_input.value() if hasattr(self, "_slice_position_input") else 0.5
-        slice_mode = "自动选择速度变化最明显的切面" if requested_axis == "自动" else f"{requested_axis} 方向切面"
-        self._ensure_vtk_viewer()
-        self._show_visualization_feedback(
-            "正在加载连续速度切面",
-            f"字段：U\n切面：{slice_mode}\n位置：{requested_position:.2f}\n时间步：{selected_time}\nCase 路径：{self._current_project.case_dir}",
-        )
-        try:
-            case_info = self._context.openfoam_vtk_service.inspect(self._current_project)
-            geometry = self._context.openfoam_vtk_service.build_geometry_filter(
-                self._current_project,
-                time_value=time_value,
-            )
-        except (OSError, RuntimeError) as error:
-            self._show_error(f"加载连续速度切面失败：{error}")
-            return
-
-        output = geometry.GetOutput()
-        velocity_array = output.GetPointData().GetArray("U")
-        if velocity_array is None:
-            self._show_error(
-                "当前连续速度切面需要点字段 U。"
-                f"可用点字段：{case_info.point_arrays}；可用单元字段：{case_info.cell_arrays}"
-            )
-            return
-
-        point_count, slice_axis, slice_center, speed_range = self._vtk_viewer.plot_velocity_slice_contour(
-            output,
-            velocity_array,
-            None if requested_axis == "自动" else requested_axis,
-            requested_position,
-        )
-        self._append_log(
-            "连续速度切面已加载："
-            f"time={selected_time}, requestedAxis={requested_axis}, position={requested_position:.2f}, "
-            f"resolvedAxis={slice_axis}, center={slice_center:.6g}, sourcePoints={point_count}, "
-            f"speedRange=({speed_range[0]:.6g}, {speed_range[1]:.6g})"
-        )
-        self._show_visualization_feedback(
-            "连续速度切面已加载",
-            "独立 3D 视图窗口显示速度大小 |U| 的连续插值切面。\n"
-            "它比点采样切面更接近专业 CFD 软件里的切面云图。\n"
-            f"请求方向：{requested_axis}\n"
-            f"实际方向：{slice_axis}\n"
-            f"归一化位置：{requested_position:.2f}\n"
-            f"切面位置：{slice_axis}={slice_center:.6g}\n"
-            f"时间步：{selected_time}\n"
-            f"参与插值点数：{point_count}\n"
-            f"速度范围：({speed_range[0]:.6g}, {speed_range[1]:.6g})\n"
-            "说明：当前 v1 使用 scipy.griddata 对切面点插值，后续可升级为 VTK 原生切平面。",
-        )
-        self._set_status("连续速度切面已加载。")
-    def _load_velocity_streamlines(self) -> None:
-        if self._current_project is None:
-            self._show_error("请先新建或打开项目。")
-            return
-        selected_time = self._visual_time_combo.currentText().strip() or "默认"
-        time_value = self._selected_visualization_time()
-        self._ensure_vtk_viewer()
-        seed_count_limit = int(self._streamline_seed_count_input.value())
-        length_factor = float(self._streamline_length_factor_input.value())
-        step_factor = float(self._streamline_step_percent_input.value()) / 100.0
-        self._show_visualization_feedback(
-            "正在加载速度流线",
-            f"字段：U\n算法：VTK StreamTracer\n时间步：{selected_time}\n"
-            f"种子点上限：{seed_count_limit}\n追踪长度：{length_factor:.2f} x 域尺寸\n"
-            f"积分步长：{step_factor * 100:.1f}% 域尺寸\nCase 路径：{self._current_project.case_dir}",
-        )
-        try:
-            case_info = self._context.openfoam_vtk_service.inspect(self._current_project)
-            geometry = self._context.openfoam_vtk_service.build_geometry_filter(
-                self._current_project,
-                time_value=time_value,
-            )
-        except (OSError, RuntimeError) as error:
-            self._show_error(f"加载速度流线失败：{error}")
-            return
-
-        output = geometry.GetOutput()
-        velocity_array = output.GetPointData().GetArray("U")
-        if velocity_array is None:
-            self._show_error(
-                "当前速度流线需要点字段 U。"
-                f"可用点字段：{case_info.point_arrays}；可用单元字段：{case_info.cell_arrays}"
-            )
-            return
-
-        try:
-            streamline_output, main_axis, seed_count, speed_range = self._build_vtk_streamlines(
+        if mode.startswith("Slice"):
+            vector_array = output.GetPointData().GetArray("U")
+            if vector_array is None:
+                self._show_error("切片当前先支持速度 U 的 |U| 切片。标量字段切片后续接入。")
+                return
+            axis = self._result_slice_axis_combo.currentText().strip()
+            position = self._result_slice_position_input.value()
+            point_count, resolved_axis, center, speed_range = self._vtk_viewer.plot_velocity_slice_contour(
                 output,
-                velocity_array,
-                seed_count_limit=seed_count_limit,
-                length_factor=length_factor,
-                step_factor=step_factor,
+                vector_array,
+                None if axis == "自动" else axis,
+                position,
             )
-        except RuntimeError as error:
-            self._show_error(f"生成 VTK 流线失败：{error}")
+            self._finish_result_visualization(
+                f"Slice 切片已加载：time={selected_time}, axis={resolved_axis}, center={center:.6g}, points={point_count}, speedRange={speed_range}"
+            )
             return
-        line_count, line_point_count, main_axis, speed_range = self._vtk_viewer.plot_velocity_streamlines(
-            output,
-            streamline_output,
-            main_axis,
-            speed_range,
+        if mode.startswith("Streamline"):
+            vector_array = output.GetPointData().GetArray("U")
+            if vector_array is None:
+                self._show_error("流线当前需要点字段 U。请先确认当前 Case 输出了 U。")
+                return
+            try:
+                streamline_output, main_axis, seed_count, speed_range = self._build_vtk_streamlines(output, vector_array)
+            except RuntimeError as error:
+                self._show_error(f"生成流线失败：{error}")
+                return
+            line_count, line_points, main_axis, speed_range = self._vtk_viewer.plot_velocity_streamlines(
+                output,
+                streamline_output,
+                main_axis,
+                speed_range,
+            )
+            self._finish_result_visualization(
+                f"Streamline 流线已加载：time={selected_time}, mainAxis={main_axis}, seeds={seed_count}, lines={line_count}, points={line_points}, speedRange={speed_range}"
+            )
+            return
+
+        self._show_error(f"{mode} 已放入界面结构，但 VTK 专项实现还未接入。")
+
+    def _load_result_field_data(self):
+        if self._current_project is None:
+            raise RuntimeError("未选择项目")
+        field_name = self._result_field_combo.currentText().strip()
+        selected_time = self._result_time_combo.currentText().strip() or "默认"
+        time_value = self._selected_result_time_value()
+        geometry = self._context.openfoam_vtk_service.build_geometry_filter(
+            self._current_project,
+            time_value=time_value,
         )
-        self._append_log(
-            "速度流线已加载："
-            f"algorithm=VTK StreamTracer, time={selected_time}, mainAxis={main_axis}, "
-            f"seeds={seed_count}, seedLimit={seed_count_limit}, lengthFactor={length_factor:.2f}, "
-            f"stepFactor={step_factor:.4f}, lines={line_count}, linePoints={line_point_count}, "
-            f"speedRange=({speed_range[0]:.6g}, {speed_range[1]:.6g})"
+        output = geometry.GetOutput()
+        source_field = "U" if field_name == "mag(U)" else field_name
+        field_array = output.GetPointData().GetArray(source_field)
+        storage = "point"
+        if field_array is None:
+            field_array = output.GetCellData().GetArray(source_field)
+            storage = "cell"
+        if field_array is None:
+            raise RuntimeError(f"当前 Case 没有字段 {field_name}")
+        display_name = "mag(U)" if field_name == "mag(U)" else (
+            field_name if field_array.GetNumberOfComponents() == 1 else f"|{field_name}|"
         )
-        self._show_visualization_feedback(
-            "速度流线已加载",
-            "独立 3D 视图窗口显示 VTK StreamTracer 基于真实 U 字段积分生成的流线。\n"
-            "流线可以理解成：把小纸屑放进流体里，它可能走过的路径。\n"
-            f"算法：VTK StreamTracer\n"
-            f"主流向轴：{main_axis}\n"
-            f"时间步：{selected_time}\n"
-            f"种子点上限：{seed_count_limit}\n"
-            f"实际种子点数量：{seed_count}\n"
-            f"追踪长度：{length_factor:.2f} x 域尺寸\n"
-            f"积分步长：{step_factor * 100:.1f}% 域尺寸\n"
-            f"流线数量：{line_count}\n"
-            f"流线点数：{line_point_count}\n"
-            f"速度范围：({speed_range[0]:.6g}, {speed_range[1]:.6g})\n"
-            "说明：种子点越多流线越密，步长越小越细但计算更慢。",
-        )
-        self._set_status("速度流线已加载。")
+        return output, field_array, display_name, selected_time, storage
+
+    def _selected_result_time_value(self) -> float | None:
+        if not hasattr(self, "_result_time_combo"):
+            return None
+        text = self._result_time_combo.currentText().strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+
+    def _selected_result_color_range(self, field_array) -> tuple[float, float]:
+        values = self._scalar_values(field_array)
+        if values.size == 0:
+            return (0.0, 1.0)
+        fallback = (float(values.min()), float(values.max()))
+        minimum = float(self._result_color_min_input.value())
+        maximum = float(self._result_color_max_input.value())
+        if maximum <= minimum:
+            return fallback if fallback[1] > fallback[0] else (fallback[0] - 1.0, fallback[1] + 1.0)
+        return minimum, maximum
+
+    def _scalar_values(self, field_array) -> np.ndarray:
+        values = vtk_to_numpy(field_array)
+        if values.ndim == 1:
+            return values.astype(float)
+        if values.ndim == 2 and values.shape[1] > 1:
+            return np.linalg.norm(values, axis=1).astype(float)
+        return values.reshape(-1).astype(float)
+
+    def _finish_result_visualization(self, message: str) -> None:
+        self._append_log(message)
+        if hasattr(self, "_results_text"):
+            self._results_text.setPlainText(message)
+        self._set_status("结果显示已加载。")
 
     def _build_vtk_streamlines(
         self,
@@ -4461,171 +4219,6 @@ class MainWindow(QMainWindow):
             float(speeds[usable].min()),
             float(speeds[usable].max()),
         )
-
-    def _refresh_visualization_selectors(self, show_errors: bool = True) -> None:
-        if not hasattr(self, "_visual_field_combo"):
-            return
-        self._visual_field_combo.clear()
-        self._visual_time_combo.clear()
-        if self._current_project is None:
-            if show_errors:
-                self._show_error("请先新建或打开项目。")
-            return
-        try:
-            case_info = self._context.openfoam_vtk_service.inspect(self._current_project)
-        except (OSError, RuntimeError) as error:
-            if show_errors:
-                self._show_error(f"刷新可视化字段失败：{error}")
-            return
-
-        fields = sorted(set(case_info.point_arrays))
-        self._visual_field_combo.addItems(fields)
-        if "p" in fields:
-            self._visual_field_combo.setCurrentText("p")
-        times = [f"{time:g}" for time in case_info.time_values]
-        self._visual_time_combo.addItems(times)
-        if times:
-            self._visual_time_combo.setCurrentText(times[-1])
-        self._append_log(
-            "可视化字段已刷新："
-            f"fields={fields}, times={times or ['默认']}"
-        )
-
-    def _load_selected_field_surface(self) -> None:
-        if self._current_project is None:
-            self._show_error("请先新建或打开项目。")
-            return
-        field_name = self._visual_field_combo.currentText().strip()
-        if not field_name:
-            self._show_error("请先刷新并选择可视化字段。")
-            return
-        selected_time = self._visual_time_combo.currentText().strip() or "默认"
-        time_value = self._selected_visualization_time()
-
-        self._show_visualization_feedback(
-            "正在加载所选字段表面图",
-            f"字段：{field_name}\n时间步：{selected_time}\nCase 路径：{self._current_project.case_dir}",
-        )
-        if not self._render_selected_field_surface(field_name, time_value, selected_time):
-            return
-
-    def _render_selected_field_surface(
-        self,
-        field_name: str,
-        time_value: float | None,
-        selected_time: str,
-    ) -> bool:
-        if self._current_project is None:
-            return False
-        self._ensure_vtk_viewer()
-        try:
-            case_info = self._context.openfoam_vtk_service.inspect(self._current_project)
-            geometry = self._context.openfoam_vtk_service.build_geometry_filter(
-                self._current_project,
-                time_value=time_value,
-            )
-        except (OSError, RuntimeError) as error:
-            self._show_error(f"加载所选字段表面图失败：{error}")
-            return
-
-        output = geometry.GetOutput()
-        field_array = output.GetPointData().GetArray(field_name)
-        if field_array is None:
-            self._show_error(
-                f"当前稳定表面图 v1 需要点字段 {field_name}。"
-                f"可用点字段：{case_info.point_arrays}；可用单元字段：{case_info.cell_arrays}"
-            )
-            return False
-
-        values = self._vtk_viewer._scalar_values(field_array)
-        if values.size == 0:
-            self._show_error(f"字段 {field_name} 没有可显示数据。")
-            return False
-        scalar_range = (float(values.min()), float(values.max()))
-        if scalar_range[0] == scalar_range[1]:
-            scalar_range = (scalar_range[0] - 1.0, scalar_range[1] + 1.0)
-        face_count = self._vtk_viewer.plot_field_surface(
-            output,
-            field_array,
-            scalar_range,
-            field_name if field_array.GetNumberOfComponents() == 1 else f"|{field_name}|",
-        )
-        self._append_log(
-            "所选字段表面图已加载："
-            f"field={field_name}, time={selected_time}, faces={face_count}, "
-            f"range=({scalar_range[0]:.6g}, {scalar_range[1]:.6g})"
-        )
-        self._show_visualization_feedback(
-            "所选字段表面图已加载",
-            f"字段：{field_name}\n"
-            f"显示值：{'标量值' if field_array.GetNumberOfComponents() == 1 else '矢量模长'}\n"
-            f"时间步：{selected_time}\n"
-            f"面片数量：{face_count}\n"
-            f"范围：({scalar_range[0]:.6g}, {scalar_range[1]:.6g})\n"
-            "说明：当前图像已按所选时间步请求 VTK Reader 读取。",
-        )
-        self._set_status("所选字段表面图已加载。")
-        return True
-
-    def _play_visualization_animation(self) -> None:
-        if not hasattr(self, "_visual_time_combo") or self._visual_time_combo.count() == 0:
-            self._show_error("请先刷新可视化字段和时间步。")
-            return
-        if not self._visual_field_combo.currentText().strip():
-            self._show_error("请先选择字段。")
-            return
-        self._visual_animation_timer.start(self._visual_frame_interval_input.value())
-        self._append_log("时间步动画已开始播放。")
-        self._set_status("时间步动画播放中。")
-
-    def _stop_visualization_animation(self) -> None:
-        self._visual_animation_timer.stop()
-        self._append_log("时间步动画已暂停。")
-        self._set_status("时间步动画已暂停。")
-
-    def _advance_visualization_frame(self) -> None:
-        self._step_visualization_frame(1)
-
-    def _step_visualization_frame(self, step: int) -> None:
-        if not hasattr(self, "_visual_time_combo") or self._visual_time_combo.count() == 0:
-            self._show_error("请先刷新可视化字段和时间步。")
-            return
-        current_index = self._visual_time_combo.currentIndex()
-        next_index = (current_index + step) % self._visual_time_combo.count()
-        self._visual_time_combo.setCurrentIndex(next_index)
-        field_name = self._visual_field_combo.currentText().strip()
-        selected_time = self._visual_time_combo.currentText().strip()
-        if not field_name:
-            self._show_error("请先选择字段。")
-            return
-        self._show_visualization_feedback(
-            "正在播放时间步动画",
-            f"字段：{field_name}\n当前时间步：{selected_time}\n"
-            f"帧：{next_index + 1}/{self._visual_time_combo.count()}",
-        )
-        ok = self._render_selected_field_surface(
-            field_name,
-            self._selected_visualization_time(),
-            selected_time,
-        )
-        if not ok:
-            self._visual_animation_timer.stop()
-
-    def _selected_visualization_time(self) -> float | None:
-        if not hasattr(self, "_visual_time_combo"):
-            return None
-        text = self._visual_time_combo.currentText().strip()
-        if not text:
-            return None
-        try:
-            return float(text)
-        except ValueError:
-            return None
-
-    def _show_visualization_feedback(self, title: str, detail: str) -> None:
-        self._workspace_tabs.setCurrentIndex(self.TAB_RESULTS)
-        if hasattr(self, "_results_text"):
-            self._results_text.setPlainText(f"{title}\n\n{detail}")
 
     def _ensure_vtk_viewer(self) -> None:
         if self._vtk_viewer is None:
