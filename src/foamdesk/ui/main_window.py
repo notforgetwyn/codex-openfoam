@@ -60,7 +60,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from vtkmodules.util.numpy_support import vtk_to_numpy
+from vtkmodules.util.numpy_support import numpy_to_vtk, vtk_to_numpy
 
 from foamdesk.app.bootstrap import ApplicationContext
 from foamdesk.domain.models import SimulationParameters, SimulationProject
@@ -1179,12 +1179,25 @@ class NativeVtkViewerDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("FoamDesk Native VTK 视图")
         self.resize(1120, 760)
+        self._animation_render_callback: Callable[[int], None] | None = None
+        self._animation_frame_count = 0
+        self._animation_frame_index = 0
+        self._animation_timer = QTimer(self)
+        self._animation_timer.timeout.connect(self._advance_animation_frame)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         toolbar = QHBoxLayout()
         self._status_label = QLabel("原生 VTK 高质量渲染窗口")
         toolbar.addWidget(self._status_label)
         toolbar.addStretch(1)
+        self._play_animation_button = QPushButton("播放动画")
+        self._pause_animation_button = QPushButton("暂停动画")
+        self._play_animation_button.clicked.connect(self.play_animation)
+        self._pause_animation_button.clicked.connect(self.pause_animation)
+        self._play_animation_button.setEnabled(False)
+        self._pause_animation_button.setEnabled(False)
+        toolbar.addWidget(self._play_animation_button)
+        toolbar.addWidget(self._pause_animation_button)
         close_button = QPushButton("关闭")
         close_button.clicked.connect(self.close)
         toolbar.addWidget(close_button)
@@ -1198,9 +1211,46 @@ class NativeVtkViewerDialog(QDialog):
         self._interactor = self._vtk_widget.GetRenderWindow().GetInteractor()
         self._interactor.Initialize()
 
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self.pause_animation()
+        self._renderer.RemoveAllViewProps()
+        self._vtk_widget.GetRenderWindow().Render()
+        super().closeEvent(event)
+
+    def set_animation_source(self, frame_count: int, render_callback: Callable[[int], None] | None) -> None:
+        self.pause_animation()
+        self._animation_frame_count = max(0, int(frame_count))
+        self._animation_frame_index = 0
+        self._animation_render_callback = render_callback if self._animation_frame_count > 1 else None
+        enabled = self._animation_render_callback is not None
+        self._play_animation_button.setEnabled(enabled)
+        self._pause_animation_button.setEnabled(enabled)
+
+    def play_animation(self) -> None:
+        if self._animation_render_callback is None or self._animation_frame_count <= 1:
+            return
+        self._animation_frame_index = 0
+        self.render_animation_frame(self._animation_frame_index)
+        self._animation_frame_index = 1
+        self._animation_timer.start(800)
+
+    def pause_animation(self) -> None:
+        self._animation_timer.stop()
+
+    def _advance_animation_frame(self) -> None:
+        if self._animation_render_callback is None or self._animation_frame_count <= 1:
+            self.pause_animation()
+            return
+        self.render_animation_frame(self._animation_frame_index)
+        self._animation_frame_index = (self._animation_frame_index + 1) % self._animation_frame_count
+
+    def render_animation_frame(self, frame_index: int) -> None:
+        if self._animation_render_callback is not None:
+            self._animation_render_callback(frame_index)
+
     def plot_surface(self, poly_data, field_array, scalar_range: tuple[float, float], label: str) -> None:
         self._reset_scene(f"Surface 表面云图：{label}")
-        array_name = field_array.GetName()
+        array_name = self._scalar_array_name(poly_data, field_array, label)
         poly_data.GetPointData().SetActiveScalars(array_name)
         mapper = vtk.vtkPolyDataMapper()
         mapper.SetInputData(poly_data)
@@ -1218,6 +1268,94 @@ class NativeVtkViewerDialog(QDialog):
         self._add_flow_labels()
         self._add_scalar_bar(mapper.GetLookupTable(), label)
         self._finish_scene(poly_data)
+
+    def plot_slice(
+        self,
+        poly_data,
+        field_array,
+        scalar_range: tuple[float, float],
+        label: str,
+        axis_name: str | None,
+        normalized_position: float,
+    ) -> tuple[str, float]:
+        self._reset_scene(f"Slice 切片：{label}")
+        array_name = self._scalar_array_name(poly_data, field_array, label)
+        axis, center = self._axis_and_center(poly_data, axis_name, normalized_position)
+        plane = vtk.vtkPlane()
+        origin = [(poly_data.GetBounds()[0] + poly_data.GetBounds()[1]) * 0.5,
+                  (poly_data.GetBounds()[2] + poly_data.GetBounds()[3]) * 0.5,
+                  (poly_data.GetBounds()[4] + poly_data.GetBounds()[5]) * 0.5]
+        origin[axis] = center
+        normal = [0.0, 0.0, 0.0]
+        normal[axis] = 1.0
+        plane.SetOrigin(*origin)
+        plane.SetNormal(*normal)
+        cutter = vtk.vtkCutter()
+        cutter.SetInputData(poly_data)
+        cutter.SetCutFunction(plane)
+        cutter.Update()
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputConnection(cutter.GetOutputPort())
+        mapper.SetScalarModeToUsePointFieldData()
+        mapper.SelectColorArray(array_name)
+        mapper.SetScalarRange(*scalar_range)
+        mapper.SetLookupTable(self._lookup_table(scalar_range))
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetInterpolationToPhong()
+        actor.GetProperty().SetOpacity(0.98)
+        self._renderer.AddActor(actor)
+        self._add_outline(poly_data)
+        self._add_flow_labels()
+        self._add_scalar_bar(mapper.GetLookupTable(), label)
+        self._finish_scene(poly_data)
+        return "XYZ"[axis], center
+
+    def plot_contour(
+        self,
+        poly_data,
+        field_array,
+        scalar_range: tuple[float, float],
+        label: str,
+        axis_name: str | None,
+        normalized_position: float,
+    ) -> tuple[str, float]:
+        self._reset_scene(f"Contour 等值线：{label}")
+        array_name = self._scalar_array_name(poly_data, field_array, label)
+        axis, center = self._axis_and_center(poly_data, axis_name, normalized_position)
+        bounds = poly_data.GetBounds()
+        plane = vtk.vtkPlane()
+        origin = [(bounds[0] + bounds[1]) * 0.5, (bounds[2] + bounds[3]) * 0.5, (bounds[4] + bounds[5]) * 0.5]
+        origin[axis] = center
+        normal = [0.0, 0.0, 0.0]
+        normal[axis] = 1.0
+        plane.SetOrigin(*origin)
+        plane.SetNormal(*normal)
+        cutter = vtk.vtkCutter()
+        cutter.SetInputData(poly_data)
+        cutter.SetCutFunction(plane)
+        contour = vtk.vtkContourFilter()
+        contour.SetInputConnection(cutter.GetOutputPort())
+        contour.SetInputArrayToProcess(0, 0, 0, vtk.vtkDataObject.FIELD_ASSOCIATION_POINTS, array_name)
+        value_min, value_max = scalar_range
+        if value_max <= value_min:
+            value_max = value_min + 1.0
+        contour.GenerateValues(22, value_min, value_max)
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputConnection(contour.GetOutputPort())
+        mapper.SetScalarModeToUsePointFieldData()
+        mapper.SelectColorArray(array_name)
+        mapper.SetScalarRange(value_min, value_max)
+        mapper.SetLookupTable(self._lookup_table((value_min, value_max)))
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetLineWidth(2.0)
+        self._renderer.AddActor(actor)
+        self._add_outline(poly_data)
+        self._add_flow_labels()
+        self._add_scalar_bar(mapper.GetLookupTable(), label)
+        self._finish_scene(poly_data)
+        return "XYZ"[axis], center
 
     def plot_vectors(self, poly_data, vector_array, limit: int = 900) -> None:
         self._reset_scene("Vector 矢量箭头：|U|")
@@ -1257,7 +1395,7 @@ class NativeVtkViewerDialog(QDialog):
 
     def plot_iso_surface(self, poly_data, field_array, scalar_range: tuple[float, float], label: str) -> None:
         self._reset_scene(f"Iso-surface 等值面：{label}")
-        array_name = field_array.GetName()
+        array_name = self._scalar_array_name(poly_data, field_array, label)
         poly_data.GetPointData().SetActiveScalars(array_name)
         value_min, value_max = scalar_range
         if value_max <= value_min:
@@ -1376,6 +1514,32 @@ class NativeVtkViewerDialog(QDialog):
         outlet.SetPosition(930, 96)
         self._renderer.AddActor2D(inlet)
         self._renderer.AddActor2D(outlet)
+
+    def _axis_and_center(self, poly_data, axis_name: str | None, normalized_position: float) -> tuple[int, float]:
+        bounds = poly_data.GetBounds()
+        axis = "XYZ".find(axis_name or "")
+        if axis < 0:
+            spans = [bounds[1] - bounds[0], bounds[3] - bounds[2], bounds[5] - bounds[4]]
+            axis = int(np.argmin(spans))
+        normalized_position = min(max(float(normalized_position), 0.0), 1.0)
+        axis_min = bounds[axis * 2]
+        axis_max = bounds[axis * 2 + 1]
+        return axis, axis_min + (axis_max - axis_min) * normalized_position
+
+    def _scalar_array_name(self, poly_data, field_array, label: str) -> str:
+        array_name = field_array.GetName() or label
+        if field_array.GetNumberOfComponents() == 1:
+            return array_name
+        values = vtk_to_numpy(field_array)
+        if values.ndim == 1:
+            scalar_values = values
+        else:
+            scalar_values = np.linalg.norm(values[:, : min(values.shape[1], 3)], axis=1)
+        scalar_name = f"mag({array_name})"
+        scalar_array = numpy_to_vtk(scalar_values.astype(float), deep=True)
+        scalar_array.SetName(scalar_name)
+        poly_data.GetPointData().AddArray(scalar_array)
+        return scalar_name
 
 
 class MainWindow(QMainWindow):
@@ -4499,21 +4663,22 @@ class MainWindow(QMainWindow):
             )
             return
         if mode.startswith("Contour"):
-            self._ensure_vtk_viewer()
-            vector_array = output.GetPointData().GetArray("U")
-            if vector_array is None:
-                self._show_error("Contour 等值线当前先支持速度 U 的 |U| 等值线。请先确认当前 Case 输出了 U。")
+            if storage != "point":
+                self._show_error(f"{display_name} 当前是单元字段，Contour v1 先支持点字段。")
                 return
             axis = self._result_slice_axis_combo.currentText().strip()
             position = self._result_slice_position_input.value()
-            point_count, resolved_axis, center, speed_range = self._vtk_viewer.plot_velocity_contour_lines(
+            self._ensure_native_vtk_viewer()
+            resolved_axis, center = self._native_vtk_viewer.plot_contour(
                 output,
-                vector_array,
+                field_array,
+                color_range,
+                display_name,
                 None if axis == "自动" else axis,
                 position,
             )
             self._finish_result_visualization(
-                f"Contour 等值线已加载：time={selected_time}, axis={resolved_axis}, center={center:.6g}, points={point_count}, speedRange={speed_range}"
+                f"Contour 等值线已加载到原生 VTK 窗口：field={display_name}, time={selected_time}, axis={resolved_axis}, center={center:.6g}, range={color_range}"
             )
             return
         if mode.startswith("Iso-surface"):
@@ -4543,21 +4708,22 @@ class MainWindow(QMainWindow):
             )
             return
         if mode.startswith("Slice"):
-            self._ensure_vtk_viewer()
-            vector_array = output.GetPointData().GetArray("U")
-            if vector_array is None:
-                self._show_error("切片当前先支持速度 U 的 |U| 切片。标量字段切片后续接入。")
+            if storage != "point":
+                self._show_error(f"{display_name} 当前是单元字段，Slice v1 先支持点字段。")
                 return
             axis = self._result_slice_axis_combo.currentText().strip()
             position = self._result_slice_position_input.value()
-            point_count, resolved_axis, center, speed_range = self._vtk_viewer.plot_velocity_slice_contour(
+            self._ensure_native_vtk_viewer()
+            resolved_axis, center = self._native_vtk_viewer.plot_slice(
                 output,
-                vector_array,
+                field_array,
+                color_range,
+                display_name,
                 None if axis == "自动" else axis,
                 position,
             )
             self._finish_result_visualization(
-                f"Slice 切片已加载：time={selected_time}, axis={resolved_axis}, center={center:.6g}, points={point_count}, speedRange={speed_range}"
+                f"Slice 切片已加载到原生 VTK 窗口：field={display_name}, time={selected_time}, axis={resolved_axis}, center={center:.6g}, range={color_range}"
             )
             return
         if mode.startswith("Streamline"):
@@ -4584,11 +4750,12 @@ class MainWindow(QMainWindow):
         self._show_error(f"{mode} 已放入界面结构，但 VTK 专项实现还未接入。")
 
     def _configure_result_animation_source(self) -> None:
-        if self._vtk_viewer is None or not hasattr(self, "_result_time_combo"):
+        if not hasattr(self, "_result_time_combo"):
             return
+        self._ensure_native_vtk_viewer()
         frame_count = self._result_time_combo.count()
         if frame_count <= 1:
-            self._vtk_viewer.set_animation_source(0, None)
+            self._native_vtk_viewer.set_animation_source(0, None)
             return
 
         def render_frame(frame_index: int) -> None:
@@ -4600,13 +4767,13 @@ class MainWindow(QMainWindow):
                 output, field_array, display_name, selected_time, storage = self._load_result_field_data()
             except (OSError, RuntimeError, ValueError) as error:
                 self._show_error(f"播放动画失败：{error}")
-                if self._vtk_viewer is not None:
-                    self._vtk_viewer.pause_animation()
+                if self._native_vtk_viewer is not None:
+                    self._native_vtk_viewer.pause_animation()
                 return
             color_range = self._selected_result_color_range(field_array)
             self._render_result_display(output, field_array, display_name, selected_time, storage, mode, color_range)
 
-        self._vtk_viewer.set_animation_source(frame_count, render_frame)
+        self._native_vtk_viewer.set_animation_source(frame_count, render_frame)
 
     def _load_result_field_data(self):
         if self._current_project is None:
