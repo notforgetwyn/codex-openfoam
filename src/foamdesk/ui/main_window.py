@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 from typing import Callable
 
+import vtk
 import numpy as np
 from matplotlib import colormaps
 from matplotlib.colors import Normalize
@@ -14,13 +15,14 @@ from matplotlib.figure import Figure
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from scipy.interpolate import griddata
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtCore import QProcess
+from PySide6.QtCore import QProcess, QTimer
 from PySide6.QtGui import QFont
 from vtkmodules.vtkCommonCore import vtkPoints
 from vtkmodules.vtkCommonDataModel import vtkPolyData
 from vtkmodules.vtkCommonMath import vtkRungeKutta4
 from vtkmodules.vtkFiltersFlowPaths import vtkStreamTracer
 from vtkmodules.vtkIOGeometry import vtkSTLReader
+from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 from PySide6.QtWidgets import (
     QComboBox,
     QCheckBox,
@@ -126,6 +128,12 @@ class VtkViewerDialog(QDialog):
         self._active_plot_callback: Callable[[], None] | None = None
         self._tab_refresh_callbacks: dict[QWidget, Callable[[], None]] = {}
         self._is_refreshing_tab = False
+        self._animation_render_callback: Callable[[int], None] | None = None
+        self._animation_frame_count = 0
+        self._animation_frame_index = 0
+        self._replace_current_plot = False
+        self._animation_timer = QTimer(self)
+        self._animation_timer.timeout.connect(self._advance_animation_frame)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -151,10 +159,18 @@ class VtkViewerDialog(QDialog):
         action_row.addWidget(QLabel("附近半径"))
         action_row.addWidget(self._filter_radius_input)
         action_row.addStretch(1)
+        self._play_animation_button = QPushButton("播放动画")
+        self._pause_animation_button = QPushButton("暂停动画")
+        self._play_animation_button.clicked.connect(self.play_animation)
+        self._pause_animation_button.clicked.connect(self.pause_animation)
+        self._play_animation_button.setEnabled(False)
+        self._pause_animation_button.setEnabled(False)
         clear_button = QPushButton("清空视图")
         clear_button.clicked.connect(self._clear_tabs)
         export_button = QPushButton("导出 PNG")
         export_button.clicked.connect(self._export_png)
+        action_row.addWidget(self._play_animation_button)
+        action_row.addWidget(self._pause_animation_button)
         action_row.addWidget(clear_button)
         action_row.addWidget(export_button)
         layout.addLayout(action_row)
@@ -197,8 +213,44 @@ class VtkViewerDialog(QDialog):
         return points.min(axis=0), points.max(axis=0)
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self.pause_animation()
         self._clear_tabs()
         super().closeEvent(event)
+
+    def set_animation_source(self, frame_count: int, render_callback: Callable[[int], None] | None) -> None:
+        self.pause_animation()
+        self._animation_frame_count = max(0, int(frame_count))
+        self._animation_frame_index = 0
+        self._animation_render_callback = render_callback if self._animation_frame_count > 1 else None
+        enabled = self._animation_render_callback is not None
+        self._play_animation_button.setEnabled(enabled)
+        self._pause_animation_button.setEnabled(enabled)
+
+    def play_animation(self) -> None:
+        if self._animation_render_callback is None or self._animation_frame_count <= 1:
+            return
+        self._animation_frame_index = 0
+        self.render_animation_frame(self._animation_frame_index)
+        self._animation_frame_index = 1
+        self._animation_timer.start(800)
+
+    def pause_animation(self) -> None:
+        self._animation_timer.stop()
+
+    def _advance_animation_frame(self) -> None:
+        if self._animation_render_callback is None or self._animation_frame_count <= 1:
+            self.pause_animation()
+            return
+        self.render_animation_frame(self._animation_frame_index)
+        self._animation_frame_index = (self._animation_frame_index + 1) % self._animation_frame_count
+
+    def render_animation_frame(self, frame_index: int) -> None:
+        self._replace_current_plot = True
+        try:
+            if self._animation_render_callback is not None:
+                self._animation_render_callback(frame_index)
+        finally:
+            self._replace_current_plot = False
 
     def plot_cube(self) -> None:
         self._begin_plot(lambda: self.plot_cube())
@@ -321,16 +373,11 @@ class VtkViewerDialog(QDialog):
         )
         axes.add_collection3d(collection)
         scalar_mappable = colormaps["turbo"]
-        colorbar = self.figure.colorbar(
+        self._add_horizontal_colorbar(
             self._scalar_mappable(scalar_range, scalar_mappable),
-            ax=axes,
-            shrink=0.72,
-            pad=0.08,
+            axes,
+            field_name,
         )
-        colorbar.set_label(field_name, color="#d4d4d4")
-        colorbar.ax.yaxis.set_tick_params(color="#d4d4d4")
-        for label in colorbar.ax.get_yticklabels():
-            label.set_color("#d4d4d4")
         self._finish_axes(axes, points)
         return len(faces)
 
@@ -388,16 +435,11 @@ class VtkViewerDialog(QDialog):
             linewidths=0.8,
             arrow_length_ratio=0.35,
         )
-        colorbar = self.figure.colorbar(
+        self._add_horizontal_colorbar(
             self._scalar_mappable((float(speeds.min()), max_speed), cmap),
-            ax=axes,
-            shrink=0.72,
-            pad=0.08,
+            axes,
+            "|U| (m/s)",
         )
-        colorbar.set_label("|U|", color="#d4d4d4")
-        colorbar.ax.yaxis.set_tick_params(color="#d4d4d4")
-        for label in colorbar.ax.get_yticklabels():
-            label.set_color("#d4d4d4")
         self._finish_axes(axes, points)
         return len(points), (float(speeds.min()), max_speed)
 
@@ -478,11 +520,7 @@ class VtkViewerDialog(QDialog):
             vmin=speed_range[0],
             vmax=speed_range[1],
         )
-        colorbar = self.figure.colorbar(scatter, ax=axes, shrink=0.72, pad=0.08)
-        colorbar.set_label("|U|", color="#d4d4d4")
-        colorbar.ax.yaxis.set_tick_params(color="#d4d4d4")
-        for label in colorbar.ax.get_yticklabels():
-            label.set_color("#d4d4d4")
+        self._add_horizontal_colorbar(scatter, axes, "|U| (m/s)")
         self._finish_axes(axes, points)
         return len(slice_points), resolved_axis_name, center, speed_range
 
@@ -584,18 +622,171 @@ class VtkViewerDialog(QDialog):
             alpha=0.96,
         )
         surface.set_edgecolor("none")
-        colorbar = self.figure.colorbar(
+        self._add_horizontal_colorbar(
             self._scalar_mappable(speed_range, colormaps["turbo"]),
-            ax=axes,
-            shrink=0.72,
-            pad=0.08,
+            axes,
+            "|U| (m/s)",
         )
-        colorbar.set_label("|U|", color="#d4d4d4")
-        colorbar.ax.yaxis.set_tick_params(color="#d4d4d4")
-        for label in colorbar.ax.get_yticklabels():
-            label.set_color("#d4d4d4")
         self._finish_axes(axes, points)
         return len(slice_points), resolved_axis_name, center, speed_range
+
+    def plot_velocity_contour_lines(
+        self,
+        poly_data,
+        vector_array,
+        axis_name: str | None = None,
+        normalized_position: float = 0.5,
+        resolution: int = 90,
+    ) -> tuple[int, str, float, tuple[float, float]]:
+        self._begin_plot(
+            lambda: self.plot_velocity_contour_lines(poly_data, vector_array, axis_name, normalized_position, resolution)
+        )
+        points = self._points(poly_data)
+        vectors = vtk_to_numpy(vector_array)
+        axes = self._reset_axes("Velocity U Contour |U|")
+        if points.size == 0 or vectors.size == 0 or vectors.ndim != 2 or vectors.shape[1] < 3:
+            axes.text2D(0.08, 0.5, "No velocity contour data to display.", color="#111111")
+            self._show()
+            return 0, "X", 0.0, (0.0, 0.0)
+
+        count = min(len(points), len(vectors))
+        points = points[:count]
+        vectors = vectors[:count, :3]
+        mask = self._filter_mask(points)
+        points = points[mask]
+        vectors = vectors[mask]
+        if len(points) == 0:
+            axes.text2D(0.08, 0.5, "No contour points in current display range.", color="#111111")
+            self._show()
+            return 0, "X", 0.0, (0.0, 0.0)
+        speeds = np.linalg.norm(vectors, axis=1)
+        normalized_position = min(max(float(normalized_position), 0.0), 1.0)
+
+        def build_mask(axis: int) -> tuple[float, np.ndarray]:
+            axis_min = float(points[:, axis].min())
+            axis_max = float(points[:, axis].max())
+            center = axis_min + (axis_max - axis_min) * normalized_position
+            span = float(axis_max - axis_min)
+            tolerance = max(span * 0.06, 1e-9)
+            mask = np.abs(points[:, axis] - center) <= tolerance
+            if mask.sum() < 12:
+                nearest = np.argsort(np.abs(points[:, axis] - center))[: min(360, len(points))]
+                mask = np.zeros(len(points), dtype=bool)
+                mask[nearest] = True
+            return center, mask
+
+        requested_axis = None if not axis_name or axis_name == "自动" else "XYZ".find(axis_name)
+        if requested_axis is not None and requested_axis >= 0:
+            axis = requested_axis
+            center, mask = build_mask(axis)
+        else:
+            candidates: list[tuple[float, int, float, np.ndarray]] = []
+            for candidate_axis in range(3):
+                center, mask = build_mask(candidate_axis)
+                slice_speeds = speeds[mask]
+                score = float(slice_speeds.max() - slice_speeds.min()) if slice_speeds.size else -1.0
+                candidates.append((score, candidate_axis, center, mask))
+            _, axis, center, mask = max(candidates, key=lambda item: item[0])
+
+        resolved_axis_name = "XYZ"[axis]
+        slice_points = points[mask]
+        slice_speeds = speeds[mask]
+        if len(slice_points) < 4:
+            axes.text2D(0.08, 0.5, "Not enough points for contour lines.", color="#111111")
+            self._show()
+            return len(slice_points), resolved_axis_name, center, (0.0, 0.0)
+
+        plane_axes = [index for index in range(3) if index != axis]
+        plane_points = slice_points[:, plane_axes]
+        x_values = np.linspace(float(plane_points[:, 0].min()), float(plane_points[:, 0].max()), resolution)
+        y_values = np.linspace(float(plane_points[:, 1].min()), float(plane_points[:, 1].max()), resolution)
+        grid_x, grid_y = np.meshgrid(x_values, y_values)
+        grid_speed = griddata(plane_points, slice_speeds, (grid_x, grid_y), method="linear")
+        nearest_speed = griddata(plane_points, slice_speeds, (grid_x, grid_y), method="nearest")
+        grid_speed = np.where(np.isnan(grid_speed), nearest_speed, grid_speed)
+        speed_range = (float(np.nanmin(grid_speed)), float(np.nanmax(grid_speed)))
+        if speed_range[0] == speed_range[1]:
+            speed_range = (speed_range[0] - 1.0, speed_range[1] + 1.0)
+
+        levels = np.linspace(speed_range[0], speed_range[1], 22)
+        if axis == 0:
+            contour = axes.contour(grid_x, grid_y, grid_speed, levels=levels, zdir="x", offset=center, cmap="turbo", linewidths=1.25)
+            background_x = np.full_like(grid_x, center)
+            axes.plot_surface(background_x, grid_x, grid_y, color="#f8fbff", alpha=0.18, linewidth=0)
+        elif axis == 1:
+            contour = axes.contour(grid_x, grid_y, grid_speed, levels=levels, zdir="y", offset=center, cmap="turbo", linewidths=1.25)
+            background_y = np.full_like(grid_x, center)
+            axes.plot_surface(grid_x, background_y, grid_y, color="#f8fbff", alpha=0.18, linewidth=0)
+        else:
+            contour = axes.contour(grid_x, grid_y, grid_speed, levels=levels, zdir="z", offset=center, cmap="turbo", linewidths=1.25)
+            background_z = np.full_like(grid_x, center)
+            axes.plot_surface(grid_x, grid_y, background_z, color="#f8fbff", alpha=0.18, linewidth=0)
+        self._add_horizontal_colorbar(contour, axes, "|U| (m/s)")
+        self._finish_axes(axes, points)
+        return len(slice_points), resolved_axis_name, center, speed_range
+
+    def plot_field_iso_surface(
+        self,
+        poly_data,
+        field_array,
+        scalar_range: tuple[float, float],
+        field_name: str,
+        level_count: int = 6,
+    ) -> tuple[int, tuple[float, float]]:
+        self._begin_plot(lambda: self.plot_field_iso_surface(poly_data, field_array, scalar_range, field_name, level_count))
+        points = self._points(poly_data)
+        faces = self._faces(poly_data)
+        values = self._scalar_values(field_array)
+        axes = self._reset_axes(f"{field_name} Iso-surface")
+        if points.size == 0 or faces.size == 0 or values.size == 0:
+            axes.text2D(0.08, 0.5, "No iso-surface data to display.", color="#111111")
+            self._show()
+            return 0, scalar_range
+
+        faces = self._sample_faces(faces, limit=18000)
+        faces = self._filter_faces_by_center(points, faces)
+        if faces.size == 0:
+            axes.text2D(0.08, 0.5, "No faces in current display range.", color="#111111")
+            self._show()
+            return 0, scalar_range
+
+        face_values = np.array([values[np.asarray(face, dtype=int)].mean() for face in faces], dtype=float)
+        value_min, value_max = scalar_range
+        if value_max <= value_min:
+            value_min, value_max = float(face_values.min()), float(face_values.max())
+        if value_max <= value_min:
+            value_min, value_max = value_min - 1.0, value_max + 1.0
+        levels = np.linspace(value_min, value_max, max(3, int(level_count)))
+        tolerance = max((value_max - value_min) / (level_count * 3.2), 1e-12)
+        cmap = colormaps["turbo"]
+        normalizer = Normalize(vmin=value_min, vmax=value_max)
+        rendered_faces = 0
+        for level in levels:
+            level_mask = np.abs(face_values - level) <= tolerance
+            if level_mask.sum() == 0:
+                nearest = np.argsort(np.abs(face_values - level))[: min(240, len(face_values))]
+                level_mask = np.zeros(len(face_values), dtype=bool)
+                level_mask[nearest] = True
+            selected_faces = faces[level_mask]
+            if selected_faces.size == 0:
+                continue
+            polygons = [points[np.asarray(face, dtype=int)] for face in selected_faces]
+            collection = Poly3DCollection(
+                polygons,
+                facecolors=cmap(normalizer(level)),
+                edgecolors=(1.0, 1.0, 1.0, 0.18),
+                linewidths=0.18,
+                alpha=0.58,
+            )
+            axes.add_collection3d(collection)
+            rendered_faces += len(polygons)
+        self._add_horizontal_colorbar(
+            self._scalar_mappable((value_min, value_max), cmap),
+            axes,
+            field_name,
+        )
+        self._finish_axes(axes, points)
+        return rendered_faces, (value_min, value_max)
 
     def plot_velocity_streamlines(
         self,
@@ -654,16 +845,11 @@ class VtkViewerDialog(QDialog):
             self._show()
             return 0, 0, main_axis, speed_range
 
-        colorbar = self.figure.colorbar(
+        self._add_horizontal_colorbar(
             self._scalar_mappable(speed_range, cmap),
-            ax=axes,
-            shrink=0.72,
-            pad=0.08,
+            axes,
+            "|U| (m/s)",
         )
-        colorbar.set_label("|U|", color="#d4d4d4")
-        colorbar.ax.yaxis.set_tick_params(color="#d4d4d4")
-        for label in colorbar.ax.get_yticklabels():
-            label.set_color("#d4d4d4")
         filtered_source_points = self._filter_points(source_points)
         self._finish_axes(axes, filtered_source_points if filtered_source_points.size else source_points)
         return line_count, total_line_points, main_axis, speed_range
@@ -697,23 +883,23 @@ class VtkViewerDialog(QDialog):
             vmin=scalar_range[0],
             vmax=scalar_range[1],
         )
-        colorbar = self.figure.colorbar(scatter, ax=axes, shrink=0.72, pad=0.08)
-        colorbar.set_label("p", color="#d4d4d4")
-        colorbar.ax.yaxis.set_tick_params(color="#d4d4d4")
-        for label in colorbar.ax.get_yticklabels():
-            label.set_color("#d4d4d4")
+        self._add_horizontal_colorbar(scatter, axes, "p")
         self._finish_axes(axes, points)
 
     def _reset_axes(self, title: str):
         self._last_plot_title = title
-        self.figure = Figure(figsize=(8, 6), facecolor="#1e1e1e", tight_layout=True)
+        if self._replace_current_plot and self._tabs.count() > 0:
+            current_index = self._tabs.currentIndex()
+            if current_index >= 0:
+                self._close_tab(current_index)
+        self.figure = Figure(figsize=(10, 7), facecolor="#ffffff", tight_layout=True)
         self.canvas = FigureCanvas(self.figure)
         if self._active_plot_callback is not None:
             self._tab_refresh_callbacks[self.canvas] = self._active_plot_callback
         self._tabs.addTab(self.canvas, self._tab_title(title))
         self._tabs.setCurrentWidget(self.canvas)
-        axes = self.figure.add_subplot(111, projection="3d", facecolor="#1e1e1e")
-        axes.set_title(title, color="#d4d4d4", pad=14)
+        axes = self.figure.add_subplot(111, projection="3d", facecolor="#ffffff")
+        axes.set_title(title, color="#09205c", pad=18, fontsize=16, fontweight="bold")
         axes.set_axis_off()
         return axes
 
@@ -723,11 +909,63 @@ class VtkViewerDialog(QDialog):
             maxs = points.max(axis=0)
             center = (mins + maxs) / 2.0
             radius = max((maxs - mins).max() / 2.0, 0.5)
+            self._draw_domain_box(axes, mins, maxs)
+            self._draw_flow_direction(axes, mins, maxs)
             axes.set_xlim(center[0] - radius, center[0] + radius)
             axes.set_ylim(center[1] - radius, center[1] + radius)
             axes.set_zlim(center[2] - radius, center[2] + radius)
-        axes.view_init(elev=24, azim=-55)
+        axes.view_init(elev=20, azim=-62)
         self._show()
+
+    def _draw_domain_box(self, axes, mins: np.ndarray, maxs: np.ndarray) -> None:
+        corners = np.array(
+            [
+                [mins[0], mins[1], mins[2]],
+                [maxs[0], mins[1], mins[2]],
+                [maxs[0], maxs[1], mins[2]],
+                [mins[0], maxs[1], mins[2]],
+                [mins[0], mins[1], maxs[2]],
+                [maxs[0], mins[1], maxs[2]],
+                [maxs[0], maxs[1], maxs[2]],
+                [mins[0], maxs[1], maxs[2]],
+            ],
+            dtype=float,
+        )
+        edges = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]
+        for start, end in edges:
+            axes.plot(
+                corners[[start, end], 0],
+                corners[[start, end], 1],
+                corners[[start, end], 2],
+                color="#1b2a41",
+                linewidth=1.0,
+                alpha=0.42,
+            )
+
+    def _draw_flow_direction(self, axes, mins: np.ndarray, maxs: np.ndarray) -> None:
+        span = np.maximum(maxs - mins, 1e-9)
+        center_y = float((mins[1] + maxs[1]) / 2.0)
+        center_z = float((mins[2] + maxs[2]) / 2.0)
+        arrow_length = float(span[0] * 0.16)
+        inlet_x = float(mins[0] - arrow_length * 1.15)
+        outlet_x = float(maxs[0] + arrow_length * 0.15)
+        axes.quiver(inlet_x, center_y, center_z, arrow_length, 0, 0, color="#1759ff", linewidth=3.0, arrow_length_ratio=0.34)
+        axes.quiver(outlet_x, center_y, center_z, arrow_length, 0, 0, color="#ff1f1f", linewidth=3.0, arrow_length_ratio=0.34)
+        axes.text(inlet_x, center_y, center_z - span[2] * 0.18, "INLET", color="#1759ff", fontsize=10, fontweight="bold")
+        axes.text(outlet_x + arrow_length * 0.8, center_y, center_z - span[2] * 0.18, "OUTLET", color="#ff1f1f", fontsize=10, fontweight="bold")
+
+    def _add_horizontal_colorbar(self, mappable, axes, label: str):
+        colorbar = self.figure.colorbar(
+            mappable,
+            ax=axes,
+            orientation="horizontal",
+            shrink=0.72,
+            pad=0.03,
+            aspect=34,
+        )
+        colorbar.set_label(label, color="#111111", fontsize=12, fontweight="bold")
+        colorbar.ax.xaxis.set_tick_params(color="#111111", labelcolor="#111111")
+        return colorbar
 
     def _show(self) -> None:
         if self.canvas is not None:
@@ -936,6 +1174,210 @@ class VtkViewerDialog(QDialog):
         return points[indices]
 
 
+class NativeVtkViewerDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("FoamDesk Native VTK 视图")
+        self.resize(1120, 760)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        toolbar = QHBoxLayout()
+        self._status_label = QLabel("原生 VTK 高质量渲染窗口")
+        toolbar.addWidget(self._status_label)
+        toolbar.addStretch(1)
+        close_button = QPushButton("关闭")
+        close_button.clicked.connect(self.close)
+        toolbar.addWidget(close_button)
+        layout.addLayout(toolbar)
+
+        self._vtk_widget = QVTKRenderWindowInteractor(self)
+        layout.addWidget(self._vtk_widget, 1)
+        self._renderer = vtk.vtkRenderer()
+        self._renderer.SetBackground(1.0, 1.0, 1.0)
+        self._vtk_widget.GetRenderWindow().AddRenderer(self._renderer)
+        self._interactor = self._vtk_widget.GetRenderWindow().GetInteractor()
+        self._interactor.Initialize()
+
+    def plot_surface(self, poly_data, field_array, scalar_range: tuple[float, float], label: str) -> None:
+        self._reset_scene(f"Surface 表面云图：{label}")
+        array_name = field_array.GetName()
+        poly_data.GetPointData().SetActiveScalars(array_name)
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputData(poly_data)
+        mapper.SetScalarModeToUsePointFieldData()
+        mapper.SelectColorArray(array_name)
+        mapper.SetScalarRange(*scalar_range)
+        mapper.SetLookupTable(self._lookup_table(scalar_range))
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetInterpolationToPhong()
+        actor.GetProperty().SetSpecular(0.25)
+        actor.GetProperty().SetSpecularPower(18)
+        self._renderer.AddActor(actor)
+        self._add_outline(poly_data)
+        self._add_flow_labels()
+        self._add_scalar_bar(mapper.GetLookupTable(), label)
+        self._finish_scene(poly_data)
+
+    def plot_vectors(self, poly_data, vector_array, limit: int = 900) -> None:
+        self._reset_scene("Vector 矢量箭头：|U|")
+        vector_name = vector_array.GetName()
+        poly_data.GetPointData().SetActiveVectors(vector_name)
+        speeds = vtk_to_numpy(vector_array)
+        speed_values = np.linalg.norm(speeds[:, :3], axis=1) if speeds.ndim == 2 and speeds.shape[1] >= 3 else np.array([0.0, 1.0])
+        speed_range = (float(speed_values.min()), float(speed_values.max()))
+        if speed_range[0] == speed_range[1]:
+            speed_range = (speed_range[0] - 1.0, speed_range[1] + 1.0)
+
+        mask = vtk.vtkMaskPoints()
+        mask.SetInputData(poly_data)
+        mask.SetMaximumNumberOfPoints(limit)
+        mask.RandomModeOn()
+        arrow = vtk.vtkArrowSource()
+        glyph = vtk.vtkGlyph3D()
+        glyph.SetInputConnection(mask.GetOutputPort())
+        glyph.SetSourceConnection(arrow.GetOutputPort())
+        glyph.SetVectorModeToUseVector()
+        glyph.SetScaleModeToScaleByVector()
+        glyph.SetScaleFactor(0.08)
+        glyph.OrientOn()
+        glyph.Update()
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputConnection(glyph.GetOutputPort())
+        mapper.SetScalarRange(*speed_range)
+        mapper.SetLookupTable(self._lookup_table(speed_range))
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetInterpolationToPhong()
+        self._renderer.AddActor(actor)
+        self._add_outline(poly_data)
+        self._add_flow_labels()
+        self._add_scalar_bar(mapper.GetLookupTable(), "|U| (m/s)")
+        self._finish_scene(poly_data)
+
+    def plot_iso_surface(self, poly_data, field_array, scalar_range: tuple[float, float], label: str) -> None:
+        self._reset_scene(f"Iso-surface 等值面：{label}")
+        array_name = field_array.GetName()
+        poly_data.GetPointData().SetActiveScalars(array_name)
+        value_min, value_max = scalar_range
+        if value_max <= value_min:
+            value_max = value_min + 1.0
+        contour = vtk.vtkContourFilter()
+        contour.SetInputData(poly_data)
+        contour.SetInputArrayToProcess(0, 0, 0, vtk.vtkDataObject.FIELD_ASSOCIATION_POINTS, array_name)
+        for index, value in enumerate(np.linspace(value_min, value_max, 7)):
+            contour.SetValue(index, float(value))
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputConnection(contour.GetOutputPort())
+        mapper.SetScalarModeToUsePointFieldData()
+        mapper.SelectColorArray(array_name)
+        mapper.SetScalarRange(value_min, value_max)
+        mapper.SetLookupTable(self._lookup_table((value_min, value_max)))
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetOpacity(0.72)
+        actor.GetProperty().SetInterpolationToPhong()
+        actor.GetProperty().SetSpecular(0.35)
+        actor.GetProperty().SetSpecularPower(24)
+        self._renderer.AddActor(actor)
+        self._add_outline(poly_data)
+        self._add_flow_labels()
+        self._add_scalar_bar(mapper.GetLookupTable(), label)
+        self._finish_scene(poly_data)
+
+    def plot_streamlines(self, source_poly_data, streamline_poly_data, speed_range: tuple[float, float]) -> None:
+        self._reset_scene("Streamline 流线：|U|")
+        tube = vtk.vtkTubeFilter()
+        tube.SetInputData(streamline_poly_data)
+        tube.SetRadius(0.018)
+        tube.SetNumberOfSides(14)
+        tube.CappingOn()
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputConnection(tube.GetOutputPort())
+        mapper.SetScalarRange(*speed_range)
+        mapper.SetLookupTable(self._lookup_table(speed_range))
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetInterpolationToPhong()
+        actor.GetProperty().SetSpecular(0.3)
+        actor.GetProperty().SetSpecularPower(18)
+        self._renderer.AddActor(actor)
+        self._add_outline(source_poly_data)
+        self._add_flow_labels()
+        self._add_scalar_bar(mapper.GetLookupTable(), "|U| (m/s)")
+        self._finish_scene(source_poly_data)
+
+    def _reset_scene(self, status: str) -> None:
+        self._status_label.setText(status)
+        self._renderer.RemoveAllViewProps()
+        self._renderer.SetBackground(1.0, 1.0, 1.0)
+
+    def _finish_scene(self, poly_data) -> None:
+        self._renderer.ResetCamera()
+        camera = self._renderer.GetActiveCamera()
+        camera.Azimuth(-35)
+        camera.Elevation(18)
+        camera.Zoom(1.15)
+        self._renderer.ResetCameraClippingRange()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self._vtk_widget.GetRenderWindow().Render()
+
+    def _lookup_table(self, scalar_range: tuple[float, float]):
+        table = vtk.vtkLookupTable()
+        table.SetNumberOfTableValues(256)
+        table.SetRange(*scalar_range)
+        cmap = colormaps["turbo"]
+        for index in range(256):
+            r, g, b, a = cmap(index / 255.0)
+            table.SetTableValue(index, float(r), float(g), float(b), float(a))
+        table.Build()
+        return table
+
+    def _add_outline(self, poly_data) -> None:
+        outline = vtk.vtkOutlineFilter()
+        outline.SetInputData(poly_data)
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputConnection(outline.GetOutputPort())
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetColor(0.05, 0.10, 0.18)
+        actor.GetProperty().SetOpacity(0.55)
+        actor.GetProperty().SetLineWidth(1.4)
+        self._renderer.AddActor(actor)
+
+    def _add_scalar_bar(self, lookup_table, label: str) -> None:
+        scalar_bar = vtk.vtkScalarBarActor()
+        scalar_bar.SetLookupTable(lookup_table)
+        scalar_bar.SetTitle(label)
+        scalar_bar.SetOrientationToHorizontal()
+        scalar_bar.SetNumberOfLabels(6)
+        scalar_bar.SetWidth(0.62)
+        scalar_bar.SetHeight(0.10)
+        scalar_bar.SetPosition(0.20, 0.03)
+        scalar_bar.GetTitleTextProperty().SetColor(0.0, 0.0, 0.0)
+        scalar_bar.GetTitleTextProperty().SetBold(True)
+        scalar_bar.GetLabelTextProperty().SetColor(0.0, 0.0, 0.0)
+        self._renderer.AddActor2D(scalar_bar)
+
+    def _add_flow_labels(self) -> None:
+        inlet = vtk.vtkTextActor()
+        inlet.SetInput("INLET")
+        inlet.GetTextProperty().SetColor(0.0, 0.18, 1.0)
+        inlet.GetTextProperty().SetBold(True)
+        inlet.GetTextProperty().SetFontSize(24)
+        inlet.SetPosition(32, 96)
+        outlet = vtk.vtkTextActor()
+        outlet.SetInput("OUTLET")
+        outlet.GetTextProperty().SetColor(1.0, 0.0, 0.0)
+        outlet.GetTextProperty().SetBold(True)
+        outlet.GetTextProperty().SetFontSize(24)
+        outlet.SetPosition(930, 96)
+        self._renderer.AddActor2D(inlet)
+        self._renderer.AddActor2D(outlet)
+
+
 class MainWindow(QMainWindow):
     TAB_PROJECT_HOME = 0
     TAB_DRAW_GEOMETRY = 1
@@ -999,6 +1441,7 @@ class MainWindow(QMainWindow):
         self._last_diagnostic_summary = "暂无诊断。"
         self._suspend_draw_geometry_persist = False
         self._vtk_viewer: VtkViewerDialog | None = None
+        self._native_vtk_viewer: NativeVtkViewerDialog | None = None
         self.setWindowTitle("FoamDesk")
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.resize(1400, 900)
@@ -4031,15 +4474,61 @@ class MainWindow(QMainWindow):
             self._show_error(f"加载结果显示失败：{error}")
             return
 
-        self._ensure_vtk_viewer()
+        self._configure_result_animation_source()
         color_range = self._selected_result_color_range(field_array)
+        self._render_result_display(output, field_array, display_name, selected_time, storage, mode, color_range)
+
+    def _render_result_display(
+        self,
+        output,
+        field_array,
+        display_name: str,
+        selected_time: str,
+        storage: str,
+        mode: str,
+        color_range: tuple[float, float],
+    ) -> None:
         if mode.startswith("Surface"):
             if storage != "point":
                 self._show_error(f"{display_name} 当前是单元字段，Surface v1 先支持点字段。后续会增加单元字段转点字段。")
                 return
-            face_count = self._vtk_viewer.plot_field_surface(output, field_array, color_range, display_name)
+            self._ensure_native_vtk_viewer()
+            self._native_vtk_viewer.plot_surface(output, field_array, color_range, display_name)
             self._finish_result_visualization(
-                f"Surface 表面云图已加载：field={display_name}, time={selected_time}, faces={face_count}, range={color_range}"
+                f"Surface 表面云图已加载到原生 VTK 窗口：field={display_name}, time={selected_time}, range={color_range}"
+            )
+            return
+        if mode.startswith("Contour"):
+            self._ensure_vtk_viewer()
+            vector_array = output.GetPointData().GetArray("U")
+            if vector_array is None:
+                self._show_error("Contour 等值线当前先支持速度 U 的 |U| 等值线。请先确认当前 Case 输出了 U。")
+                return
+            axis = self._result_slice_axis_combo.currentText().strip()
+            position = self._result_slice_position_input.value()
+            point_count, resolved_axis, center, speed_range = self._vtk_viewer.plot_velocity_contour_lines(
+                output,
+                vector_array,
+                None if axis == "自动" else axis,
+                position,
+            )
+            self._finish_result_visualization(
+                f"Contour 等值线已加载：time={selected_time}, axis={resolved_axis}, center={center:.6g}, points={point_count}, speedRange={speed_range}"
+            )
+            return
+        if mode.startswith("Iso-surface"):
+            if storage != "point":
+                self._show_error(f"{display_name} 当前是单元字段，Iso-surface v1 先支持点字段。")
+                return
+            self._ensure_native_vtk_viewer()
+            self._native_vtk_viewer.plot_iso_surface(
+                output,
+                field_array,
+                color_range,
+                display_name,
+            )
+            self._finish_result_visualization(
+                f"Iso-surface 等值面已加载到原生 VTK 窗口：field={display_name}, time={selected_time}, range={color_range}"
             )
             return
         if mode.startswith("Vector") or mode.startswith("Glyph"):
@@ -4047,12 +4536,14 @@ class MainWindow(QMainWindow):
             if vector_array is None:
                 self._show_error("矢量箭头/Glyph 当前需要点字段 U。请先确认当前 Case 输出了 U。")
                 return
-            count, speed_range = self._vtk_viewer.plot_velocity_vectors(output, vector_array)
+            self._ensure_native_vtk_viewer()
+            self._native_vtk_viewer.plot_vectors(output, vector_array)
             self._finish_result_visualization(
-                f"{mode} 已加载：time={selected_time}, arrows={count}, speedRange={speed_range}"
+                f"{mode} 已加载到原生 VTK 窗口：time={selected_time}"
             )
             return
         if mode.startswith("Slice"):
+            self._ensure_vtk_viewer()
             vector_array = output.GetPointData().GetArray("U")
             if vector_array is None:
                 self._show_error("切片当前先支持速度 U 的 |U| 切片。标量字段切片后续接入。")
@@ -4079,18 +4570,43 @@ class MainWindow(QMainWindow):
             except RuntimeError as error:
                 self._show_error(f"生成流线失败：{error}")
                 return
-            line_count, line_points, main_axis, speed_range = self._vtk_viewer.plot_velocity_streamlines(
+            self._ensure_native_vtk_viewer()
+            self._native_vtk_viewer.plot_streamlines(
                 output,
                 streamline_output,
-                main_axis,
                 speed_range,
             )
             self._finish_result_visualization(
-                f"Streamline 流线已加载：time={selected_time}, mainAxis={main_axis}, seeds={seed_count}, lines={line_count}, points={line_points}, speedRange={speed_range}"
+                f"Streamline 流线已加载到原生 VTK 窗口：time={selected_time}, mainAxis={main_axis}, seeds={seed_count}, speedRange={speed_range}"
             )
             return
 
         self._show_error(f"{mode} 已放入界面结构，但 VTK 专项实现还未接入。")
+
+    def _configure_result_animation_source(self) -> None:
+        if self._vtk_viewer is None or not hasattr(self, "_result_time_combo"):
+            return
+        frame_count = self._result_time_combo.count()
+        if frame_count <= 1:
+            self._vtk_viewer.set_animation_source(0, None)
+            return
+
+        def render_frame(frame_index: int) -> None:
+            if frame_index < 0 or frame_index >= self._result_time_combo.count():
+                return
+            self._result_time_combo.setCurrentIndex(frame_index)
+            mode = self._result_display_combo.currentText().strip()
+            try:
+                output, field_array, display_name, selected_time, storage = self._load_result_field_data()
+            except (OSError, RuntimeError, ValueError) as error:
+                self._show_error(f"播放动画失败：{error}")
+                if self._vtk_viewer is not None:
+                    self._vtk_viewer.pause_animation()
+                return
+            color_range = self._selected_result_color_range(field_array)
+            self._render_result_display(output, field_array, display_name, selected_time, storage, mode, color_range)
+
+        self._vtk_viewer.set_animation_source(frame_count, render_frame)
 
     def _load_result_field_data(self):
         if self._current_project is None:
@@ -4160,7 +4676,11 @@ class MainWindow(QMainWindow):
         length_factor: float = 2.5,
         step_factor: float = 0.02,
     ):
-        points = self._vtk_viewer._points(poly_data)
+        vtk_points = poly_data.GetPoints()
+        if vtk_points is None:
+            points = np.empty((0, 3), dtype=float)
+        else:
+            points = vtk_to_numpy(vtk_points.GetData())
         vectors = vtk_to_numpy(velocity_array)
         if points.size == 0 or vectors.size == 0 or vectors.ndim != 2 or vectors.shape[1] < 3:
             raise RuntimeError("当前 Case 没有可用于流线追踪的速度点字段。")
@@ -4230,6 +4750,13 @@ class MainWindow(QMainWindow):
         self._vtk_viewer.show()
         self._vtk_viewer.raise_()
         self._vtk_viewer.activateWindow()
+
+    def _ensure_native_vtk_viewer(self) -> None:
+        if self._native_vtk_viewer is None:
+            self._native_vtk_viewer = NativeVtkViewerDialog(self)
+        self._native_vtk_viewer.show()
+        self._native_vtk_viewer.raise_()
+        self._native_vtk_viewer.activateWindow()
 
     def _finalize_vtk_render(self) -> None:
         if self._vtk_viewer is not None:
