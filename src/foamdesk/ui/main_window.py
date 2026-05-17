@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import shlex
@@ -369,7 +369,7 @@ class VtkViewerDialog(QDialog):
             facecolors=cmap(normalizer(face_values)),
             edgecolors=(0.18, 0.18, 0.18, 0.35),
             linewidths=0.35,
-            alpha=0.96,
+            alpha=0.36,
         )
         axes.add_collection3d(collection)
         scalar_mappable = colormaps["turbo"]
@@ -813,6 +813,12 @@ class VtkViewerDialog(QDialog):
         normalizer = Normalize(vmin=speed_range[0], vmax=speed_range[1])
         index = 0
         line_count = 0
+        source_min = source_points.min(axis=0)
+        source_max = source_points.max(axis=0)
+        source_extent = np.maximum(source_max - source_min, 1e-9)
+        source_tolerance = float(np.linalg.norm(source_extent)) * 1e-6
+        arrow_length = float(np.linalg.norm(source_extent)) * 0.027
+        vector_values = vtk_to_numpy(vectors)[:, :3] if vectors is not None else None
         total_line_points = 0
         while index < len(lines):
             count = int(lines[index])
@@ -822,21 +828,48 @@ class VtkViewerDialog(QDialog):
             if count < 2:
                 continue
             line = line_points[ids]
-            line_mask = self._filter_mask(line)
+            display_mask = self._filter_mask(line)
+            bounds_mask = np.all(
+                (line >= source_min - source_tolerance) & (line <= source_max + source_tolerance),
+                axis=1,
+            )
+            line_mask = display_mask & bounds_mask
             line = line[line_mask]
             ids = ids[line_mask]
-            if len(line) < 2:
+            if len(line) < 1:
                 continue
-            speed = float(line_speeds[ids].mean()) if len(line_speeds) else 0.0
-            axes.plot(
-                line[:, 0],
-                line[:, 1],
-                line[:, 2],
-                color=cmap(normalizer(speed)),
-                linewidth=1.8,
-                alpha=0.95,
-            )
-            axes.scatter(line[0, 0], line[0, 1], line[0, 2], s=16, c="#ffffff", alpha=0.85)
+            sample_step = max(1, len(line) // 7)
+            arrow_starts = line[::sample_step]
+            sampled_ids = ids[::sample_step]
+            if vector_values is not None and len(vector_values):
+                arrow_vectors = vector_values[sampled_ids]
+            elif len(line) > 1:
+                arrow_vectors = np.gradient(line, axis=0)[::sample_step]
+            else:
+                continue
+            magnitudes = np.linalg.norm(arrow_vectors, axis=1)
+            nonzero_mask = magnitudes > 1e-12
+            arrow_starts = arrow_starts[nonzero_mask]
+            arrow_vectors = arrow_vectors[nonzero_mask]
+            magnitudes = magnitudes[nonzero_mask]
+            if len(arrow_starts) == 0:
+                continue
+            arrow_vectors = arrow_vectors / magnitudes[:, None] * arrow_length
+            arrow_colors = cmap(normalizer(magnitudes))
+            for start_point, direction, arrow_color in zip(arrow_starts, arrow_vectors, arrow_colors):
+                axes.quiver(
+                    start_point[0],
+                    start_point[1],
+                    start_point[2],
+                    direction[0],
+                    direction[1],
+                    direction[2],
+                    color=arrow_color,
+                    linewidth=0.9,
+                    arrow_length_ratio=0.42,
+                    normalize=False,
+                )
+            axes.scatter(arrow_starts[:, 0], arrow_starts[:, 1], arrow_starts[:, 2], s=5, c=arrow_colors, alpha=0.72)
             line_count += 1
             total_line_points += len(line)
 
@@ -1545,13 +1578,14 @@ class NativeVtkViewerDialog(QDialog):
 class MainWindow(QMainWindow):
     TAB_PROJECT_HOME = 0
     TAB_DRAW_GEOMETRY = 1
-    TAB_SOLVER_PREPARE = 2
-    TAB_SOLVER_SELECT = 3
-    TAB_PARAMETERS = 4
-    TAB_SOLVER_RUN = 5
-    TAB_ENVIRONMENT = 6
-    TAB_SETTINGS = 7
-    TAB_RESULTS = 8
+    TAB_MESH_GENERATION = 2
+    TAB_SOLVER_PREPARE = 3
+    TAB_SOLVER_SELECT = 4
+    TAB_PARAMETERS = 5
+    TAB_SOLVER_RUN = 6
+    TAB_ENVIRONMENT = 7
+    TAB_SETTINGS = 8
+    TAB_RESULTS = 9
     RESULT_FIELDS = [
         "U",
         "mag(U)",
@@ -1607,7 +1641,6 @@ class MainWindow(QMainWindow):
         self._vtk_viewer: VtkViewerDialog | None = None
         self._native_vtk_viewer: NativeVtkViewerDialog | None = None
         self.setWindowTitle("FoamDesk")
-        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.resize(1400, 900)
         self._build_ui()
         self._apply_settings_theme()
@@ -1633,7 +1666,6 @@ class MainWindow(QMainWindow):
         shell_layout = QVBoxLayout(shell)
         shell_layout.setContentsMargins(0, 0, 0, 0)
         shell_layout.setSpacing(0)
-        shell_layout.addWidget(WindowTitleBar(self))
         shell_layout.addWidget(self._build_menu_bar())
         shell_layout.addWidget(workbench, 1)
         self.setCentralWidget(shell)
@@ -1664,6 +1696,9 @@ class MainWindow(QMainWindow):
         case_menu.addAction("打开当前 Case 目录", self._show_current_case_path)
 
         geometry_menu = menu_bar.addMenu("几何/CAD")
+        geometry_menu.addAction("导入 STL", self._import_stl_geometry)
+        geometry_menu.addAction("打开网格生成", self._open_mesh_generation_tab)
+        geometry_menu.addSeparator()
         geometry_menu.addAction("生成 snappyHexMeshDict", self._generate_snappy_hex_mesh_dict)
         geometry_menu.addAction("运行 snappyHexMesh", self._run_snappy_hex_mesh)
         geometry_menu.addAction("运行 checkMesh", self._run_check_mesh)
@@ -1776,6 +1811,7 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.setTabsClosable(False)
         self._workspace_tabs.addTab(self._build_project_home_tab(), "项目主页")
         self._workspace_tabs.addTab(self._build_draw_geometry_tab(), "绘制几何")
+        self._workspace_tabs.addTab(self._build_mesh_generation_tab(), "网格生成")
         self._workspace_tabs.addTab(self._build_physics_prepare_tab(), "求解器准备")
         self._workspace_tabs.addTab(self._build_solver_select_tab(), "求解器选择")
         self._workspace_tabs.addTab(self._build_parameter_tab(), "仿真参数")
@@ -1828,23 +1864,135 @@ class MainWindow(QMainWindow):
 
         title = QLabel("项目主页")
         title.setStyleSheet("font-size: 22px; font-weight: 600;")
-        summary = QTextEdit()
-        summary.setReadOnly(True)
-        summary.setPlainText(
-            "当前阶段：设置页 + 环境检查页 + 项目管理入口占位\n\n"
-            "已具备：\n"
-            "- VS Code 风格工作台\n"
-            "- 基础主题切换\n"
-            "- OpenFOAM 环境探测骨架\n"
-            "- Case 树和结果/日志面板占位\n\n"
-            "下一步将接入：\n"
-            "- 项目新建流程\n"
-            "- blockMesh + icoFoam 最小仿真\n"
-            "- 实时日志和任务状态"
-        )
+        self._project_home_summary = QTextEdit()
+        self._project_home_summary.setReadOnly(True)
+        self._project_home_summary.setPlainText("请先选择或创建项目。")
         layout.addWidget(title)
-        layout.addWidget(summary)
+        layout.addWidget(self._project_home_summary)
         return wrapper
+
+    def _build_mesh_generation_tab(self) -> QWidget:
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        title = QLabel("可视化网格生成")
+        title.setStyleSheet("font-size: 22px; font-weight: 600;")
+        description = QLabel(
+            "本页把 OpenFOAM 网格流程集中起来：先检查 blockMesh 背景网格和 STL，"
+            "再生成 snappyHexMeshDict，最后执行 blockMesh、snappyHexMesh 和 checkMesh。"
+        )
+        description.setWordWrap(True)
+
+        flow = QLabel("流程：绘制几何/导入 STL -> 生成 snappyHexMeshDict -> blockMesh -> snappyHexMesh -overwrite -> checkMesh")
+        flow.setWordWrap(True)
+
+        button_row = QHBoxLayout()
+        actions = [
+            ("刷新网格状态", self._refresh_mesh_generation_panel),
+            ("打开绘制几何", self._open_draw_geometry_tab),
+            ("导入 STL", self._import_stl_geometry),
+            ("预览计算域/STL", self._open_domain_preview_dialog),
+            ("生成 snappyHexMeshDict", self._generate_snappy_hex_mesh_dict),
+            ("运行 snappyHexMesh", self._run_snappy_hex_mesh),
+            ("运行 checkMesh", self._run_check_mesh),
+            ("一键生成网格", self._run_preprocess_pipeline),
+        ]
+        for text, handler in actions:
+            button = QPushButton(text)
+            button.clicked.connect(lambda _checked=False, callback=handler: callback())
+            button_row.addWidget(button)
+        button_row.addStretch(1)
+
+        self._mesh_generation_status = QLabel("网格状态：未刷新")
+        self._mesh_generation_text = QTextEdit()
+        self._mesh_generation_text.setReadOnly(True)
+        self._mesh_generation_text.setMinimumHeight(360)
+        self._mesh_generation_text.setPlainText("请选择项目和 Case 后点击“刷新网格状态”。")
+
+        layout.addWidget(title)
+        layout.addWidget(description)
+        layout.addWidget(flow)
+        layout.addLayout(button_row)
+        layout.addWidget(self._mesh_generation_status)
+        layout.addWidget(self._mesh_generation_text, 1)
+        return wrapper
+
+    def _refresh_mesh_generation_panel(self) -> None:
+        if not hasattr(self, "_mesh_generation_text"):
+            return
+        if self._current_project is None:
+            self._mesh_generation_status.setText("网格状态：未选择 Case")
+            self._mesh_generation_text.setPlainText("请先新建或打开项目，并选择一个 Case。")
+            return
+
+        project = self._current_project
+        case_dir = project.case_dir
+        system_dir = case_dir / "system"
+        mesh_dir = case_dir / "constant" / "polyMesh"
+        tri_surface_dir = case_dir / "constant" / "triSurface"
+        required_files = [
+            system_dir / "blockMeshDict",
+            system_dir / "snappyHexMeshDict",
+        ]
+        lines = [
+            "网格生成状态",
+            "",
+            f"- 项目：{project.name}",
+            f"- Case：{project.case_name}",
+            f"- Case 路径：{case_dir}",
+            "",
+            "1. 输入物检查：",
+        ]
+        for path in required_files:
+            lines.append(f"- {'OK' if path.exists() else '缺失'}：{path.relative_to(case_dir)}")
+
+        try:
+            assets = self._context.geometry_import_service.list_assets(project)
+        except (OSError, ValueError) as error:
+            assets = []
+            lines.append(f"- STL 清单读取失败：{error}")
+        if assets:
+            lines.append(f"- STL 数量：{len(assets)}")
+            for asset in assets:
+                lines.append(f"  - {asset.name} -> {asset.stored_path.relative_to(case_dir)}")
+        else:
+            stl_files = sorted(tri_surface_dir.glob("*.stl")) if tri_surface_dir.exists() else []
+            lines.append(f"- STL 文件：{', '.join(path.name for path in stl_files) if stl_files else '暂无'}")
+
+        lines.extend(["", "2. 网格输出："])
+        if mesh_dir.exists():
+            mesh_files = ["points", "faces", "owner", "neighbour", "boundary"]
+            for name in mesh_files:
+                path = mesh_dir / name
+                lines.append(f"- {'OK' if path.exists() else '缺失'}：constant/polyMesh/{name}")
+        else:
+            lines.append("- constant/polyMesh：未生成")
+
+        lines.extend(["", "3. 操作建议："])
+        if not (system_dir / "blockMeshDict").exists():
+            lines.append("- 先进入“绘制几何”生成 blockMeshDict + STL。")
+        elif assets and not (system_dir / "snappyHexMeshDict").exists():
+            lines.append("- 点击“生成 snappyHexMeshDict”。")
+        elif not mesh_dir.exists():
+            lines.append("- 点击“一键生成网格”执行 blockMesh -> snappyHexMesh -> checkMesh。")
+        else:
+            lines.append("- 网格目录已存在，建议点击“运行 checkMesh”查看网格质量。")
+            lines.append("- checkMesh 通过后，再进入“求解器准备”配置 U/p/物性。")
+
+        if self._last_diagnostic_summary and self._last_diagnostic_summary != "暂无诊断。":
+            lines.extend(["", "4. 最近网格/任务诊断：", self._last_diagnostic_summary])
+
+        has_mesh = mesh_dir.exists()
+        has_block = (system_dir / "blockMeshDict").exists()
+        has_snappy = (system_dir / "snappyHexMeshDict").exists()
+        self._mesh_generation_status.setText(
+            f"网格状态：blockMeshDict={'OK' if has_block else '缺失'}，"
+            f"snappyHexMeshDict={'OK' if has_snappy else '缺失'}，"
+            f"polyMesh={'已生成' if has_mesh else '未生成'}"
+        )
+        self._mesh_generation_text.setPlainText("\n".join(lines))
 
     def _build_solver_select_tab(self) -> QWidget:
         wrapper = QWidget()
@@ -2121,9 +2269,11 @@ class MainWindow(QMainWindow):
         br2 = QHBoxLayout(); br2.setSpacing(8)
         gb = QPushButton("生成 blockMeshDict + STL")
         gb.clicked.connect(lambda _checked=False: self._apply_draw_geometry())
+        zoom_btn = QPushButton("放大预览")
+        zoom_btn.clicked.connect(lambda _checked=False: self._open_draw_geometry_preview_dialog())
         rb = QPushButton("重置全部")
         rb.clicked.connect(lambda _checked=False: self._reset_draw_geometry())
-        br2.addWidget(gb); br2.addWidget(rb); br2.addStretch(1)
+        br2.addWidget(gb); br2.addWidget(zoom_btn); br2.addWidget(rb); br2.addStretch(1)
         layout.addLayout(br2)
 
         layout.addStretch(1)
@@ -2683,6 +2833,15 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_RUN)
         self._refresh_solver_run_panel()
         self._set_status("已打开求解运行页。")
+
+    def _open_draw_geometry_tab(self) -> None:
+        self._workspace_tabs.setCurrentIndex(self.TAB_DRAW_GEOMETRY)
+        self._set_status("已打开绘制几何页。")
+
+    def _open_mesh_generation_tab(self) -> None:
+        self._workspace_tabs.setCurrentIndex(self.TAB_MESH_GENERATION)
+        self._refresh_mesh_generation_panel()
+        self._set_status("已打开网格生成页。")
 
     def _open_simulation_prepare_tab(self) -> None:
         self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_PREPARE)
@@ -3798,7 +3957,8 @@ class MainWindow(QMainWindow):
             f"addLayers={self._snappy_add_layers_checkbox.isChecked()}"
         )
         self._refresh_geometry_panel()
-        self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_PREPARE)
+        self._refresh_mesh_generation_panel()
+        self._workspace_tabs.setCurrentIndex(self.TAB_MESH_GENERATION)
         self._set_status("snappyHexMeshDict 生成完成。")
 
     def _select_stl_asset_for_snappy(self) -> str | None:
@@ -4656,44 +4816,43 @@ class MainWindow(QMainWindow):
             if storage != "point":
                 self._show_error(f"{display_name} 当前是单元字段，Surface v1 先支持点字段。后续会增加单元字段转点字段。")
                 return
-            self._ensure_native_vtk_viewer()
-            self._native_vtk_viewer.plot_surface(output, field_array, color_range, display_name)
+            self._ensure_vtk_viewer()
+            face_count = self._vtk_viewer.plot_field_surface(output, field_array, color_range, display_name)
             self._finish_result_visualization(
-                f"Surface 表面云图已加载到原生 VTK 窗口：field={display_name}, time={selected_time}, range={color_range}"
+                f"Surface 表面云图已加载到 3D 窗口：field={display_name}, time={selected_time}, faces={face_count}, range={color_range}"
             )
             return
         if mode.startswith("Contour"):
-            if storage != "point":
-                self._show_error(f"{display_name} 当前是单元字段，Contour v1 先支持点字段。")
+            self._ensure_vtk_viewer()
+            vector_array = output.GetPointData().GetArray("U")
+            if vector_array is None:
+                self._show_error("Contour 等值线当前先支持速度 U 的 |U| 等值线。请先确认当前 Case 输出了 U。")
                 return
             axis = self._result_slice_axis_combo.currentText().strip()
             position = self._result_slice_position_input.value()
-            self._ensure_native_vtk_viewer()
-            resolved_axis, center = self._native_vtk_viewer.plot_contour(
+            point_count, resolved_axis, center, speed_range = self._vtk_viewer.plot_velocity_contour_lines(
                 output,
-                field_array,
-                color_range,
-                display_name,
+                vector_array,
                 None if axis == "自动" else axis,
                 position,
             )
             self._finish_result_visualization(
-                f"Contour 等值线已加载到原生 VTK 窗口：field={display_name}, time={selected_time}, axis={resolved_axis}, center={center:.6g}, range={color_range}"
+                f"Contour 等值线已加载到 3D 窗口：time={selected_time}, axis={resolved_axis}, center={center:.6g}, points={point_count}, speedRange={speed_range}"
             )
             return
         if mode.startswith("Iso-surface"):
             if storage != "point":
                 self._show_error(f"{display_name} 当前是单元字段，Iso-surface v1 先支持点字段。")
                 return
-            self._ensure_native_vtk_viewer()
-            self._native_vtk_viewer.plot_iso_surface(
+            self._ensure_vtk_viewer()
+            face_count, resolved_range = self._vtk_viewer.plot_field_iso_surface(
                 output,
                 field_array,
                 color_range,
                 display_name,
             )
             self._finish_result_visualization(
-                f"Iso-surface 等值面已加载到原生 VTK 窗口：field={display_name}, time={selected_time}, range={color_range}"
+                f"Iso-surface 等值面已加载到 3D 窗口：field={display_name}, time={selected_time}, faces={face_count}, range={resolved_range}"
             )
             return
         if mode.startswith("Vector") or mode.startswith("Glyph"):
@@ -4701,29 +4860,28 @@ class MainWindow(QMainWindow):
             if vector_array is None:
                 self._show_error("矢量箭头/Glyph 当前需要点字段 U。请先确认当前 Case 输出了 U。")
                 return
-            self._ensure_native_vtk_viewer()
-            self._native_vtk_viewer.plot_vectors(output, vector_array)
+            self._ensure_vtk_viewer()
+            point_count, speed_range = self._vtk_viewer.plot_velocity_vectors(output, vector_array)
             self._finish_result_visualization(
-                f"{mode} 已加载到原生 VTK 窗口：time={selected_time}"
+                f"{mode} 已加载到 3D 窗口：time={selected_time}, arrows={point_count}, speedRange={speed_range}"
             )
             return
         if mode.startswith("Slice"):
-            if storage != "point":
-                self._show_error(f"{display_name} 当前是单元字段，Slice v1 先支持点字段。")
+            self._ensure_vtk_viewer()
+            vector_array = output.GetPointData().GetArray("U")
+            if vector_array is None:
+                self._show_error("切片当前先支持速度 U 的 |U| 切片。请先确认当前 Case 输出了 U。")
                 return
             axis = self._result_slice_axis_combo.currentText().strip()
             position = self._result_slice_position_input.value()
-            self._ensure_native_vtk_viewer()
-            resolved_axis, center = self._native_vtk_viewer.plot_slice(
+            point_count, resolved_axis, center, speed_range = self._vtk_viewer.plot_velocity_slice_contour(
                 output,
-                field_array,
-                color_range,
-                display_name,
+                vector_array,
                 None if axis == "自动" else axis,
                 position,
             )
             self._finish_result_visualization(
-                f"Slice 切片已加载到原生 VTK 窗口：field={display_name}, time={selected_time}, axis={resolved_axis}, center={center:.6g}, range={color_range}"
+                f"Slice 切片已加载到 3D 窗口：time={selected_time}, axis={resolved_axis}, center={center:.6g}, points={point_count}, speedRange={speed_range}"
             )
             return
         if mode.startswith("Streamline"):
@@ -4736,14 +4894,15 @@ class MainWindow(QMainWindow):
             except RuntimeError as error:
                 self._show_error(f"生成流线失败：{error}")
                 return
-            self._ensure_native_vtk_viewer()
-            self._native_vtk_viewer.plot_streamlines(
+            self._ensure_vtk_viewer()
+            line_count, point_count, _axis, resolved_range = self._vtk_viewer.plot_velocity_streamlines(
                 output,
                 streamline_output,
+                main_axis,
                 speed_range,
             )
             self._finish_result_visualization(
-                f"Streamline 流线已加载到原生 VTK 窗口：time={selected_time}, mainAxis={main_axis}, seeds={seed_count}, speedRange={speed_range}"
+                f"Streamline 流线已加载到 3D 窗口：time={selected_time}, mainAxis={main_axis}, seeds={seed_count}, lines={line_count}, points={point_count}, speedRange={resolved_range}"
             )
             return
 
@@ -4752,10 +4911,10 @@ class MainWindow(QMainWindow):
     def _configure_result_animation_source(self) -> None:
         if not hasattr(self, "_result_time_combo"):
             return
-        self._ensure_native_vtk_viewer()
+        self._ensure_vtk_viewer()
         frame_count = self._result_time_combo.count()
         if frame_count <= 1:
-            self._native_vtk_viewer.set_animation_source(0, None)
+            self._vtk_viewer.set_animation_source(0, None)
             return
 
         def render_frame(frame_index: int) -> None:
@@ -4767,13 +4926,13 @@ class MainWindow(QMainWindow):
                 output, field_array, display_name, selected_time, storage = self._load_result_field_data()
             except (OSError, RuntimeError, ValueError) as error:
                 self._show_error(f"播放动画失败：{error}")
-                if self._native_vtk_viewer is not None:
-                    self._native_vtk_viewer.pause_animation()
+                if self._vtk_viewer is not None:
+                    self._vtk_viewer.pause_animation()
                 return
             color_range = self._selected_result_color_range(field_array)
             self._render_result_display(output, field_array, display_name, selected_time, storage, mode, color_range)
 
-        self._native_vtk_viewer.set_animation_source(frame_count, render_frame)
+        self._vtk_viewer.set_animation_source(frame_count, render_frame)
 
     def _load_result_field_data(self):
         if self._current_project is None:
@@ -5362,10 +5521,117 @@ boundaryField
         self._refresh_results_panel()
         self._refresh_geometry_panel()
         self._load_draw_geometry_state()
+        self._refresh_mesh_generation_panel()
         self._refresh_physics_prepare_panel()
+        self._refresh_project_home_summary()
         self._restore_project_result_state()
         self._append_log(f"当前项目：{project.path}")
         self._set_status(status_text)
+
+    def _refresh_project_home_summary(self) -> None:
+        if not hasattr(self, "_project_home_summary"):
+            return
+        if self._current_project is None:
+            self._project_home_summary.setPlainText("请先选择或创建项目。")
+            return
+
+        project = self._current_project
+        case_dir = project.case_dir
+        lines = [
+            "当前 Case 概览",
+            "",
+            f"- 项目名称：{project.name}",
+            f"- Case 名称：{project.case_name}",
+            f"- 项目路径：{project.path}",
+            f"- Case 路径：{case_dir}",
+            "",
+            "OpenFOAM 关键文件：",
+        ]
+
+        required_files = [
+            case_dir / "system" / "blockMeshDict",
+            case_dir / "system" / "snappyHexMeshDict",
+            case_dir / "system" / "controlDict",
+            case_dir / "system" / "fvSchemes",
+            case_dir / "system" / "fvSolution",
+            case_dir / "0" / "U",
+            case_dir / "0" / "p",
+            case_dir / "constant" / "physicalProperties",
+        ]
+        for path in required_files:
+            status = "OK" if path.exists() else "缺失"
+            lines.append(f"- {status}：{path.relative_to(case_dir)}")
+
+        lines.extend(["", "几何/STL："])
+        try:
+            assets = self._context.geometry_import_service.list_assets(project)
+        except (OSError, ValueError) as error:
+            assets = []
+            lines.append(f"- 读取 STL 清单失败：{error}")
+        if assets:
+            for asset in assets:
+                transform = asset.transform
+                transform_text = ""
+                if transform is not None:
+                    transform_text = (
+                        f"，scale={transform.scale:g}，"
+                        f"translate=({transform.translate[0]:g}, {transform.translate[1]:g}, {transform.translate[2]:g})，"
+                        f"rotate=({transform.rotate_degrees[0]:g}, {transform.rotate_degrees[1]:g}, {transform.rotate_degrees[2]:g})"
+                    )
+                lines.append(f"- {asset.name}：{asset.stored_path.name}{transform_text}")
+        else:
+            lines.append("- 当前 Case 暂无导入 STL。")
+
+        mesh_dir = case_dir / "constant" / "polyMesh"
+        result_times = [
+            path.name
+            for path in case_dir.iterdir()
+            if path.is_dir() and self._is_openfoam_time_dir(path.name)
+        ] if case_dir.exists() else []
+        result_times = sorted(result_times, key=self._openfoam_time_sort_key)
+        lines.extend(
+            [
+                "",
+                "网格与结果：",
+                f"- 网格目录：{'已生成' if mesh_dir.exists() else '未生成'}（constant/polyMesh）",
+                f"- 时间步目录：{', '.join(result_times) if result_times else '暂无'}",
+            ]
+        )
+
+        try:
+            case_info = self._context.openfoam_vtk_service.inspect(project)
+        except (OSError, RuntimeError, ValueError) as error:
+            lines.append(f"- 结果字段：暂不可读（{error}）")
+        else:
+            fields = sorted(set(case_info.point_arrays) | set(case_info.cell_arrays))
+            times = [f"{time:g}" for time in case_info.time_values]
+            lines.append(f"- 可视化字段：{', '.join(fields) if fields else '暂无'}")
+            lines.append(f"- 可视化时间步：{', '.join(times) if times else '暂无'}")
+
+        lines.extend(
+            [
+                "",
+                "建议下一步：",
+                "- 如果缺少 blockMeshDict：进入“绘制几何”生成 blockMeshDict + STL。",
+                "- 如果缺少 U/p/物性：进入“求解器准备”补齐边界和物性。",
+                "- 如果网格未生成：进入“几何/CAD”生成 snappyHexMeshDict 并运行网格流程。",
+                "- 如果已有结果字段：进入“结果”选择字段和显示方式查看 3D 结果。",
+            ]
+        )
+        self._project_home_summary.setPlainText("\n".join(lines))
+
+    def _is_openfoam_time_dir(self, name: str) -> bool:
+        try:
+            float(name)
+        except ValueError:
+            return False
+        return True
+
+    def _openfoam_time_sort_key(self, name: str) -> float:
+        try:
+            return float(name)
+        except ValueError:
+            return -1.0
 
     def _clear_case_runtime_state(self) -> None:
         self._current_process_output = ""
@@ -5609,6 +5875,7 @@ boundaryField
             if self._export_solver_metrics():
                 self._plot_residual_curve()
             self._refresh_geometry_panel()
+            self._refresh_mesh_generation_panel()
             self._refresh_results_panel()
             self._refresh_solver_run_panel("一键仿真流水线完成")
             self._set_status("一键仿真流水线完成。")
@@ -5618,6 +5885,7 @@ boundaryField
             self._last_diagnostic_summary = "一键前处理完成。\n\n" + summary
             self._problem_text.setPlainText(self._last_diagnostic_summary)
             self._refresh_geometry_panel()
+            self._refresh_mesh_generation_panel()
             self._refresh_results_panel()
             self._refresh_solver_run_panel("一键前处理完成")
             self._set_status("一键前处理完成。")
@@ -5626,6 +5894,7 @@ boundaryField
             self._task_text.setPlainText("任务状态：checkMesh 完成")
             self._last_diagnostic_summary = summary
             self._problem_text.setPlainText(summary)
+            self._refresh_mesh_generation_panel()
             self._refresh_results_panel()
             self._refresh_solver_run_panel("checkMesh 完成")
             self._set_status("checkMesh 完成。")
@@ -5633,6 +5902,7 @@ boundaryField
             self._task_text.setPlainText("任务状态：snappyHexMesh 完成")
             self._last_diagnostic_summary = "snappyHexMesh 正常完成，没有失败诊断。"
             self._refresh_geometry_panel()
+            self._refresh_mesh_generation_panel()
             self._refresh_results_panel()
             self._refresh_solver_run_panel("snappyHexMesh 完成")
             self._set_status("snappyHexMesh 完成。")
@@ -5656,6 +5926,7 @@ boundaryField
                 self._problem_text.setPlainText(self._last_diagnostic_summary)
                 self._bottom_tabs.setCurrentIndex(2)
             self._task_text.setPlainText(f"任务状态：{label}失败，退出码 {exit_code}")
+            self._refresh_mesh_generation_panel()
             self._refresh_solver_run_panel(f"{label}失败，退出码 {exit_code}")
             self._set_status(f"{label}失败，退出码 {exit_code}。")
 
@@ -6166,10 +6437,39 @@ boundaryField
         if not hasattr(self,"_geo_preview_fig") or not hasattr(self,"_geo_preview_canvas"): return
         self._geo_preview_fig.clear()
         axes = self._geo_preview_fig.add_subplot(111, projection="3d", facecolor="#1e1e1e")
+        self._render_draw_geometry_preview_axes(axes)
+        self._geo_preview_canvas.draw()
+
+    def _open_draw_geometry_preview_dialog(self) -> None:
+        self._save_current_object()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("绘制几何 - 放大预览")
+        dialog.resize(1100, 820)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(10, 10, 10, 10)
+        hint = QLabel("放大预览只用于查看当前绘制几何，不会修改 blockMeshDict、STL 或仿真参数。")
+        hint.setWordWrap(True)
+        figure = Figure(figsize=(10, 7.2), facecolor="#1e1e1e", tight_layout=True)
+        canvas = FigureCanvas(figure)
+        canvas.setMinimumHeight(680)
+        axes = figure.add_subplot(111, projection="3d", facecolor="#1e1e1e")
+        self._render_draw_geometry_preview_axes(axes)
+        layout.addWidget(hint)
+        layout.addWidget(canvas, 1)
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        close_button = QPushButton("关闭")
+        close_button.clicked.connect(dialog.close)
+        button_row.addWidget(close_button)
+        layout.addLayout(button_row)
+        canvas.draw()
+        dialog.exec()
+
+    def _render_draw_geometry_preview_axes(self, axes) -> None:
         axes.set_title("Geometry Preview", color="#d4d4d4", pad=10)
         axes.set_axis_off()
         if not self._geo_objects:
-            self._geo_preview_canvas.draw(); return
+            return
 
         all_pts = []
         for oi, obj in enumerate(self._geo_objects):
@@ -6220,7 +6520,6 @@ boundaryField
             axes.set_ylim(ct[1]-rad, ct[1]+rad)
             axes.set_zlim(ct[2]-rad, ct[2]+rad)
         axes.view_init(elev=24, azim=-55)
-        self._geo_preview_canvas.draw()
 
     def _apply_draw_geometry(self):
         if self._current_project is None:

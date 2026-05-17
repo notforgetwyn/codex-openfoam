@@ -126,6 +126,11 @@ class StartupWindow(QDialog):
                 settings.font_family,
                 settings.font_size,
             )
+            + """
+            StartupWindow {
+                background-color: #1e1e1e;
+            }
+            """
         )
 
     def _load_projects(self) -> None:
