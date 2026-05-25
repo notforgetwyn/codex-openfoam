@@ -9,11 +9,9 @@ from typing import Callable
 import vtk
 import numpy as np
 from matplotlib import colormaps
-from matplotlib.colors import Normalize
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-from scipy.interpolate import griddata
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtCore import QProcess, QTimer
 from PySide6.QtGui import QFont
@@ -37,8 +35,6 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QApplication,
     QMainWindow,
     QMenu,
@@ -54,7 +50,6 @@ from PySide6.QtWidgets import (
     QStatusBar,
     QTabWidget,
     QTextEdit,
-    QToolBar,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -125,52 +120,18 @@ class VtkViewerDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("FoamDesk 3D 视图")
         self.resize(920, 680)
-        self._active_plot_callback: Callable[[], None] | None = None
-        self._tab_refresh_callbacks: dict[QWidget, Callable[[], None]] = {}
-        self._is_refreshing_tab = False
-        self._animation_render_callback: Callable[[int], None] | None = None
-        self._animation_frame_count = 0
-        self._animation_frame_index = 0
-        self._replace_current_plot = False
-        self._animation_timer = QTimer(self)
-        self._animation_timer.timeout.connect(self._advance_animation_frame)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
         action_row = QHBoxLayout()
-        self._geometry_assets: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-        self._filter_mode_combo = QComboBox()
-        self._filter_mode_combo.addItems(["全部显示", "所有 STL 附近", "单个 STL 附近"])
-        self._filter_asset_combo = QComboBox()
-        self._filter_radius_input = QDoubleSpinBox()
-        self._filter_radius_input.setRange(0.0, 100000.0)
-        self._filter_radius_input.setDecimals(4)
-        self._filter_radius_input.setSingleStep(0.05)
-        self._filter_radius_input.setValue(0.1)
-        self._filter_mode_combo.currentIndexChanged.connect(self._refresh_current_tab)
-        self._filter_asset_combo.currentIndexChanged.connect(self._refresh_current_tab)
-        self._filter_radius_input.valueChanged.connect(self._refresh_current_tab)
-        action_row.addWidget(QLabel("显示范围"))
-        action_row.addWidget(self._filter_mode_combo)
-        action_row.addWidget(QLabel("STL"))
-        action_row.addWidget(self._filter_asset_combo)
-        action_row.addWidget(QLabel("附近半径"))
-        action_row.addWidget(self._filter_radius_input)
+        action_row.addWidget(QLabel("STL 预览窗口"))
         action_row.addStretch(1)
-        self._play_animation_button = QPushButton("播放动画")
-        self._pause_animation_button = QPushButton("暂停动画")
-        self._play_animation_button.clicked.connect(self.play_animation)
-        self._pause_animation_button.clicked.connect(self.pause_animation)
-        self._play_animation_button.setEnabled(False)
-        self._pause_animation_button.setEnabled(False)
         clear_button = QPushButton("清空视图")
         clear_button.clicked.connect(self._clear_tabs)
         export_button = QPushButton("导出 PNG")
         export_button.clicked.connect(self._export_png)
-        action_row.addWidget(self._play_animation_button)
-        action_row.addWidget(self._pause_animation_button)
         action_row.addWidget(clear_button)
         action_row.addWidget(export_button)
         layout.addLayout(action_row)
@@ -184,133 +145,11 @@ class VtkViewerDialog(QDialog):
         self._tabs.tabCloseRequested.connect(self._close_tab)
         layout.addWidget(self._tabs)
 
-    def set_geometry_assets(self, assets: list[GeometryAsset]) -> None:
-        self._geometry_assets = {}
-        current_name = self._filter_asset_combo.currentText()
-        self._filter_asset_combo.blockSignals(True)
-        self._filter_asset_combo.clear()
-        for asset in assets:
-            if asset.format.upper() != "STL" or not asset.stored_path.exists():
-                continue
-            bounds = self._stl_bounds(asset.stored_path)
-            if bounds is None:
-                continue
-            self._geometry_assets[asset.name] = bounds
-            self._filter_asset_combo.addItem(asset.name)
-        if current_name:
-            index = self._filter_asset_combo.findText(current_name)
-            if index >= 0:
-                self._filter_asset_combo.setCurrentIndex(index)
-        self._filter_asset_combo.blockSignals(False)
-
-    def _stl_bounds(self, path: Path) -> tuple[np.ndarray, np.ndarray] | None:
-        reader = vtkSTLReader()
-        reader.SetFileName(str(path))
-        reader.Update()
-        points = self._points(reader.GetOutput())
-        if points.size == 0:
-            return None
-        return points.min(axis=0), points.max(axis=0)
-
     def closeEvent(self, event) -> None:  # noqa: N802
-        self.pause_animation()
         self._clear_tabs()
         super().closeEvent(event)
 
-    def set_animation_source(self, frame_count: int, render_callback: Callable[[int], None] | None) -> None:
-        self.pause_animation()
-        self._animation_frame_count = max(0, int(frame_count))
-        self._animation_frame_index = 0
-        self._animation_render_callback = render_callback if self._animation_frame_count > 1 else None
-        enabled = self._animation_render_callback is not None
-        self._play_animation_button.setEnabled(enabled)
-        self._pause_animation_button.setEnabled(enabled)
-
-    def play_animation(self) -> None:
-        if self._animation_render_callback is None or self._animation_frame_count <= 1:
-            return
-        self._animation_frame_index = 0
-        self.render_animation_frame(self._animation_frame_index)
-        self._animation_frame_index = 1
-        self._animation_timer.start(800)
-
-    def pause_animation(self) -> None:
-        self._animation_timer.stop()
-
-    def _advance_animation_frame(self) -> None:
-        if self._animation_render_callback is None or self._animation_frame_count <= 1:
-            self.pause_animation()
-            return
-        self.render_animation_frame(self._animation_frame_index)
-        self._animation_frame_index = (self._animation_frame_index + 1) % self._animation_frame_count
-
-    def render_animation_frame(self, frame_index: int) -> None:
-        self._replace_current_plot = True
-        try:
-            if self._animation_render_callback is not None:
-                self._animation_render_callback(frame_index)
-        finally:
-            self._replace_current_plot = False
-
-    def plot_cube(self) -> None:
-        self._begin_plot(lambda: self.plot_cube())
-        axes = self._reset_axes("3D Preview")
-        corners = np.array(
-            [
-                [0, 0, 0],
-                [1, 0, 0],
-                [1, 1, 0],
-                [0, 1, 0],
-                [0, 0, 1],
-                [1, 0, 1],
-                [1, 1, 1],
-                [0, 1, 1],
-            ],
-            dtype=float,
-        )
-        edges = [
-            (0, 1),
-            (1, 2),
-            (2, 3),
-            (3, 0),
-            (4, 5),
-            (5, 6),
-            (6, 7),
-            (7, 4),
-            (0, 4),
-            (1, 5),
-            (2, 6),
-            (3, 7),
-        ]
-        for start, end in edges:
-            axes.plot(
-                corners[[start, end], 0],
-                corners[[start, end], 1],
-                corners[[start, end], 2],
-                color="#4fc3ff",
-                linewidth=2.0,
-            )
-        self._finish_axes(axes, corners)
-
-    def plot_polydata_points(self, poly_data, title: str) -> None:
-        self._begin_plot(lambda: self.plot_polydata_points(poly_data, title))
-        points = self._points(poly_data)
-        axes = self._reset_axes(title)
-        if points.size == 0:
-            axes.text2D(0.08, 0.5, "No point data in current case.", color="#d4d4d4")
-            self._show()
-            return
-        points = self._filter_points(points)
-        if points.size == 0:
-            axes.text2D(0.08, 0.5, "No point data in current display range.", color="#d4d4d4")
-            self._show()
-            return
-        points = self._sample_points(points)
-        axes.scatter(points[:, 0], points[:, 1], points[:, 2], s=6, c="#4fc3ff", alpha=0.85)
-        self._finish_axes(axes, points)
-
     def plot_stl_file(self, path: Path) -> tuple[int, int]:
-        self._begin_plot(lambda: self.plot_stl_file(path))
         reader = vtkSTLReader()
         reader.SetFileName(str(path))
         reader.Update()
@@ -334,601 +173,10 @@ class VtkViewerDialog(QDialog):
         self._finish_axes(axes, points)
         return len(points), len(faces)
 
-    def plot_field_surface(
-        self,
-        poly_data,
-        field_array,
-        scalar_range: tuple[float, float],
-        field_name: str,
-    ) -> int:
-        self._begin_plot(lambda: self.plot_field_surface(poly_data, field_array, scalar_range, field_name))
-        points = self._points(poly_data)
-        faces = self._faces(poly_data)
-        values = self._scalar_values(field_array)
-        axes = self._reset_axes(f"{field_name} Surface")
-        if points.size == 0 or faces.size == 0 or values.size == 0:
-            axes.text2D(0.08, 0.5, "No surface data to display.", color="#d4d4d4")
-            self._show()
-            return 0
-
-        faces = self._sample_faces(faces)
-        faces = self._filter_faces_by_center(points, faces)
-        if faces.size == 0:
-            axes.text2D(0.08, 0.5, "No surface faces in current display range.", color="#d4d4d4")
-            self._show()
-            return 0
-        face_values = np.array(
-            [values[np.asarray(face, dtype=int)].mean() for face in faces],
-            dtype=float,
-        )
-        polygons = [points[np.asarray(face, dtype=int)] for face in faces]
-        normalizer = Normalize(vmin=scalar_range[0], vmax=scalar_range[1])
-        cmap = colormaps["turbo"]
-        collection = Poly3DCollection(
-            polygons,
-            facecolors=cmap(normalizer(face_values)),
-            edgecolors=(0.18, 0.18, 0.18, 0.35),
-            linewidths=0.35,
-            alpha=0.36,
-        )
-        axes.add_collection3d(collection)
-        scalar_mappable = colormaps["turbo"]
-        self._add_horizontal_colorbar(
-            self._scalar_mappable(scalar_range, scalar_mappable),
-            axes,
-            field_name,
-        )
-        self._finish_axes(axes, points)
-        return len(faces)
-
-    def plot_pressure_surface(self, poly_data, pressure_array, scalar_range: tuple[float, float]) -> int:
-        return self.plot_field_surface(poly_data, pressure_array, scalar_range, "p")
-
-    def plot_velocity_vectors(self, poly_data, vector_array, limit: int = 700) -> tuple[int, tuple[float, float]]:
-        self._begin_plot(lambda: self.plot_velocity_vectors(poly_data, vector_array, limit))
-        points = self._points(poly_data)
-        vectors = vtk_to_numpy(vector_array)
-        axes = self._reset_axes("Velocity Vectors |U|")
-        if points.size == 0 or vectors.size == 0 or vectors.ndim != 2 or vectors.shape[1] < 3:
-            axes.text2D(0.08, 0.5, "No velocity vector data to display.", color="#d4d4d4")
-            self._show()
-            return 0, (0.0, 0.0)
-
-        count = min(len(points), len(vectors))
-        points = points[:count]
-        vectors = vectors[:count, :3]
-        mask = self._filter_mask(points)
-        points = points[mask]
-        vectors = vectors[mask]
-        speeds = np.linalg.norm(vectors, axis=1)
-        non_zero = speeds > 1e-12
-        if np.any(non_zero):
-            points = points[non_zero]
-            vectors = vectors[non_zero]
-            speeds = speeds[non_zero]
-        if len(points) == 0:
-            axes.text2D(0.08, 0.5, "Velocity field is zero everywhere.", color="#d4d4d4")
-            self._show()
-            return 0, (0.0, 0.0)
-
-        if len(points) > limit:
-            indices = np.linspace(0, len(points) - 1, limit, dtype=int)
-            points = points[indices]
-            vectors = vectors[indices]
-            speeds = speeds[indices]
-
-        max_speed = float(speeds.max()) if speeds.size else 1.0
-        domain_size = float(np.ptp(points, axis=0).max()) if len(points) else 1.0
-        arrow_length = max(domain_size * 0.075 / max(max_speed, 1e-12), 1e-6)
-        normalizer = Normalize(vmin=float(speeds.min()), vmax=max_speed)
-        cmap = colormaps["turbo"]
-        axes.quiver(
-            points[:, 0],
-            points[:, 1],
-            points[:, 2],
-            vectors[:, 0],
-            vectors[:, 1],
-            vectors[:, 2],
-            length=arrow_length,
-            normalize=False,
-            colors=cmap(normalizer(speeds)),
-            linewidths=0.8,
-            arrow_length_ratio=0.35,
-        )
-        self._add_horizontal_colorbar(
-            self._scalar_mappable((float(speeds.min()), max_speed), cmap),
-            axes,
-            "|U| (m/s)",
-        )
-        self._finish_axes(axes, points)
-        return len(points), (float(speeds.min()), max_speed)
-
-    def plot_velocity_slice(
-        self,
-        poly_data,
-        vector_array,
-        axis_name: str | None = None,
-        normalized_position: float = 0.5,
-    ) -> tuple[int, str, float, tuple[float, float]]:
-        self._begin_plot(lambda: self.plot_velocity_slice(poly_data, vector_array, axis_name, normalized_position))
-        points = self._points(poly_data)
-        vectors = vtk_to_numpy(vector_array)
-        axes = self._reset_axes("Velocity Slice |U|")
-        if points.size == 0 or vectors.size == 0 or vectors.ndim != 2 or vectors.shape[1] < 3:
-            axes.text2D(0.08, 0.5, "No velocity slice data to display.", color="#d4d4d4")
-            self._show()
-            return 0, "X", 0.0, (0.0, 0.0)
-
-        count = min(len(points), len(vectors))
-        points = points[:count]
-        vectors = vectors[:count, :3]
-        mask = self._filter_mask(points)
-        points = points[mask]
-        vectors = vectors[mask]
-        if len(points) == 0:
-            axes.text2D(0.08, 0.5, "No velocity slice points in current display range.", color="#d4d4d4")
-            self._show()
-            return 0, "X", 0.0, (0.0, 0.0)
-        speeds = np.linalg.norm(vectors, axis=1)
-        normalized_position = min(max(float(normalized_position), 0.0), 1.0)
-
-        def build_mask(axis: int) -> tuple[float, np.ndarray]:
-            axis_min = float(points[:, axis].min())
-            axis_max = float(points[:, axis].max())
-            center = axis_min + (axis_max - axis_min) * normalized_position
-            span = float(axis_max - axis_min)
-            tolerance = max(span * 0.055, 1e-9)
-            mask = np.abs(points[:, axis] - center) <= tolerance
-            if mask.sum() < 8:
-                nearest = np.argsort(np.abs(points[:, axis] - center))[: min(200, len(points))]
-                mask = np.zeros(len(points), dtype=bool)
-                mask[nearest] = True
-            return center, mask
-
-        requested_axis = None if not axis_name or axis_name == "自动" else "XYZ".find(axis_name)
-        if requested_axis is not None and requested_axis >= 0:
-            axis = requested_axis
-            center, mask = build_mask(axis)
-        else:
-            candidates: list[tuple[float, int, float, np.ndarray]] = []
-            for candidate_axis in range(3):
-                center, mask = build_mask(candidate_axis)
-                slice_speeds = speeds[mask]
-                score = float(slice_speeds.max() - slice_speeds.min()) if slice_speeds.size else -1.0
-                candidates.append((score, candidate_axis, center, mask))
-            _, axis, center, mask = max(candidates, key=lambda item: item[0])
-
-        resolved_axis_name = "XYZ"[axis]
-        slice_points = points[mask]
-        slice_speeds = speeds[mask]
-        if len(slice_points) == 0:
-            axes.text2D(0.08, 0.5, "No points near the selected slice.", color="#d4d4d4")
-            self._show()
-            return 0, resolved_axis_name, center, (0.0, 0.0)
-
-        speed_range = (float(slice_speeds.min()), float(slice_speeds.max()))
-        if speed_range[0] == speed_range[1]:
-            speed_range = (speed_range[0] - 1.0, speed_range[1] + 1.0)
-        scatter = axes.scatter(
-            slice_points[:, 0],
-            slice_points[:, 1],
-            slice_points[:, 2],
-            c=slice_speeds,
-            cmap="turbo",
-            s=28,
-            alpha=0.96,
-            vmin=speed_range[0],
-            vmax=speed_range[1],
-        )
-        self._add_horizontal_colorbar(scatter, axes, "|U| (m/s)")
-        self._finish_axes(axes, points)
-        return len(slice_points), resolved_axis_name, center, speed_range
-
-    def plot_velocity_slice_contour(
-        self,
-        poly_data,
-        vector_array,
-        axis_name: str | None = None,
-        normalized_position: float = 0.5,
-        resolution: int = 80,
-    ) -> tuple[int, str, float, tuple[float, float]]:
-        self._begin_plot(
-            lambda: self.plot_velocity_slice_contour(poly_data, vector_array, axis_name, normalized_position, resolution)
-        )
-        points = self._points(poly_data)
-        vectors = vtk_to_numpy(vector_array)
-        axes = self._reset_axes("Velocity Slice Contour |U|")
-        if points.size == 0 or vectors.size == 0 or vectors.ndim != 2 or vectors.shape[1] < 3:
-            axes.text2D(0.08, 0.5, "No velocity slice data to display.", color="#d4d4d4")
-            self._show()
-            return 0, "X", 0.0, (0.0, 0.0)
-
-        count = min(len(points), len(vectors))
-        points = points[:count]
-        vectors = vectors[:count, :3]
-        mask = self._filter_mask(points)
-        points = points[mask]
-        vectors = vectors[mask]
-        if len(points) == 0:
-            axes.text2D(0.08, 0.5, "No contour slice points in current display range.", color="#d4d4d4")
-            self._show()
-            return 0, "X", 0.0, (0.0, 0.0)
-        speeds = np.linalg.norm(vectors, axis=1)
-        normalized_position = min(max(float(normalized_position), 0.0), 1.0)
-
-        def build_mask(axis: int) -> tuple[float, np.ndarray]:
-            axis_min = float(points[:, axis].min())
-            axis_max = float(points[:, axis].max())
-            center = axis_min + (axis_max - axis_min) * normalized_position
-            span = float(axis_max - axis_min)
-            tolerance = max(span * 0.055, 1e-9)
-            mask = np.abs(points[:, axis] - center) <= tolerance
-            if mask.sum() < 8:
-                nearest = np.argsort(np.abs(points[:, axis] - center))[: min(240, len(points))]
-                mask = np.zeros(len(points), dtype=bool)
-                mask[nearest] = True
-            return center, mask
-
-        requested_axis = None if not axis_name or axis_name == "自动" else "XYZ".find(axis_name)
-        if requested_axis is not None and requested_axis >= 0:
-            axis = requested_axis
-            center, mask = build_mask(axis)
-        else:
-            candidates: list[tuple[float, int, float, np.ndarray]] = []
-            for candidate_axis in range(3):
-                center, mask = build_mask(candidate_axis)
-                slice_speeds = speeds[mask]
-                score = float(slice_speeds.max() - slice_speeds.min()) if slice_speeds.size else -1.0
-                candidates.append((score, candidate_axis, center, mask))
-            _, axis, center, mask = max(candidates, key=lambda item: item[0])
-
-        resolved_axis_name = "XYZ"[axis]
-        slice_points = points[mask]
-        slice_speeds = speeds[mask]
-        if len(slice_points) < 4:
-            axes.text2D(0.08, 0.5, "Not enough points for contour interpolation.", color="#d4d4d4")
-            self._show()
-            return len(slice_points), resolved_axis_name, center, (0.0, 0.0)
-
-        plane_axes = [index for index in range(3) if index != axis]
-        plane_points = slice_points[:, plane_axes]
-        x_values = np.linspace(float(plane_points[:, 0].min()), float(plane_points[:, 0].max()), resolution)
-        y_values = np.linspace(float(plane_points[:, 1].min()), float(plane_points[:, 1].max()), resolution)
-        grid_x, grid_y = np.meshgrid(x_values, y_values)
-        grid_speed = griddata(plane_points, slice_speeds, (grid_x, grid_y), method="linear")
-        if np.isnan(grid_speed).all():
-            grid_speed = griddata(plane_points, slice_speeds, (grid_x, grid_y), method="nearest")
-        else:
-            nearest_speed = griddata(plane_points, slice_speeds, (grid_x, grid_y), method="nearest")
-            grid_speed = np.where(np.isnan(grid_speed), nearest_speed, grid_speed)
-
-        speed_range = (float(np.nanmin(grid_speed)), float(np.nanmax(grid_speed)))
-        if speed_range[0] == speed_range[1]:
-            speed_range = (speed_range[0] - 1.0, speed_range[1] + 1.0)
-        grid_points = np.zeros((resolution, resolution, 3), dtype=float)
-        grid_points[:, :, axis] = center
-        grid_points[:, :, plane_axes[0]] = grid_x
-        grid_points[:, :, plane_axes[1]] = grid_y
-        surface = axes.plot_surface(
-            grid_points[:, :, 0],
-            grid_points[:, :, 1],
-            grid_points[:, :, 2],
-            facecolors=colormaps["turbo"](Normalize(vmin=speed_range[0], vmax=speed_range[1])(grid_speed)),
-            rstride=1,
-            cstride=1,
-            linewidth=0,
-            antialiased=False,
-            shade=False,
-            alpha=0.96,
-        )
-        surface.set_edgecolor("none")
-        self._add_horizontal_colorbar(
-            self._scalar_mappable(speed_range, colormaps["turbo"]),
-            axes,
-            "|U| (m/s)",
-        )
-        self._finish_axes(axes, points)
-        return len(slice_points), resolved_axis_name, center, speed_range
-
-    def plot_velocity_contour_lines(
-        self,
-        poly_data,
-        vector_array,
-        axis_name: str | None = None,
-        normalized_position: float = 0.5,
-        resolution: int = 90,
-    ) -> tuple[int, str, float, tuple[float, float]]:
-        self._begin_plot(
-            lambda: self.plot_velocity_contour_lines(poly_data, vector_array, axis_name, normalized_position, resolution)
-        )
-        points = self._points(poly_data)
-        vectors = vtk_to_numpy(vector_array)
-        axes = self._reset_axes("Velocity U Contour |U|")
-        if points.size == 0 or vectors.size == 0 or vectors.ndim != 2 or vectors.shape[1] < 3:
-            axes.text2D(0.08, 0.5, "No velocity contour data to display.", color="#111111")
-            self._show()
-            return 0, "X", 0.0, (0.0, 0.0)
-
-        count = min(len(points), len(vectors))
-        points = points[:count]
-        vectors = vectors[:count, :3]
-        mask = self._filter_mask(points)
-        points = points[mask]
-        vectors = vectors[mask]
-        if len(points) == 0:
-            axes.text2D(0.08, 0.5, "No contour points in current display range.", color="#111111")
-            self._show()
-            return 0, "X", 0.0, (0.0, 0.0)
-        speeds = np.linalg.norm(vectors, axis=1)
-        normalized_position = min(max(float(normalized_position), 0.0), 1.0)
-
-        def build_mask(axis: int) -> tuple[float, np.ndarray]:
-            axis_min = float(points[:, axis].min())
-            axis_max = float(points[:, axis].max())
-            center = axis_min + (axis_max - axis_min) * normalized_position
-            span = float(axis_max - axis_min)
-            tolerance = max(span * 0.06, 1e-9)
-            mask = np.abs(points[:, axis] - center) <= tolerance
-            if mask.sum() < 12:
-                nearest = np.argsort(np.abs(points[:, axis] - center))[: min(360, len(points))]
-                mask = np.zeros(len(points), dtype=bool)
-                mask[nearest] = True
-            return center, mask
-
-        requested_axis = None if not axis_name or axis_name == "自动" else "XYZ".find(axis_name)
-        if requested_axis is not None and requested_axis >= 0:
-            axis = requested_axis
-            center, mask = build_mask(axis)
-        else:
-            candidates: list[tuple[float, int, float, np.ndarray]] = []
-            for candidate_axis in range(3):
-                center, mask = build_mask(candidate_axis)
-                slice_speeds = speeds[mask]
-                score = float(slice_speeds.max() - slice_speeds.min()) if slice_speeds.size else -1.0
-                candidates.append((score, candidate_axis, center, mask))
-            _, axis, center, mask = max(candidates, key=lambda item: item[0])
-
-        resolved_axis_name = "XYZ"[axis]
-        slice_points = points[mask]
-        slice_speeds = speeds[mask]
-        if len(slice_points) < 4:
-            axes.text2D(0.08, 0.5, "Not enough points for contour lines.", color="#111111")
-            self._show()
-            return len(slice_points), resolved_axis_name, center, (0.0, 0.0)
-
-        plane_axes = [index for index in range(3) if index != axis]
-        plane_points = slice_points[:, plane_axes]
-        x_values = np.linspace(float(plane_points[:, 0].min()), float(plane_points[:, 0].max()), resolution)
-        y_values = np.linspace(float(plane_points[:, 1].min()), float(plane_points[:, 1].max()), resolution)
-        grid_x, grid_y = np.meshgrid(x_values, y_values)
-        grid_speed = griddata(plane_points, slice_speeds, (grid_x, grid_y), method="linear")
-        nearest_speed = griddata(plane_points, slice_speeds, (grid_x, grid_y), method="nearest")
-        grid_speed = np.where(np.isnan(grid_speed), nearest_speed, grid_speed)
-        speed_range = (float(np.nanmin(grid_speed)), float(np.nanmax(grid_speed)))
-        if speed_range[0] == speed_range[1]:
-            speed_range = (speed_range[0] - 1.0, speed_range[1] + 1.0)
-
-        levels = np.linspace(speed_range[0], speed_range[1], 22)
-        if axis == 0:
-            contour = axes.contour(grid_x, grid_y, grid_speed, levels=levels, zdir="x", offset=center, cmap="turbo", linewidths=1.25)
-            background_x = np.full_like(grid_x, center)
-            axes.plot_surface(background_x, grid_x, grid_y, color="#f8fbff", alpha=0.18, linewidth=0)
-        elif axis == 1:
-            contour = axes.contour(grid_x, grid_y, grid_speed, levels=levels, zdir="y", offset=center, cmap="turbo", linewidths=1.25)
-            background_y = np.full_like(grid_x, center)
-            axes.plot_surface(grid_x, background_y, grid_y, color="#f8fbff", alpha=0.18, linewidth=0)
-        else:
-            contour = axes.contour(grid_x, grid_y, grid_speed, levels=levels, zdir="z", offset=center, cmap="turbo", linewidths=1.25)
-            background_z = np.full_like(grid_x, center)
-            axes.plot_surface(grid_x, grid_y, background_z, color="#f8fbff", alpha=0.18, linewidth=0)
-        self._add_horizontal_colorbar(contour, axes, "|U| (m/s)")
-        self._finish_axes(axes, points)
-        return len(slice_points), resolved_axis_name, center, speed_range
-
-    def plot_field_iso_surface(
-        self,
-        poly_data,
-        field_array,
-        scalar_range: tuple[float, float],
-        field_name: str,
-        level_count: int = 6,
-    ) -> tuple[int, tuple[float, float]]:
-        self._begin_plot(lambda: self.plot_field_iso_surface(poly_data, field_array, scalar_range, field_name, level_count))
-        points = self._points(poly_data)
-        faces = self._faces(poly_data)
-        values = self._scalar_values(field_array)
-        axes = self._reset_axes(f"{field_name} Iso-surface")
-        if points.size == 0 or faces.size == 0 or values.size == 0:
-            axes.text2D(0.08, 0.5, "No iso-surface data to display.", color="#111111")
-            self._show()
-            return 0, scalar_range
-
-        faces = self._sample_faces(faces, limit=18000)
-        faces = self._filter_faces_by_center(points, faces)
-        if faces.size == 0:
-            axes.text2D(0.08, 0.5, "No faces in current display range.", color="#111111")
-            self._show()
-            return 0, scalar_range
-
-        face_values = np.array([values[np.asarray(face, dtype=int)].mean() for face in faces], dtype=float)
-        value_min, value_max = scalar_range
-        if value_max <= value_min:
-            value_min, value_max = float(face_values.min()), float(face_values.max())
-        if value_max <= value_min:
-            value_min, value_max = value_min - 1.0, value_max + 1.0
-        levels = np.linspace(value_min, value_max, max(3, int(level_count)))
-        tolerance = max((value_max - value_min) / (level_count * 3.2), 1e-12)
-        cmap = colormaps["turbo"]
-        normalizer = Normalize(vmin=value_min, vmax=value_max)
-        rendered_faces = 0
-        for level in levels:
-            level_mask = np.abs(face_values - level) <= tolerance
-            if level_mask.sum() == 0:
-                nearest = np.argsort(np.abs(face_values - level))[: min(240, len(face_values))]
-                level_mask = np.zeros(len(face_values), dtype=bool)
-                level_mask[nearest] = True
-            selected_faces = faces[level_mask]
-            if selected_faces.size == 0:
-                continue
-            polygons = [points[np.asarray(face, dtype=int)] for face in selected_faces]
-            collection = Poly3DCollection(
-                polygons,
-                facecolors=cmap(normalizer(level)),
-                edgecolors=(1.0, 1.0, 1.0, 0.18),
-                linewidths=0.18,
-                alpha=0.58,
-            )
-            axes.add_collection3d(collection)
-            rendered_faces += len(polygons)
-        self._add_horizontal_colorbar(
-            self._scalar_mappable((value_min, value_max), cmap),
-            axes,
-            field_name,
-        )
-        self._finish_axes(axes, points)
-        return rendered_faces, (value_min, value_max)
-
-    def plot_velocity_streamlines(
-        self,
-        source_poly_data,
-        streamline_poly_data,
-        main_axis: str,
-        speed_range: tuple[float, float],
-    ) -> tuple[int, int, str, tuple[float, float]]:
-        self._begin_plot(
-            lambda: self.plot_velocity_streamlines(source_poly_data, streamline_poly_data, main_axis, speed_range)
-        )
-        source_points = self._points(source_poly_data)
-        line_points = self._points(streamline_poly_data)
-        axes = self._reset_axes("Velocity Streamlines |U|")
-        if source_points.size == 0 or line_points.size == 0 or streamline_poly_data.GetNumberOfLines() == 0:
-            axes.text2D(0.08, 0.5, "No VTK streamline data to display.", color="#d4d4d4")
-            self._show()
-            return 0, 0, main_axis, speed_range
-
-        vectors = streamline_poly_data.GetPointData().GetArray("U")
-        line_speeds = self._scalar_values(vectors) if vectors is not None else np.zeros(len(line_points))
-        lines = vtk_to_numpy(streamline_poly_data.GetLines().GetData())
-        cmap = colormaps["turbo"]
-        normalizer = Normalize(vmin=speed_range[0], vmax=speed_range[1])
-        index = 0
-        line_count = 0
-        source_min = source_points.min(axis=0)
-        source_max = source_points.max(axis=0)
-        source_extent = np.maximum(source_max - source_min, 1e-9)
-        source_tolerance = float(np.linalg.norm(source_extent)) * 1e-6
-        arrow_length = float(np.linalg.norm(source_extent)) * 0.027
-        vector_values = vtk_to_numpy(vectors)[:, :3] if vectors is not None else None
-        total_line_points = 0
-        while index < len(lines):
-            count = int(lines[index])
-            index += 1
-            ids = lines[index : index + count].astype(int)
-            index += count
-            if count < 2:
-                continue
-            line = line_points[ids]
-            display_mask = self._filter_mask(line)
-            bounds_mask = np.all(
-                (line >= source_min - source_tolerance) & (line <= source_max + source_tolerance),
-                axis=1,
-            )
-            line_mask = display_mask & bounds_mask
-            line = line[line_mask]
-            ids = ids[line_mask]
-            if len(line) < 1:
-                continue
-            sample_step = max(1, len(line) // 7)
-            arrow_starts = line[::sample_step]
-            sampled_ids = ids[::sample_step]
-            if vector_values is not None and len(vector_values):
-                arrow_vectors = vector_values[sampled_ids]
-            elif len(line) > 1:
-                arrow_vectors = np.gradient(line, axis=0)[::sample_step]
-            else:
-                continue
-            magnitudes = np.linalg.norm(arrow_vectors, axis=1)
-            nonzero_mask = magnitudes > 1e-12
-            arrow_starts = arrow_starts[nonzero_mask]
-            arrow_vectors = arrow_vectors[nonzero_mask]
-            magnitudes = magnitudes[nonzero_mask]
-            if len(arrow_starts) == 0:
-                continue
-            arrow_vectors = arrow_vectors / magnitudes[:, None] * arrow_length
-            arrow_colors = cmap(normalizer(magnitudes))
-            for start_point, direction, arrow_color in zip(arrow_starts, arrow_vectors, arrow_colors):
-                axes.quiver(
-                    start_point[0],
-                    start_point[1],
-                    start_point[2],
-                    direction[0],
-                    direction[1],
-                    direction[2],
-                    color=arrow_color,
-                    linewidth=0.9,
-                    arrow_length_ratio=0.42,
-                    normalize=False,
-                )
-            axes.scatter(arrow_starts[:, 0], arrow_starts[:, 1], arrow_starts[:, 2], s=5, c=arrow_colors, alpha=0.72)
-            line_count += 1
-            total_line_points += len(line)
-
-        if line_count == 0:
-            axes.text2D(0.08, 0.5, "No streamlines in current display range.", color="#d4d4d4")
-            self._show()
-            return 0, 0, main_axis, speed_range
-
-        self._add_horizontal_colorbar(
-            self._scalar_mappable(speed_range, cmap),
-            axes,
-            "|U| (m/s)",
-        )
-        filtered_source_points = self._filter_points(source_points)
-        self._finish_axes(axes, filtered_source_points if filtered_source_points.size else source_points)
-        return line_count, total_line_points, main_axis, speed_range
-
-    def plot_pressure_points(self, poly_data, pressure_array, scalar_range: tuple[float, float]) -> None:
-        self._begin_plot(lambda: self.plot_pressure_points(poly_data, pressure_array, scalar_range))
-        points = self._points(poly_data)
-        pressure = vtk_to_numpy(pressure_array)
-        axes = self._reset_axes("Pressure Point Cloud")
-        if points.size == 0 or pressure.size == 0:
-            axes.text2D(0.08, 0.5, "No pressure point data in current case.", color="#d4d4d4")
-            self._show()
-            return
-        count = min(len(points), len(pressure))
-        points = points[:count]
-        pressure = pressure[:count]
-        points, pressure = self._filter_points_values(points, pressure)
-        if points.size == 0:
-            axes.text2D(0.08, 0.5, "No pressure points in current display range.", color="#d4d4d4")
-            self._show()
-            return
-        points, pressure = self._sample_points(points, pressure)
-        scatter = axes.scatter(
-            points[:, 0],
-            points[:, 1],
-            points[:, 2],
-            c=pressure,
-            cmap="turbo",
-            s=8,
-            alpha=0.92,
-            vmin=scalar_range[0],
-            vmax=scalar_range[1],
-        )
-        self._add_horizontal_colorbar(scatter, axes, "p")
-        self._finish_axes(axes, points)
-
     def _reset_axes(self, title: str):
         self._last_plot_title = title
-        if self._replace_current_plot and self._tabs.count() > 0:
-            current_index = self._tabs.currentIndex()
-            if current_index >= 0:
-                self._close_tab(current_index)
         self.figure = Figure(figsize=(10, 7), facecolor="#ffffff", tight_layout=True)
         self.canvas = FigureCanvas(self.figure)
-        if self._active_plot_callback is not None:
-            self._tab_refresh_callbacks[self.canvas] = self._active_plot_callback
         self._tabs.addTab(self.canvas, self._tab_title(title))
         self._tabs.setCurrentWidget(self.canvas)
         axes = self.figure.add_subplot(111, projection="3d", facecolor="#ffffff")
@@ -986,19 +234,6 @@ class VtkViewerDialog(QDialog):
         axes.quiver(outlet_x, center_y, center_z, arrow_length, 0, 0, color="#ff1f1f", linewidth=3.0, arrow_length_ratio=0.34)
         axes.text(inlet_x, center_y, center_z - span[2] * 0.18, "INLET", color="#1759ff", fontsize=10, fontweight="bold")
         axes.text(outlet_x + arrow_length * 0.8, center_y, center_z - span[2] * 0.18, "OUTLET", color="#ff1f1f", fontsize=10, fontweight="bold")
-
-    def _add_horizontal_colorbar(self, mappable, axes, label: str):
-        colorbar = self.figure.colorbar(
-            mappable,
-            ax=axes,
-            orientation="horizontal",
-            shrink=0.72,
-            pad=0.03,
-            aspect=34,
-        )
-        colorbar.set_label(label, color="#111111", fontsize=12, fontweight="bold")
-        colorbar.ax.xaxis.set_tick_params(color="#111111", labelcolor="#111111")
-        return colorbar
 
     def _show(self) -> None:
         if self.canvas is not None:
@@ -1084,8 +319,6 @@ class VtkViewerDialog(QDialog):
 
     def _close_tab(self, index: int) -> None:
         widget = self._tabs.widget(index)
-        if widget is not None:
-            self._tab_refresh_callbacks.pop(widget, None)
         self._tabs.removeTab(index)
         if widget is not None:
             widget.deleteLater()
@@ -1096,37 +329,11 @@ class VtkViewerDialog(QDialog):
         self.figure = None
         self.canvas = None
 
-    def _begin_plot(self, callback: Callable[[], None]) -> None:
-        self._active_plot_callback = callback
-
-    def _refresh_current_tab(self) -> None:
-        if self._is_refreshing_tab:
-            return
-        current_widget = self._tabs.currentWidget()
-        if current_widget is None:
-            return
-        callback = self._tab_refresh_callbacks.get(current_widget)
-        if callback is None:
-            return
-        current_index = self._tabs.currentIndex()
-        self._is_refreshing_tab = True
-        try:
-            self._close_tab(current_index)
-            callback()
-        finally:
-            self._is_refreshing_tab = False
-
     def _points(self, poly_data) -> np.ndarray:
         vtk_points = poly_data.GetPoints()
         if vtk_points is None:
             return np.empty((0, 3), dtype=float)
         return vtk_to_numpy(vtk_points.GetData())
-
-    def _scalar_values(self, field_array) -> np.ndarray:
-        values = vtk_to_numpy(field_array)
-        if values.ndim == 1:
-            return values
-        return np.linalg.norm(values, axis=1)
 
     def _faces(self, poly_data) -> np.ndarray:
         polygons = poly_data.GetPolys()
@@ -1143,75 +350,20 @@ class VtkViewerDialog(QDialog):
             index += count
         return np.array(faces, dtype=object)
 
-    def _filter_points(self, points: np.ndarray) -> np.ndarray:
-        return points[self._filter_mask(points)]
-
-    def _filter_points_values(self, points: np.ndarray, values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        mask = self._filter_mask(points)
-        return points[mask], values[mask]
-
-    def _filter_faces_by_center(self, points: np.ndarray, faces: np.ndarray) -> np.ndarray:
-        if points.size == 0 or faces.size == 0:
-            return faces
-        centers = np.array([points[np.asarray(face, dtype=int)].mean(axis=0) for face in faces], dtype=float)
-        return faces[self._filter_mask(centers)]
-
-    def _filter_mask(self, points: np.ndarray) -> np.ndarray:
-        if points.size == 0:
-            return np.zeros((0,), dtype=bool)
-        mode = self._filter_mode_combo.currentText() if hasattr(self, "_filter_mode_combo") else "全部显示"
-        if mode == "全部显示" or not self._geometry_assets:
-            return np.ones((len(points),), dtype=bool)
-
-        radius = self._filter_radius_input.value() if hasattr(self, "_filter_radius_input") else 0.0
-        selected_bounds: list[tuple[np.ndarray, np.ndarray]]
-        if mode == "单个 STL 附近":
-            asset_name = self._filter_asset_combo.currentText() if hasattr(self, "_filter_asset_combo") else ""
-            selected_bounds = [self._geometry_assets[asset_name]] if asset_name in self._geometry_assets else []
-        else:
-            selected_bounds = list(self._geometry_assets.values())
-        if not selected_bounds:
-            return np.ones((len(points),), dtype=bool)
-
-        mask = np.zeros((len(points),), dtype=bool)
-        for mins, maxs in selected_bounds:
-            expanded_min = mins - radius
-            expanded_max = maxs + radius
-            mask |= np.all((points >= expanded_min) & (points <= expanded_max), axis=1)
-        return mask
-
     def _sample_faces(self, faces: np.ndarray, limit: int = 8000) -> np.ndarray:
         if len(faces) <= limit:
             return faces
         indices = np.linspace(0, len(faces) - 1, limit, dtype=int)
         return faces[indices]
 
-    def _scalar_mappable(self, scalar_range: tuple[float, float], cmap):
-        from matplotlib.cm import ScalarMappable
-
-        mappable = ScalarMappable(norm=Normalize(vmin=scalar_range[0], vmax=scalar_range[1]), cmap=cmap)
-        mappable.set_array([])
-        return mappable
-
-    def _sample_points(
-        self,
-        points: np.ndarray,
-        values: np.ndarray | None = None,
-        limit: int = 12000,
-    ):
-        if len(points) <= limit:
-            return (points, values) if values is not None else points
-        indices = np.linspace(0, len(points) - 1, limit, dtype=int)
-        if values is not None:
-            return points[indices], values[indices]
-        return points[indices]
-
 
 class NativeVtkViewerDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle("FoamDesk Native VTK 视图")
         self.resize(1120, 760)
+        self._interactor_initialized = False
         self._animation_render_callback: Callable[[int], None] | None = None
         self._animation_frame_count = 0
         self._animation_frame_index = 0
@@ -1237,18 +389,31 @@ class NativeVtkViewerDialog(QDialog):
         layout.addLayout(toolbar)
 
         self._vtk_widget = QVTKRenderWindowInteractor(self)
+        self._vtk_widget.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         layout.addWidget(self._vtk_widget, 1)
         self._renderer = vtk.vtkRenderer()
         self._renderer.SetBackground(1.0, 1.0, 1.0)
         self._vtk_widget.GetRenderWindow().AddRenderer(self._renderer)
         self._interactor = self._vtk_widget.GetRenderWindow().GetInteractor()
-        self._interactor.Initialize()
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.pause_animation()
+        self._animation_render_callback = None
         self._renderer.RemoveAllViewProps()
-        self._vtk_widget.GetRenderWindow().Render()
+        self._interactor_initialized = False
         super().closeEvent(event)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        QTimer.singleShot(0, self._initialize_interactor)
+
+    def _initialize_interactor(self) -> None:
+        if self._interactor_initialized:
+            return
+        if not self._vtk_widget.isVisible():
+            return
+        self._interactor.Initialize()
+        self._interactor_initialized = True
 
     def set_animation_source(self, frame_count: int, render_callback: Callable[[int], None] | None) -> None:
         self.pause_animation()
@@ -1493,6 +658,12 @@ class NativeVtkViewerDialog(QDialog):
         self.show()
         self.raise_()
         self.activateWindow()
+        QTimer.singleShot(0, self._render_window)
+
+    def _render_window(self) -> None:
+        if not self.isVisible() or not self._vtk_widget.isVisible():
+            return
+        self._initialize_interactor()
         self._vtk_widget.GetRenderWindow().Render()
 
     def _lookup_table(self, scalar_range: tuple[float, float]):
@@ -1722,23 +893,6 @@ class MainWindow(QMainWindow):
         help_menu.addAction("当前阶段说明", self._show_stage_summary)
         return menu_bar
 
-    def _build_toolbar(self) -> QWidget:
-        toolbar = QToolBar("主工具栏")
-        toolbar.setObjectName("topToolBar")
-        toolbar.setFixedHeight(44)
-        toolbar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        toolbar.addAction("新建项目", self._create_project)
-        toolbar.addAction("打开", self._open_project)
-        toolbar.addAction("项目选择", self._return_to_project_selection)
-        toolbar.addAction("保存", self._save_current_state)
-        toolbar.addSeparator()
-        toolbar.addAction("运行", self._run_minimal_simulation)
-        toolbar.addAction("停止", self._stop_current_process)
-        toolbar.addSeparator()
-        toolbar.addAction("设置", self._open_settings_tab)
-        toolbar.addAction("切换主题", self._cycle_theme)
-        return toolbar
-
     def _build_status_bar(self) -> None:
         status_bar = QStatusBar()
         self._case_label = QLabel("当前 Case: 未选择")
@@ -1748,24 +902,6 @@ class MainWindow(QMainWindow):
         status_bar.addPermanentWidget(self._task_label)
         status_bar.addPermanentWidget(self._version_label)
         self.setStatusBar(status_bar)
-
-    def _build_activity_bar(self) -> QWidget:
-        container = QFrame()
-        container.setObjectName("activityBar")
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        activity_list = QListWidget()
-        activity_list.setObjectName("activityList")
-        activity_list.setFixedWidth(70)
-        activity_list.setSpacing(4)
-        for item_text in ("资源", "搜索", "任务", "结果"):
-            activity_list.addItem(QListWidgetItem(item_text))
-        activity_list.setCurrentRow(0)
-        activity_list.currentRowChanged.connect(self._on_activity_changed)
-        layout.addWidget(activity_list)
-        return container
 
     def _build_sidebar(self) -> QWidget:
         container = QFrame()
@@ -1837,25 +973,6 @@ class MainWindow(QMainWindow):
         self._task_text.setPlainText("任务状态：空闲")
         self._problem_text.setPlainText("暂无问题。")
         return self._bottom_tabs
-
-    def _make_text_panel(self, title: str) -> QWidget:
-        wrapper = QWidget()
-        layout = QHBoxLayout(wrapper)
-        layout.setContentsMargins(0, 0, 0, 0)
-        editor = QTextEdit()
-        editor.setReadOnly(True)
-        editor.setPlainText(
-            f"{title}\n\n"
-            "VS Code 风格工作台布局：\n"
-            "- 左侧活动栏\n"
-            "- 左侧边栏\n"
-            "- 中央标签工作区\n"
-            "- 底部面板\n"
-            "- 底部状态栏\n\n"
-            "后续会继续接入参数表单、任务日志和结果视图。"
-        )
-        layout.addWidget(editor)
-        return wrapper
 
     def _build_project_home_tab(self) -> QWidget:
         wrapper = QWidget()
@@ -2361,202 +1478,6 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         return wrapper
 
-    def _build_geometry_tab(self) -> QWidget:
-        wrapper = QWidget()
-        root_layout = QVBoxLayout(wrapper)
-        root_layout.setContentsMargins(0, 0, 0, 0)
-        root_layout.setSpacing(0)
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        content = QWidget()
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-
-        title = QLabel("几何/CAD")
-        title.setStyleSheet("font-size: 22px; font-weight: 600;")
-        description = QLabel(
-            "当前 MVP 先支持 STL 导入到 OpenFOAM case 的 constant/triSurface，"
-            "STEP/IGES/CATIA/SolidWorks 后续需要接入 CAD 内核。"
-        )
-        description.setWordWrap(True)
-
-        stl_menu_btn = self._make_menu_button("STL 几何管理", [
-            ("导入 STL", self._import_stl_geometry),
-            ("刷新几何清单", self._refresh_geometry_panel),
-            ("预览已导入 STL", self._preview_imported_stl),
-            ("编辑 STL 位置", self._edit_imported_stl_transform),
-        ])
-        mesh_menu_btn = self._make_menu_button("前处理 & 网格", [
-            ("生成 snappyHexMeshDict", self._generate_snappy_hex_mesh_dict),
-            ("运行 snappyHexMesh", self._run_snappy_hex_mesh),
-            ("运行 checkMesh", self._run_check_mesh),
-            ("一键前处理", self._run_preprocess_pipeline),
-        ])
-        diag_menu_btn = self._make_menu_button("诊断 & 工具", [
-            ("运行前检查", self._run_preflight_check),
-            ("一键仿真流水线", self._run_simulation_pipeline),
-            ("STEP/IGES 支持说明", self._show_cad_import_limitations),
-        ])
-
-        domain_form = QFormLayout()
-        self._domain_template_combo = QComboBox()
-        for template in self._context.project_service.domain_templates():
-            self._domain_template_combo.addItem(template.name, template.key)
-        self._domain_template_hint = QLabel("计算域 = 流体存在的空间盒子；STL 是放在盒子里的固体障碍物。")
-        self._domain_template_hint.setWordWrap(True)
-        self._domain_apply_state_label = QLabel("当前预览尚未绑定项目。")
-        self._domain_apply_state_label.setWordWrap(True)
-        self._domain_apply_state_label.setObjectName("DomainApplyStateLabel")
-        self._domain_template_combo.currentIndexChanged.connect(self._refresh_domain_template_hint)
-        apply_domain_button = QPushButton("应用计算域模板")
-        import_template_stl_button = QPushButton("一键导入模板 STL")
-        import_draw_btn = QPushButton("从绘制几何导入")
-        import_draw_btn.clicked.connect(lambda _checked=False: self._import_draw_geometry_domain())
-        apply_domain_button.clicked.connect(lambda _checked=False: self._apply_domain_template())
-        read_draw_btn = QPushButton("读取绘制几何")
-        read_draw_btn.clicked.connect(lambda _checked=False: self._read_draw_geometry())
-        import_template_stl_button.clicked.connect(lambda _checked=False: self._import_template_stl())
-        domain_row = QHBoxLayout()
-        domain_row.setSpacing(8)
-        domain_row.addWidget(self._domain_template_combo)
-        domain_row.addWidget(apply_domain_button)
-        domain_row.addWidget(read_draw_btn)
-        domain_row.addWidget(import_draw_btn)
-        domain_row.addWidget(import_template_stl_button)
-        domain_row.addStretch(1)
-        domain_widget = QWidget()
-        domain_widget.setLayout(domain_row)
-        domain_form.addRow("计算域模板", domain_widget)
-        domain_form.addRow("应用状态", self._domain_apply_state_label)
-        domain_form.addRow("模板说明", self._domain_template_hint)
-
-
-        boundary_row_1 = QHBoxLayout()
-        boundary_row_1.setSpacing(8)
-        boundary_row_2 = QHBoxLayout()
-        boundary_row_2.setSpacing(8)
-        self._inlet_velocity_x_input = QDoubleSpinBox()
-        self._inlet_velocity_y_input = QDoubleSpinBox()
-        self._inlet_velocity_z_input = QDoubleSpinBox()
-        for input_widget in (
-            self._inlet_velocity_x_input,
-            self._inlet_velocity_y_input,
-            self._inlet_velocity_z_input,
-        ):
-            input_widget.setRange(-100000.0, 100000.0)
-            input_widget.setDecimals(4)
-            input_widget.setSingleStep(0.1)
-            input_widget.setValue(0.0)
-            input_widget.setMinimumWidth(96)
-        self._inlet_velocity_x_input.setValue(1.0)
-        self._outlet_pressure_input = QDoubleSpinBox()
-        self._outlet_pressure_input.setRange(-100000.0, 100000.0)
-        self._outlet_pressure_input.setDecimals(4)
-        self._outlet_pressure_input.setSingleStep(0.1)
-        self._outlet_pressure_input.setValue(0.0)
-        self._outlet_pressure_input.setMinimumWidth(96)
-        self._wall_type_combo = QComboBox()
-        self._wall_type_combo.addItem("无滑移壁面 noSlip", "noSlip")
-        self._wall_type_combo.addItem("滑移壁面 slip", "slip")
-        apply_boundary_button = QPushButton("应用边界条件")
-        apply_boundary_button.clicked.connect(lambda _checked=False: self._apply_boundary_conditions())
-        for label, input_widget in (
-            ("Ux", self._inlet_velocity_x_input),
-            ("Uy", self._inlet_velocity_y_input),
-            ("Uz", self._inlet_velocity_z_input),
-        ):
-            boundary_row_1.addWidget(QLabel(label))
-            boundary_row_1.addWidget(input_widget)
-        boundary_row_1.addStretch(1)
-        boundary_row_2.addWidget(QLabel("出口压力 p"))
-        boundary_row_2.addWidget(self._outlet_pressure_input)
-        boundary_row_2.addWidget(QLabel("壁面类型"))
-        boundary_row_2.addWidget(self._wall_type_combo)
-        boundary_row_2.addWidget(apply_boundary_button)
-        boundary_row_2.addStretch(1)
-        boundary_widget = QWidget()
-        boundary_layout = QVBoxLayout(boundary_widget)
-        boundary_layout.setContentsMargins(0, 0, 0, 0)
-        boundary_layout.setSpacing(6)
-        boundary_layout.addLayout(boundary_row_1)
-        boundary_layout.addLayout(boundary_row_2)
-        domain_form.addRow("边界条件", boundary_widget)
-
-        self._domain_preview_figure = Figure(figsize=(6.8, 2.8), facecolor="#1e1e1e", tight_layout=True)
-        self._domain_preview_canvas = FigureCanvas(self._domain_preview_figure)
-        self._domain_preview_canvas.setMinimumHeight(320)
-        self._domain_preview_canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-
-        snappy_form = QFormLayout()
-        self._snappy_min_refinement_input = QSpinBox()
-        self._snappy_min_refinement_input.setRange(0, 6)
-        self._snappy_min_refinement_input.setValue(1)
-        self._snappy_max_refinement_input = QSpinBox()
-        self._snappy_max_refinement_input.setRange(0, 8)
-        self._snappy_max_refinement_input.setValue(2)
-        self._snappy_location_x_input = QDoubleSpinBox()
-        self._snappy_location_y_input = QDoubleSpinBox()
-        self._snappy_location_z_input = QDoubleSpinBox()
-        for input_widget in (
-            self._snappy_location_x_input,
-            self._snappy_location_y_input,
-            self._snappy_location_z_input,
-        ):
-            input_widget.setRange(-100000.0, 100000.0)
-            input_widget.setDecimals(4)
-            input_widget.setSingleStep(0.1)
-            input_widget.setValue(0.5)
-        self._snappy_add_layers_checkbox = QCheckBox("启用边界层 addLayers")
-        self._snappy_layer_thickness_input = QDoubleSpinBox()
-        self._snappy_layer_thickness_input.setRange(0.01, 5.0)
-        self._snappy_layer_thickness_input.setDecimals(3)
-        self._snappy_layer_thickness_input.setSingleStep(0.05)
-        self._snappy_layer_thickness_input.setValue(0.3)
-
-        location_row = QHBoxLayout()
-        location_row.setSpacing(8)
-        location_row.addWidget(QLabel("X"))
-        location_row.addWidget(self._snappy_location_x_input)
-        location_row.addWidget(QLabel("Y"))
-        location_row.addWidget(self._snappy_location_y_input)
-        location_row.addWidget(QLabel("Z"))
-        location_row.addWidget(self._snappy_location_z_input)
-        location_row.addStretch(1)
-        location_widget = QWidget()
-        location_widget.setLayout(location_row)
-
-        snappy_form.addRow("最小加密等级", self._snappy_min_refinement_input)
-        snappy_form.addRow("最大加密等级", self._snappy_max_refinement_input)
-        snappy_form.addRow("流体内部点 locationInMesh", location_widget)
-        snappy_form.addRow("边界层", self._snappy_add_layers_checkbox)
-        snappy_form.addRow("最终边界层厚度", self._snappy_layer_thickness_input)
-
-        self._geometry_text = QTextEdit()
-        self._geometry_text.setReadOnly(True)
-        self._geometry_text.setPlainText("请先新建或打开项目，然后导入 STL 几何。")
-        self._geometry_text.setMinimumHeight(180)
-
-        layout.addWidget(title)
-        layout.addWidget(description)
-        groups_row = QHBoxLayout()
-        groups_row.addWidget(stl_menu_btn)
-        groups_row.addWidget(mesh_menu_btn)
-        zoom_btn = QPushButton("放大预览")
-        zoom_btn.clicked.connect(lambda _checked=False: self._open_domain_preview_dialog())
-        groups_row.addWidget(diag_menu_btn)
-        groups_row.addWidget(zoom_btn)
-        groups_row.addStretch(1)
-        layout.addLayout(groups_row)
-        layout.addLayout(domain_form)
-        layout.addWidget(self._domain_preview_canvas)
-        layout.addLayout(snappy_form)
-        layout.addWidget(self._geometry_text, 1)
-        scroll_area.setWidget(content)
-        root_layout.addWidget(scroll_area)
-        return wrapper
-
     def _build_solver_run_tab(self) -> QWidget:
         wrapper = QWidget()
         layout = QVBoxLayout(wrapper)
@@ -2575,7 +1496,7 @@ class MainWindow(QMainWindow):
 
         action_row = QHBoxLayout()
         start_btn = QPushButton("一键启动仿真")
-        
+
         start_btn.clicked.connect(lambda _checked=False: self._run_simulation_pipeline())
         stop_button = QPushButton("停止")
         stop_button.clicked.connect(lambda _checked=False: self._stop_current_process())
@@ -2819,21 +1740,6 @@ class MainWindow(QMainWindow):
         self._refresh_environment_panels()
         self._set_status("已打开环境检查页。")
 
-    def _open_solver_select_tab(self) -> None:
-        self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_SELECT)
-        self._load_case_parameters()
-        self._set_status("已打开求解器选择页。")
-
-    def _open_parameter_tab(self) -> None:
-        self._workspace_tabs.setCurrentIndex(self.TAB_PARAMETERS)
-        self._load_case_parameters()
-        self._set_status("已打开仿真参数页。")
-
-    def _open_solver_run_tab(self) -> None:
-        self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_RUN)
-        self._refresh_solver_run_panel()
-        self._set_status("已打开求解运行页。")
-
     def _open_draw_geometry_tab(self) -> None:
         self._workspace_tabs.setCurrentIndex(self.TAB_DRAW_GEOMETRY)
         self._set_status("已打开绘制几何页。")
@@ -2842,21 +1748,6 @@ class MainWindow(QMainWindow):
         self._workspace_tabs.setCurrentIndex(self.TAB_MESH_GENERATION)
         self._refresh_mesh_generation_panel()
         self._set_status("已打开网格生成页。")
-
-    def _open_simulation_prepare_tab(self) -> None:
-        self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_PREPARE)
-        self._refresh_physics_prepare_panel()
-        self._set_status("已打开求解器准备页。")
-
-    def _open_physics_prepare_tab(self) -> None:
-        self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_PREPARE)
-        self._refresh_physics_prepare_panel()
-        self._set_status("已打开求解器准备页。")
-
-    def _open_geometry_tab(self) -> None:
-        self._workspace_tabs.setCurrentIndex(self.TAB_DRAW_GEOMETRY)
-        self._refresh_geometry_panel()
-        self._set_status("已打开几何/CAD 页。")
 
     def _import_stl_geometry(self) -> None:
         if self._current_project is None:
@@ -3495,36 +2386,6 @@ class MainWindow(QMainWindow):
         self._snappy_location_z_input.setValue(template.suggested_location_in_mesh[2])
         self._update_domain_apply_state_label()
         self._set_status("计算域模板已应用。")
-
-    def _apply_custom_domain(self) -> None:
-        if self._current_project is None:
-            self._show_error("请先新建或打开项目。")
-            return
-        size = (
-            self._domain_length_x_input.value(),
-            self._domain_length_y_input.value(),
-            self._domain_length_z_input.value(),
-        )
-        cells = (
-            self._domain_cells_x_input.value(),
-            self._domain_cells_y_input.value(),
-            self._domain_cells_z_input.value(),
-        )
-        try:
-            template = self._context.project_service.apply_custom_domain(self._current_project, size, cells)
-        except (OSError, ValueError) as error:
-            self._show_error(f"应用自定义计算域失败：{error}")
-            return
-        self._snappy_location_x_input.setValue(template.suggested_location_in_mesh[0])
-        self._snappy_location_y_input.setValue(template.suggested_location_in_mesh[1])
-        self._snappy_location_z_input.setValue(template.suggested_location_in_mesh[2])
-        self._append_log(
-            f"自定义计算域已应用：尺寸={template.size}，网格={template.cells}，"
-            f"建议 locationInMesh={template.suggested_location_in_mesh}"
-        )
-        self._refresh_geometry_panel()
-        self._update_domain_apply_state_label()
-        self._set_status("自定义计算域已应用。")
 
     def _apply_boundary_conditions(self) -> None:
         if self._current_project is None:
@@ -4775,7 +3636,7 @@ class MainWindow(QMainWindow):
         except (OSError, RuntimeError, ValueError) as error:
             self._result_minmax_label.setText(f"最大/最小值：暂不可用（{error}）")
             return
-        values = self._vtk_viewer._scalar_values(field_array) if self._vtk_viewer is not None else self._scalar_values(field_array)
+        values = self._scalar_values(field_array)
         if values.size == 0:
             self._result_minmax_label.setText("最大/最小值：字段为空")
             return
@@ -4798,9 +3659,9 @@ class MainWindow(QMainWindow):
             self._show_error(f"加载结果显示失败：{error}")
             return
 
-        self._configure_result_animation_source()
         color_range = self._selected_result_color_range(field_array)
         self._render_result_display(output, field_array, display_name, selected_time, storage, mode, color_range)
+        self._configure_result_animation_source()
 
     def _render_result_display(
         self,
@@ -4962,7 +3823,8 @@ class MainWindow(QMainWindow):
     def _configure_result_animation_source(self) -> None:
         if not hasattr(self, "_result_time_combo"):
             return
-        self._ensure_native_vtk_viewer()
+        if self._native_vtk_viewer is None:
+            return
         frame_count = self._result_time_combo.count()
         if frame_count <= 1:
             self._native_vtk_viewer.set_animation_source(0, None)
@@ -5120,10 +3982,6 @@ class MainWindow(QMainWindow):
     def _ensure_vtk_viewer(self) -> None:
         if self._vtk_viewer is None:
             self._vtk_viewer = VtkViewerDialog(self)
-        if self._current_project is not None:
-            self._vtk_viewer.set_geometry_assets(
-                self._context.geometry_import_service.list_assets(self._current_project)
-            )
         self._vtk_viewer.show()
         self._vtk_viewer.raise_()
         self._vtk_viewer.activateWindow()
@@ -5131,15 +3989,13 @@ class MainWindow(QMainWindow):
     def _ensure_native_vtk_viewer(self) -> None:
         if self._native_vtk_viewer is None:
             self._native_vtk_viewer = NativeVtkViewerDialog(self)
+            self._native_vtk_viewer.destroyed.connect(self._clear_native_vtk_viewer)
         self._native_vtk_viewer.show()
         self._native_vtk_viewer.raise_()
         self._native_vtk_viewer.activateWindow()
 
-    def _finalize_vtk_render(self) -> None:
-        if self._vtk_viewer is not None:
-            self._vtk_viewer.show()
-            self._vtk_viewer.raise_()
-            self._vtk_viewer.activateWindow()
+    def _clear_native_vtk_viewer(self, *_args) -> None:
+        self._native_vtk_viewer = None
 
     def _apply_settings_theme(self) -> None:
         settings = self._context.settings_service.load()
@@ -5828,10 +4684,6 @@ boundaryField
             visible = not normalized or normalized in item.text(0).lower()
             item.setHidden(not visible)
         self._set_status("项目搜索已应用。")
-
-    def _run_full_pipeline(self) -> None:
-        self._run_simulation_pipeline()
-
 
     def _run_minimal_simulation(self) -> None:
         if self._foam_process and self._foam_process.state() != QProcess.ProcessState.NotRunning:

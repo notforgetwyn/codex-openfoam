@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -11,6 +12,8 @@ from foamdesk.ui.startup_window import StartupWindow
 
 
 def main() -> int:
+    if "microsoft" in os.uname().release.lower() and "DISPLAY" in os.environ:
+        os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
     app = QApplication(sys.argv)
     context = ApplicationContext(project_root=Path.cwd())
     initial_project = context.project_service.open_last_project()
