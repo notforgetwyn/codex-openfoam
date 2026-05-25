@@ -1,0 +1,397 @@
+qt.core.plugin.factoryloader: checking directory path "/usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/platforms" ...
+qt.core.plugin.factoryloader: looking at "libqeglfs.so"
+qt.core.plugin.loader: Found metadata in lib /usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/platforms/libqeglfs.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "eglfs"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QEglFSIntegrationPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+qt.core.plugin.factoryloader: Got keys from plugin meta data QList("eglfs")
+qt.core.plugin.factoryloader: looking at "libqvkkhrdisplay.so"
+qt.core.plugin.loader: Found metadata in lib /usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/platforms/libqvkkhrdisplay.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "vkkhrdisplay"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QVkKhrDisplayIntegrationPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+qt.core.plugin.factoryloader: Got keys from plugin meta data QList("vkkhrdisplay")
+qt.core.plugin.factoryloader: looking at "libqvnc.so"
+qt.core.plugin.loader: Found metadata in lib /usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/platforms/libqvnc.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "vnc"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QVncIntegrationPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+qt.core.plugin.factoryloader: Got keys from plugin meta data QList("vnc")
+qt.core.plugin.factoryloader: looking at "libqlinuxfb.so"
+qt.core.plugin.loader: Found metadata in lib /usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/platforms/libqlinuxfb.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "linuxfb"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QLinuxFbIntegrationPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+qt.core.plugin.factoryloader: Got keys from plugin meta data QList("linuxfb")
+qt.core.plugin.factoryloader: looking at "libqwayland.so"
+qt.core.plugin.loader: Found metadata in lib /usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/platforms/libqwayland.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "wayland",
+            "wayland-egl",
+            "wayland-brcm"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QWaylandIntegrationPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+qt.core.plugin.factoryloader: Got keys from plugin meta data QList("wayland", "wayland-egl", "wayland-brcm")
+qt.core.plugin.factoryloader: looking at "libqoffscreen.so"
+qt.core.plugin.loader: Found metadata in lib /usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/platforms/libqoffscreen.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "offscreen"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QOffscreenIntegrationPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+qt.core.plugin.factoryloader: Got keys from plugin meta data QList("offscreen")
+qt.core.plugin.factoryloader: looking at "libqxcb.so"
+qt.core.plugin.loader: Found metadata in lib /usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/platforms/libqxcb.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "xcb"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QXcbIntegrationPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+qt.core.plugin.factoryloader: Got keys from plugin meta data QList("xcb")
+qt.core.plugin.factoryloader: looking at "libqminimal.so"
+qt.core.plugin.loader: Found metadata in lib /usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/platforms/libqminimal.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "minimal"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QMinimalIntegrationPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+qt.core.plugin.factoryloader: Got keys from plugin meta data QList("minimal")
+qt.core.plugin.factoryloader: looking at "libqminimalegl.so"
+qt.core.plugin.loader: Found metadata in lib /usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/platforms/libqminimalegl.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "minimalegl"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QMinimalEglIntegrationPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+qt.core.plugin.factoryloader: Got keys from plugin meta data QList("minimalegl")
+qt.core.plugin.factoryloader: checking directory path "/usr/bin/platforms" ...
+qt.core.library: "/usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/platforms/libqwayland.so" loaded library
+qt.core.plugin.factoryloader: checking directory path "/usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/wayland-shell-integration" ...
+qt.core.plugin.factoryloader: looking at "libqt-shell.so"
+qt.core.plugin.loader: Found metadata in lib /usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/wayland-shell-integration/libqt-shell.so, metadata=
+{
+    "IID": "org.qt-project.Qt.WaylandClient.QWaylandShellIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "qt-shell"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QWaylandQtShellIntegrationPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+qt.core.plugin.factoryloader: Got keys from plugin meta data QList("qt-shell")
+qt.core.plugin.factoryloader: looking at "libfullscreen-shell-v1.so"
+qt.core.plugin.loader: Found metadata in lib /usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/wayland-shell-integration/libfullscreen-shell-v1.so, metadata=
+{
+    "IID": "org.qt-project.Qt.WaylandClient.QWaylandShellIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "fullscreen-shell-v1"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QWaylandFullScreenShellV1IntegrationPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+qt.core.plugin.factoryloader: Got keys from plugin meta data QList("fullscreen-shell-v1")
+qt.core.plugin.factoryloader: looking at "libxdg-shell.so"
+qt.core.plugin.loader: Found metadata in lib /usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/wayland-shell-integration/libxdg-shell.so, metadata=
+{
+    "IID": "org.qt-project.Qt.WaylandClient.QWaylandShellIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "xdg-shell"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QWaylandXdgShellIntegrationPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+qt.core.plugin.factoryloader: Got keys from plugin meta data QList("xdg-shell")
+qt.core.plugin.factoryloader: looking at "libwl-shell-plugin.so"
+qt.core.plugin.loader: Found metadata in lib /usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/wayland-shell-integration/libwl-shell-plugin.so, metadata=
+{
+    "IID": "org.qt-project.Qt.WaylandClient.QWaylandShellIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "wl-shell"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QWaylandWlShellIntegrationPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+qt.core.plugin.factoryloader: Got keys from plugin meta data QList("wl-shell")
+qt.core.plugin.factoryloader: looking at "libivi-shell.so"
+qt.core.plugin.loader: Found metadata in lib /usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/wayland-shell-integration/libivi-shell.so, metadata=
+{
+    "IID": "org.qt-project.Qt.WaylandClient.QWaylandShellIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "ivi-shell"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QWaylandIviShellIntegrationPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+qt.core.plugin.factoryloader: Got keys from plugin meta data QList("ivi-shell")
+qt.core.plugin.factoryloader: checking directory path "/usr/bin/wayland-shell-integration" ...
+qt.core.library: "/usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/wayland-shell-integration/libxdg-shell.so" loaded library
+qt.core.plugin.factoryloader: checking directory path "/usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/platformthemes" ...
+qt.core.plugin.factoryloader: looking at "libqxdgdesktopportal.so"
+qt.core.plugin.loader: Found metadata in lib /usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/platformthemes/libqxdgdesktopportal.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformThemeFactoryInterface.5.1",
+    "MetaData": {
+        "Keys": [
+            "xdgdesktopportal",
+            "flatpak",
+            "snap"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QXdgDesktopPortalThemePlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+qt.core.plugin.factoryloader: Got keys from plugin meta data QList("xdgdesktopportal", "flatpak", "snap")
+qt.core.plugin.factoryloader: looking at "libqgtk3.so"
+qt.core.plugin.loader: Found metadata in lib /usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/platformthemes/libqgtk3.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformThemeFactoryInterface.5.1",
+    "MetaData": {
+        "Keys": [
+            "gtk3"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QGtk3ThemePlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+qt.core.plugin.factoryloader: Got keys from plugin meta data QList("gtk3")
+qt.core.plugin.factoryloader: checking directory path "/usr/bin/platformthemes" ...
+qt.core.plugin.factoryloader: checking directory path "/usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/styles" ...
+qt.core.plugin.factoryloader: checking directory path "/usr/bin/styles" ...
+qt.core.plugin.factoryloader: checking directory path "/usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/iconengines" ...
+qt.core.plugin.factoryloader: looking at "libqsvgicon.so"
+qt.core.plugin.loader: Found metadata in lib /usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/iconengines/libqsvgicon.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QIconEngineFactoryInterface",
+    "MetaData": {
+        "Keys": [
+            "svg",
+            "svgz",
+            "svg.gz"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QSvgIconPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+qt.core.plugin.factoryloader: Got keys from plugin meta data QList("svg", "svgz", "svg.gz")
+qt.core.plugin.factoryloader: checking directory path "/usr/bin/iconengines" ...
+qt.core.plugin.factoryloader: checking directory path "/usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/imageformats" ...
+qt.core.plugin.factoryloader: looking at "libqtiff.so"
+qt.core.plugin.loader: Found metadata in lib /usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/imageformats/libqtiff.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QImageIOHandlerFactoryInterface",
+    "MetaData": {
+        "Keys": [
+            "tiff",
+            "tif"
+        ],
+        "MimeTypes": [
+            "image/tiff",
+            "image/tiff"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QTiffPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+qt.core.plugin.factoryloader: Got keys from plugin meta data QList("tiff", "tif")
+qt.core.plugin.factoryloader: looking at "libqsvg.so"
+qt.core.plugin.loader: Found metadata in lib /usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/imageformats/libqsvg.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QImageIOHandlerFactoryInterface",
+    "MetaData": {
+        "Keys": [
+            "svg",
+            "svgz"
+        ],
+        "MimeTypes": [
+            "image/svg+xml",
+            "image/svg+xml-compressed"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QSvgPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+qt.core.plugin.factoryloader: Got keys from plugin meta data QList("svg", "svgz")
+qt.core.plugin.factoryloader: looking at "libqtga.so"
+qt.core.plugin.loader: Found metadata in lib /usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/imageformats/libqtga.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QImageIOHandlerFactoryInterface",
+    "MetaData": {
+        "Keys": [
+            "tga"
+        ],
+        "MimeTypes": [
+            "image/x-tga"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QTgaPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+qt.core.plugin.factoryloader: Got keys from plugin meta data QList("tga")
+qt.core.plugin.factoryloader: looking at "libqjpeg.so"
+qt.core.plugin.loader: Found metadata in lib /usr/local/lib/python3.12/dist-packages/PySide6/Qt/plugins/imageformats/libqjpeg.so, metadata=
+{
+    "IID": "org.qt-project.Qt.QImageIOHandlerFactoryInterface",
+    "MetaData": {
+        "Keys": [
+            "jpg",
+            "jpeg",
+            "jfif"
+        ],
+        "MimeTypes": [
+            "image/jpeg",
+            "image/jpeg",
+            "image/jpeg"
+        ]
+    },
+    "archlevel": 2,
+    "className": "QJpegPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+qt.core.plugin.factoryloader: Got keys from plugin meta data QList("jpg", "jpeg", "jfif")
+qt.core.plugin.factoryloader: looking at "libqico.so"
