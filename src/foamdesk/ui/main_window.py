@@ -11,7 +11,6 @@ import numpy as np
 from matplotlib import colormaps
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtCore import QProcess, QTimer
 from PySide6.QtGui import QFont
@@ -115,6 +114,163 @@ class WindowTitleBar(QFrame):
             self._window.showMaximized()
 
 
+class NativeVtkPreviewWidget(QWidget):
+    def __init__(self, parent: QWidget | None = None, background: tuple[float, float, float] = (0.12, 0.12, 0.12)) -> None:
+        super().__init__(parent)
+        self._background = background
+        self._interactor_initialized = False
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._vtk_widget = QVTKRenderWindowInteractor(self)
+        self._vtk_widget.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        layout.addWidget(self._vtk_widget, 1)
+        self._renderer = vtk.vtkRenderer()
+        self._renderer.SetBackground(*background)
+        self._vtk_widget.GetRenderWindow().AddRenderer(self._renderer)
+        self._interactor = self._vtk_widget.GetRenderWindow().GetInteractor()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        QTimer.singleShot(0, self._initialize_interactor)
+
+    def _initialize_interactor(self) -> None:
+        if self._interactor_initialized or not self._vtk_widget.isVisible():
+            return
+        self._interactor.Initialize()
+        self._interactor_initialized = True
+
+    def clear(self, background: tuple[float, float, float] | None = None) -> None:
+        if background is not None:
+            self._background = background
+        self._renderer.RemoveAllViewProps()
+        self._renderer.SetBackground(*self._background)
+
+    def add_polydata(
+        self,
+        poly_data,
+        color: tuple[float, float, float] = (0.25, 0.74, 1.0),
+        opacity: float = 0.72,
+        edge_color: tuple[float, float, float] | None = (0.03, 0.18, 0.28),
+        line_width: float = 0.25,
+    ) -> vtk.vtkActor:
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputData(poly_data)
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetColor(*color)
+        actor.GetProperty().SetOpacity(opacity)
+        actor.GetProperty().SetInterpolationToPhong()
+        if edge_color is not None:
+            actor.GetProperty().EdgeVisibilityOn()
+            actor.GetProperty().SetEdgeColor(*edge_color)
+            actor.GetProperty().SetLineWidth(line_width)
+        self._renderer.AddActor(actor)
+        return actor
+
+    def add_polyline(
+        self,
+        points: np.ndarray,
+        color: tuple[float, float, float] = (0.31, 0.76, 1.0),
+        width: float = 2.0,
+        opacity: float = 1.0,
+    ) -> None:
+        if len(points) < 2:
+            return
+        vtk_points = vtk.vtkPoints()
+        polyline = vtk.vtkPolyLine()
+        polyline.GetPointIds().SetNumberOfIds(len(points))
+        for index, point in enumerate(points):
+            vtk_points.InsertNextPoint(float(point[0]), float(point[1]), float(point[2]))
+            polyline.GetPointIds().SetId(index, index)
+        cells = vtk.vtkCellArray()
+        cells.InsertNextCell(polyline)
+        poly_data = vtk.vtkPolyData()
+        poly_data.SetPoints(vtk_points)
+        poly_data.SetLines(cells)
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputData(poly_data)
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetColor(*color)
+        actor.GetProperty().SetLineWidth(width)
+        actor.GetProperty().SetOpacity(opacity)
+        self._renderer.AddActor(actor)
+
+    def add_polygon(
+        self,
+        vertices: np.ndarray,
+        color: tuple[float, float, float] = (0.31, 0.76, 1.0),
+        opacity: float = 0.18,
+        edge_color: tuple[float, float, float] | None = (0.31, 0.76, 1.0),
+    ) -> None:
+        if len(vertices) < 3:
+            return
+        points = vtk.vtkPoints()
+        polygon = vtk.vtkPolygon()
+        polygon.GetPointIds().SetNumberOfIds(len(vertices))
+        for index, vertex in enumerate(vertices):
+            points.InsertNextPoint(float(vertex[0]), float(vertex[1]), float(vertex[2]))
+            polygon.GetPointIds().SetId(index, index)
+        cells = vtk.vtkCellArray()
+        cells.InsertNextCell(polygon)
+        poly_data = vtk.vtkPolyData()
+        poly_data.SetPoints(points)
+        poly_data.SetPolys(cells)
+        self.add_polydata(poly_data, color=color, opacity=opacity, edge_color=edge_color, line_width=1.0)
+
+    def add_text(
+        self,
+        text: str,
+        position: tuple[float, float, float],
+        color: tuple[float, float, float] = (0.85, 0.85, 0.85),
+        size: int = 16,
+    ) -> None:
+        actor = vtk.vtkBillboardTextActor3D()
+        actor.SetInput(text)
+        actor.SetPosition(float(position[0]), float(position[1]), float(position[2]))
+        actor.GetTextProperty().SetColor(*color)
+        actor.GetTextProperty().SetFontSize(size)
+        actor.GetTextProperty().SetBold(True)
+        actor.GetTextProperty().ShadowOff()
+        self._renderer.AddActor(actor)
+
+    def add_message(self, message: str) -> None:
+        actor = vtk.vtkTextActor()
+        actor.SetInput(message)
+        actor.SetPosition(24, 34)
+        actor.GetTextProperty().SetColor(0.85, 0.85, 0.85)
+        actor.GetTextProperty().SetFontSize(18)
+        actor.GetTextProperty().ShadowOff()
+        self._renderer.AddActor2D(actor)
+
+    def finish(self, points: np.ndarray | None = None) -> None:
+        self._renderer.ResetCamera()
+        camera = self._renderer.GetActiveCamera()
+        camera.Azimuth(-35)
+        camera.Elevation(22)
+        camera.Zoom(1.12)
+        self._renderer.ResetCameraClippingRange()
+        QTimer.singleShot(0, self.render)
+
+    def render(self) -> None:
+        if not self.isVisible() or not self._vtk_widget.isVisible():
+            return
+        self._initialize_interactor()
+        self._vtk_widget.GetRenderWindow().Render()
+
+    def save_png(self, path: Path) -> None:
+        self.render()
+        window_to_image = vtk.vtkWindowToImageFilter()
+        window_to_image.SetInput(self._vtk_widget.GetRenderWindow())
+        window_to_image.SetInputBufferTypeToRGBA()
+        window_to_image.ReadFrontBufferOff()
+        window_to_image.Update()
+        writer = vtk.vtkPNGWriter()
+        writer.SetFileName(str(path))
+        writer.SetInputConnection(window_to_image.GetOutputPort())
+        writer.Write()
+
+
 class VtkViewerDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -137,8 +293,6 @@ class VtkViewerDialog(QDialog):
         layout.addLayout(action_row)
 
         self._last_plot_title = "foamdesk_visualization"
-        self.figure: Figure | None = None
-        self.canvas: FigureCanvas | None = None
         self._tabs = QTabWidget()
         self._tabs.setDocumentMode(True)
         self._tabs.setTabsClosable(True)
@@ -156,95 +310,32 @@ class VtkViewerDialog(QDialog):
         poly_data = reader.GetOutput()
         points = self._points(poly_data)
         faces = self._faces(poly_data)
-        axes = self._reset_axes(f"STL {path.name}")
+        canvas = self._reset_view(f"STL {path.name}")
         if points.size == 0 or faces.size == 0:
-            axes.text2D(0.08, 0.5, "No STL surface data to display.", color="#d4d4d4")
+            canvas.add_message("No STL surface data to display.")
+            canvas.finish()
             self._show()
             return 0, 0
-        faces = self._sample_faces(faces)
-        polygons = [points[np.asarray(face, dtype=int)] for face in faces]
-        collection = Poly3DCollection(
-            polygons,
-            facecolors=(0.58, 0.62, 0.66, 0.92),
-            edgecolors=(0.12, 0.12, 0.12, 0.35),
-            linewidths=0.25,
-        )
-        axes.add_collection3d(collection)
-        self._finish_axes(axes, points)
+        canvas.add_polydata(poly_data, color=(0.58, 0.62, 0.66), opacity=0.92, edge_color=(0.12, 0.12, 0.12))
+        canvas.finish(points)
+        self._show()
         return len(points), len(faces)
 
-    def _reset_axes(self, title: str):
+    def _reset_view(self, title: str) -> NativeVtkPreviewWidget:
         self._last_plot_title = title
-        self.figure = Figure(figsize=(10, 7), facecolor="#ffffff", tight_layout=True)
-        self.canvas = FigureCanvas(self.figure)
-        self._tabs.addTab(self.canvas, self._tab_title(title))
-        self._tabs.setCurrentWidget(self.canvas)
-        axes = self.figure.add_subplot(111, projection="3d", facecolor="#ffffff")
-        axes.set_title(title, color="#09205c", pad=18, fontsize=16, fontweight="bold")
-        axes.set_axis_off()
-        return axes
-
-    def _finish_axes(self, axes, points) -> None:
-        if points.size:
-            mins = points.min(axis=0)
-            maxs = points.max(axis=0)
-            center = (mins + maxs) / 2.0
-            radius = max((maxs - mins).max() / 2.0, 0.5)
-            self._draw_domain_box(axes, mins, maxs)
-            self._draw_flow_direction(axes, mins, maxs)
-            axes.set_xlim(center[0] - radius, center[0] + radius)
-            axes.set_ylim(center[1] - radius, center[1] + radius)
-            axes.set_zlim(center[2] - radius, center[2] + radius)
-        axes.view_init(elev=20, azim=-62)
-        self._show()
-
-    def _draw_domain_box(self, axes, mins: np.ndarray, maxs: np.ndarray) -> None:
-        corners = np.array(
-            [
-                [mins[0], mins[1], mins[2]],
-                [maxs[0], mins[1], mins[2]],
-                [maxs[0], maxs[1], mins[2]],
-                [mins[0], maxs[1], mins[2]],
-                [mins[0], mins[1], maxs[2]],
-                [maxs[0], mins[1], maxs[2]],
-                [maxs[0], maxs[1], maxs[2]],
-                [mins[0], maxs[1], maxs[2]],
-            ],
-            dtype=float,
-        )
-        edges = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]
-        for start, end in edges:
-            axes.plot(
-                corners[[start, end], 0],
-                corners[[start, end], 1],
-                corners[[start, end], 2],
-                color="#1b2a41",
-                linewidth=1.0,
-                alpha=0.42,
-            )
-
-    def _draw_flow_direction(self, axes, mins: np.ndarray, maxs: np.ndarray) -> None:
-        span = np.maximum(maxs - mins, 1e-9)
-        center_y = float((mins[1] + maxs[1]) / 2.0)
-        center_z = float((mins[2] + maxs[2]) / 2.0)
-        arrow_length = float(span[0] * 0.16)
-        inlet_x = float(mins[0] - arrow_length * 1.15)
-        outlet_x = float(maxs[0] + arrow_length * 0.15)
-        axes.quiver(inlet_x, center_y, center_z, arrow_length, 0, 0, color="#1759ff", linewidth=3.0, arrow_length_ratio=0.34)
-        axes.quiver(outlet_x, center_y, center_z, arrow_length, 0, 0, color="#ff1f1f", linewidth=3.0, arrow_length_ratio=0.34)
-        axes.text(inlet_x, center_y, center_z - span[2] * 0.18, "INLET", color="#1759ff", fontsize=10, fontweight="bold")
-        axes.text(outlet_x + arrow_length * 0.8, center_y, center_z - span[2] * 0.18, "OUTLET", color="#ff1f1f", fontsize=10, fontweight="bold")
+        canvas = NativeVtkPreviewWidget(self, background=(1.0, 1.0, 1.0))
+        self._tabs.addTab(canvas, self._tab_title(title))
+        self._tabs.setCurrentWidget(canvas)
+        return canvas
 
     def _show(self) -> None:
-        if self.canvas is not None:
-            self.canvas.draw()
         self.show()
         self.raise_()
         self.activateWindow()
 
     def _export_png(self) -> None:
         current_canvas = self._tabs.currentWidget()
-        if not isinstance(current_canvas, FigureCanvas):
+        if not isinstance(current_canvas, NativeVtkPreviewWidget):
             QMessageBox.information(self, "暂无视图", "当前没有可导出的 3D 视图。")
             return
         current_title = self._tabs.tabText(self._tabs.currentIndex()) or self._last_plot_title
@@ -264,12 +355,7 @@ class VtkViewerDialog(QDialog):
         if not file_path.lower().endswith(".png"):
             file_path = f"{file_path}.png"
         try:
-            current_canvas.figure.savefig(
-                file_path,
-                dpi=180,
-                facecolor=current_canvas.figure.get_facecolor(),
-                bbox_inches="tight",
-            )
+            current_canvas.save_png(Path(file_path))
         except OSError as error:
             QMessageBox.warning(self, "导出失败", f"PNG 导出失败：{error}")
             return
@@ -281,7 +367,7 @@ class VtkViewerDialog(QDialog):
         used_names: set[str] = set()
         for index in range(self._tabs.count()):
             canvas = self._tabs.widget(index)
-            if not isinstance(canvas, FigureCanvas):
+            if not isinstance(canvas, NativeVtkPreviewWidget):
                 continue
             title = self._tabs.tabText(index) or f"3d_view_{index + 1}"
             base_name = self._safe_file_stem(title)
@@ -292,12 +378,7 @@ class VtkViewerDialog(QDialog):
                 suffix += 1
             used_names.add(file_name)
             path = output_dir / file_name
-            canvas.figure.savefig(
-                path,
-                dpi=180,
-                facecolor=canvas.figure.get_facecolor(),
-                bbox_inches="tight",
-            )
+            canvas.save_png(path)
             paths.append(path)
         return paths
 
@@ -326,8 +407,6 @@ class VtkViewerDialog(QDialog):
     def _clear_tabs(self) -> None:
         while self._tabs.count():
             self._close_tab(0)
-        self.figure = None
-        self.canvas = None
 
     def _points(self, poly_data) -> np.ndarray:
         vtk_points = poly_data.GetPoints()
@@ -349,13 +428,6 @@ class VtkViewerDialog(QDialog):
                 faces.append(raw[index : index + count].astype(int))
             index += count
         return np.array(faces, dtype=object)
-
-    def _sample_faces(self, faces: np.ndarray, limit: int = 8000) -> np.ndarray:
-        if len(faces) <= limit:
-            return faces
-        indices = np.linspace(0, len(faces) - 1, limit, dtype=int)
-        return faces[indices]
-
 
 class NativeVtkViewerDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -1378,8 +1450,7 @@ class MainWindow(QMainWindow):
         bnr.addStretch(1)
         layout.addWidget(self._boundary_widget)
 
-        self._geo_preview_fig = Figure(figsize=(6.8, 3.5), facecolor="#1e1e1e", tight_layout=True)
-        self._geo_preview_canvas = FigureCanvas(self._geo_preview_fig)
+        self._geo_preview_canvas = NativeVtkPreviewWidget(wrapper, background=(0.12, 0.12, 0.12))
         self._geo_preview_canvas.setMinimumHeight(380)
         layout.addWidget(self._geo_preview_canvas)
 
@@ -1820,8 +1891,7 @@ class MainWindow(QMainWindow):
         hint.setWordWrap(True)
         preview_hint = QLabel("预览说明：半透明区域为当前计算域，蓝色几何是当前缩放和平移后的 STL 位置。")
         preview_hint.setWordWrap(True)
-        preview_figure = Figure(figsize=(6.8, 3.8), facecolor="#1e1e1e", tight_layout=True)
-        preview_canvas = FigureCanvas(preview_figure)
+        preview_canvas = NativeVtkPreviewWidget(dialog, background=(0.12, 0.12, 0.12))
         preview_canvas.setMinimumHeight(320)
 
         def current_transform() -> StlTransform:
@@ -1832,7 +1902,7 @@ class MainWindow(QMainWindow):
             )
 
         def refresh_preview() -> None:
-            self._draw_stl_transform_preview(preview_figure, preview_canvas, source_path, current_transform(), template)
+            self._draw_stl_transform_preview(preview_canvas, source_path, current_transform(), template)
 
         scale_input.valueChanged.connect(refresh_preview)
         x_input.valueChanged.connect(refresh_preview)
@@ -1863,31 +1933,28 @@ class MainWindow(QMainWindow):
 
     def _draw_stl_transform_preview(
         self,
-        figure: Figure,
-        canvas: FigureCanvas,
+        canvas: NativeVtkPreviewWidget,
         source_path: Path,
         transform: StlTransform,
         template: ComputationDomainTemplate | None = None,
     ) -> None:
-        figure.clear()
-        axes = figure.add_subplot(111, projection="3d", facecolor="#1e1e1e")
-        axes.set_title("STL Placement Preview", color="#d4d4d4", pad=10)
+        canvas.clear((0.12, 0.12, 0.12))
+        points_for_limits: list[np.ndarray] = []
         if template is not None:
-            self._style_domain_preview_axes(axes, template)
-            self._draw_domain_template_wireframe(axes, template)
+            points_for_limits.append(self._draw_domain_template_vtk(canvas, template))
         else:
-            self._draw_unit_domain_wireframe(axes)
+            points_for_limits.append(self._draw_box_domain_vtk(canvas, np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], dtype=float)))
 
         try:
             points, faces = self._read_stl_preview_mesh(source_path)
         except (OSError, ValueError) as error:
-            axes.text2D(0.05, 0.5, f"STL preview failed: {error}", color="#d4d4d4")
-            canvas.draw()
+            canvas.add_message(f"STL preview failed: {error}")
+            canvas.finish(np.vstack(points_for_limits) if points_for_limits else None)
             return
 
         if points.size == 0 or faces.size == 0:
-            axes.text2D(0.05, 0.5, "No STL triangles to preview.", color="#d4d4d4")
-            canvas.draw()
+            canvas.add_message("No STL triangles to preview.")
+            canvas.finish(np.vstack(points_for_limits) if points_for_limits else None)
             return
 
         rotation = self._context.geometry_import_service._rotation_matrix(transform.rotate_degrees)
@@ -1903,35 +1970,14 @@ class MainWindow(QMainWindow):
             ],
             dtype=float,
         )
-        sampled_faces = faces
-        if len(sampled_faces) > 5000:
-            indices = np.linspace(0, len(sampled_faces) - 1, 5000, dtype=int)
-            sampled_faces = sampled_faces[indices]
-        polygons = [transformed_points[np.asarray(face, dtype=int)] for face in sampled_faces]
-        collection = Poly3DCollection(
-            polygons,
-            facecolors=(0.25, 0.74, 1.0, 0.72),
-            edgecolors=(0.03, 0.18, 0.28, 0.45),
-            linewidths=0.25,
+        canvas.add_polydata(
+            self._polydata_from_points_faces(transformed_points, faces),
+            color=(0.25, 0.74, 1.0),
+            opacity=0.72,
+            edge_color=(0.03, 0.18, 0.28),
         )
-        axes.add_collection3d(collection)
-
-        if template is not None:
-            domain_corners = np.array(self._context.project_service.domain_vertices(template), dtype=float)
-            domain_min = domain_corners.min(axis=0)
-            domain_max = domain_corners.max(axis=0)
-        else:
-            domain_min = np.array([0.0, 0.0, 0.0])
-            domain_max = np.array([1.0, 1.0, 1.0])
-        mins = np.minimum(transformed_points.min(axis=0), domain_min)
-        maxs = np.maximum(transformed_points.max(axis=0), domain_max)
-        center = (mins + maxs) / 2.0
-        radius = max(float((maxs - mins).max()) / 2.0, 0.55)
-        axes.set_xlim(center[0] - radius, center[0] + radius)
-        axes.set_ylim(center[1] - radius, center[1] + radius)
-        axes.set_zlim(center[2] - radius, center[2] + radius)
-        axes.view_init(elev=24, azim=-55)
-        canvas.draw()
+        points_for_limits.append(transformed_points)
+        canvas.finish(np.vstack(points_for_limits))
 
     def _read_stl_preview_mesh(self, source_path: Path) -> tuple[np.ndarray, np.ndarray]:
         reader = vtkSTLReader()
@@ -1954,86 +2000,71 @@ class MainWindow(QMainWindow):
             index += count
         return points, np.array(faces, dtype=object)
 
-    def _draw_unit_domain_wireframe(self, axes) -> None:
-        self._draw_domain_wireframe(axes, (1.0, 1.0, 1.0))
+    def _polydata_from_points_faces(self, points: np.ndarray, faces: np.ndarray) -> vtk.vtkPolyData:
+        vtk_points = vtk.vtkPoints()
+        for point in points:
+            vtk_points.InsertNextPoint(float(point[0]), float(point[1]), float(point[2]))
+        cells = vtk.vtkCellArray()
+        for face in faces:
+            ids = np.asarray(face, dtype=int)
+            if len(ids) < 3:
+                continue
+            polygon = vtk.vtkPolygon()
+            polygon.GetPointIds().SetNumberOfIds(len(ids))
+            for index, point_id in enumerate(ids):
+                polygon.GetPointIds().SetId(index, int(point_id))
+            cells.InsertNextCell(polygon)
+        poly_data = vtk.vtkPolyData()
+        poly_data.SetPoints(vtk_points)
+        poly_data.SetPolys(cells)
+        return poly_data
 
-    def _draw_domain_wireframe(self, axes, size: tuple[float, float, float]) -> None:
-        length_x, length_y, length_z = size
-        corners = np.array(
-            [
-                [0, 0, 0],
-                [length_x, 0, 0],
-                [length_x, length_y, 0],
-                [0, length_y, 0],
-                [0, 0, length_z],
-                [length_x, 0, length_z],
-                [length_x, length_y, length_z],
-                [0, length_y, length_z],
-            ],
-            dtype=float,
-        )
-        edges = [
-            (0, 1),
-            (1, 2),
-            (2, 3),
-            (3, 0),
-            (4, 5),
-            (5, 6),
-            (6, 7),
-            (7, 4),
-            (0, 4),
-            (1, 5),
-            (2, 6),
-            (3, 7),
-        ]
-        for start, end in edges:
-            axes.plot(
-                corners[[start, end], 0],
-                corners[[start, end], 1],
-                corners[[start, end], 2],
-                color="#8a8a8a",
-                linewidth=1.2,
-                alpha=0.85,
+    def _grid_surface_polydata(self, x_grid: np.ndarray, y_grid: np.ndarray, z_grid: np.ndarray) -> vtk.vtkPolyData:
+        rows, cols = x_grid.shape
+        points = np.column_stack([x_grid.reshape(-1), y_grid.reshape(-1), z_grid.reshape(-1)])
+        faces = []
+        for row in range(rows - 1):
+            for col in range(cols - 1):
+                p0 = row * cols + col
+                faces.append(np.array([p0, p0 + 1, p0 + cols + 1, p0 + cols], dtype=int))
+        return self._polydata_from_points_faces(points, np.array(faces, dtype=object))
+
+    def _draw_box_domain_vtk(self, canvas: NativeVtkPreviewWidget, corners_or_bounds: np.ndarray) -> np.ndarray:
+        if corners_or_bounds.shape == (2, 3):
+            mins = corners_or_bounds[0]
+            maxs = corners_or_bounds[1]
+            corners = np.array(
+                [
+                    [mins[0], mins[1], mins[2]],
+                    [maxs[0], mins[1], mins[2]],
+                    [maxs[0], maxs[1], mins[2]],
+                    [mins[0], maxs[1], mins[2]],
+                    [mins[0], mins[1], maxs[2]],
+                    [maxs[0], mins[1], maxs[2]],
+                    [maxs[0], maxs[1], maxs[2]],
+                    [mins[0], maxs[1], maxs[2]],
+                ],
+                dtype=float,
             )
-
-    def _draw_domain_template_wireframe(self, axes, template: ComputationDomainTemplate) -> np.ndarray:
-        if template.shape == "pipe":
-            return self._draw_pipe_domain_wireframe(axes, template)
-        if template.shape == "bend":
-            return self._draw_bend_domain_wireframe(axes, template)
-        corners = np.array(self._context.project_service.domain_vertices(template), dtype=float)
-        faces = [
-            [0, 3, 7, 4],
-            [1, 5, 6, 2],
-            [0, 1, 2, 3],
-            [4, 5, 6, 7],
-            [0, 1, 5, 4],
-            [3, 2, 6, 7],
-        ]
-        fc = [
-            (0.537, 0.820, 0.522, 0.30),
-            (0.957, 0.529, 0.443, 0.30),
-            (0.310, 0.757, 1.000, 0.10),
-            (0.310, 0.757, 1.000, 0.10),
-            (0.310, 0.757, 1.000, 0.10),
-            (0.310, 0.757, 1.000, 0.10),
-        ]
-        ec = [
-            (0.537, 0.820, 0.522, 0.55),
-            (0.957, 0.529, 0.443, 0.55),
-            (0.310, 0.757, 1.000, 0.35),
-            (0.310, 0.757, 1.000, 0.35),
-            (0.310, 0.757, 1.000, 0.35),
-            (0.310, 0.757, 1.000, 0.35),
-        ]
-        for face, fac, edg in zip(faces, fc, ec):
-            verts = [corners[i] for i in face]
-            poly = Poly3DCollection([verts], facecolors=[fac], edgecolors=[edg], linewidths=1.2)
-            axes.add_collection3d(poly)
-        axes.text(corners[0,0], corners[0,1], corners[0,2], "inlet", color="#89d185")
-        axes.text(corners[1,0], corners[1,1], corners[1,2], "outlet", color="#f48771")
+        else:
+            corners = np.asarray(corners_or_bounds, dtype=float)
+        faces = [[0, 3, 7, 4], [1, 5, 6, 2], [0, 1, 2, 3], [4, 5, 6, 7], [0, 1, 5, 4], [3, 2, 6, 7]]
+        colors = [(0.54, 0.82, 0.52), (0.96, 0.53, 0.44)] + [(0.31, 0.76, 1.0)] * 4
+        opacities = [0.30, 0.30, 0.10, 0.10, 0.10, 0.10]
+        for face, color, opacity in zip(faces, colors, opacities):
+            canvas.add_polygon(corners[np.asarray(face, dtype=int)], color=color, opacity=opacity, edge_color=color)
+        canvas.add_text("inlet", tuple(corners[0]), color=(0.54, 0.82, 0.52), size=14)
+        canvas.add_text("outlet", tuple(corners[1]), color=(0.96, 0.53, 0.44), size=14)
         return corners
-    def _draw_pipe_domain_wireframe(self, axes, template: ComputationDomainTemplate) -> np.ndarray:
+
+    def _draw_domain_template_vtk(self, canvas: NativeVtkPreviewWidget, template: ComputationDomainTemplate) -> np.ndarray:
+        if template.shape == "pipe":
+            return self._draw_pipe_domain_vtk(canvas, template)
+        if template.shape == "bend":
+            return self._draw_bend_domain_vtk(canvas, template)
+        return self._draw_box_domain_vtk(canvas, np.array(self._context.project_service.domain_vertices(template), dtype=float))
+
+    def _draw_pipe_domain_vtk(self, canvas: NativeVtkPreviewWidget, template: ComputationDomainTemplate) -> np.ndarray:
         length_x, length_y, length_z = template.size
         center_y = length_y / 2.0
         center_z = length_z / 2.0
@@ -2043,40 +2074,20 @@ class MainWindow(QMainWindow):
         theta_grid, x_grid = np.meshgrid(theta, x_values)
         y_grid = center_y + radius * np.cos(theta_grid)
         z_grid = center_z + radius * np.sin(theta_grid)
-        axes.plot_surface(
-            x_grid,
-            y_grid,
-            z_grid,
-            color="#4fc1ff",
-            alpha=0.18,
-            linewidth=0,
-            shade=False,
-        )
-        inlet = np.column_stack(
-            [
-                np.zeros_like(theta),
-                center_y + radius * np.cos(theta),
-                center_z + radius * np.sin(theta),
-            ]
-        )
-        outlet = np.column_stack(
-            [
-                np.full_like(theta, length_x),
-                center_y + radius * np.cos(theta),
-                center_z + radius * np.sin(theta),
-            ]
-        )
-        axes.plot(inlet[:, 0], inlet[:, 1], inlet[:, 2], color="#89d185", linewidth=2.2, alpha=0.95)
-        axes.plot(outlet[:, 0], outlet[:, 1], outlet[:, 2], color="#f48771", linewidth=2.2, alpha=0.95)
+        canvas.add_polydata(self._grid_surface_polydata(x_grid, y_grid, z_grid), color=(0.31, 0.76, 1.0), opacity=0.18, edge_color=None)
+        inlet = np.column_stack([np.zeros_like(theta), center_y + radius * np.cos(theta), center_z + radius * np.sin(theta)])
+        outlet = np.column_stack([np.full_like(theta, length_x), center_y + radius * np.cos(theta), center_z + radius * np.sin(theta)])
+        canvas.add_polyline(inlet, color=(0.54, 0.82, 0.52), width=3.0)
+        canvas.add_polyline(outlet, color=(0.96, 0.53, 0.44), width=3.0)
         for angle in (0, np.pi / 2, np.pi, 3 * np.pi / 2):
             y = center_y + radius * np.cos(angle)
             z = center_z + radius * np.sin(angle)
-            axes.plot([0.0, length_x], [y, y], [z, z], color="#4fc1ff", linewidth=1.4, alpha=0.95)
-        axes.text(0.0, center_y, center_z, "inlet", color="#89d185")
-        axes.text(length_x, center_y, center_z, "outlet", color="#f48771")
+            canvas.add_polyline(np.array([[0.0, y, z], [length_x, y, z]], dtype=float), color=(0.31, 0.76, 1.0), width=1.8)
+        canvas.add_text("inlet", (0.0, center_y, center_z), color=(0.54, 0.82, 0.52), size=14)
+        canvas.add_text("outlet", (length_x, center_y, center_z), color=(0.96, 0.53, 0.44), size=14)
         return np.vstack([inlet, outlet])
 
-    def _draw_bend_domain_wireframe(self, axes, template: ComputationDomainTemplate) -> np.ndarray:
+    def _draw_bend_domain_vtk(self, canvas: NativeVtkPreviewWidget, template: ComputationDomainTemplate) -> np.ndarray:
         length_x, length_y, height = template.size
         inner_radius = min(length_x, length_y) * 0.28
         outer_radius = min(length_x, length_y) * 0.62
@@ -2084,54 +2095,44 @@ class MainWindow(QMainWindow):
         z_values = np.linspace(0.0, height, 8)
         theta_grid, z_grid = np.meshgrid(theta, z_values)
         points: list[np.ndarray] = []
-        for radius, alpha in ((inner_radius, 0.16), (outer_radius, 0.16)):
+        for radius in (inner_radius, outer_radius):
             x_grid = radius * np.cos(theta_grid)
             y_grid = radius * np.sin(theta_grid)
-            axes.plot_surface(
-                x_grid,
-                y_grid,
-                z_grid,
-                color="#4fc1ff",
-                alpha=alpha,
-                linewidth=0,
-                shade=False,
-            )
+            canvas.add_polydata(self._grid_surface_polydata(x_grid, y_grid, z_grid), color=(0.31, 0.76, 1.0), opacity=0.16, edge_color=None)
         for radius in (inner_radius, outer_radius):
             for z_value in (0.0, height):
-                curve = np.column_stack(
-                    [
-                        radius * np.cos(theta),
-                        radius * np.sin(theta),
-                        np.full_like(theta, z_value),
-                    ]
-                )
-                axes.plot(curve[:, 0], curve[:, 1], curve[:, 2], color="#4fc1ff", linewidth=1.4, alpha=0.95)
+                curve = np.column_stack([radius * np.cos(theta), radius * np.sin(theta), np.full_like(theta, z_value)])
+                canvas.add_polyline(curve, color=(0.31, 0.76, 1.0), width=1.8)
                 points.append(curve)
         for angle in (0.0, np.pi / 2.0):
+            color = (0.54, 0.82, 0.52) if angle == 0.0 else (0.96, 0.53, 0.44)
             for z_value in (0.0, height):
-                axes.plot(
-                    [inner_radius * np.cos(angle), outer_radius * np.cos(angle)],
-                    [inner_radius * np.sin(angle), outer_radius * np.sin(angle)],
-                    [z_value, z_value],
-                    color="#89d185" if angle == 0.0 else "#f48771",
-                    linewidth=2.0,
-                    alpha=0.95,
+                canvas.add_polyline(
+                    np.array(
+                        [
+                            [inner_radius * np.cos(angle), inner_radius * np.sin(angle), z_value],
+                            [outer_radius * np.cos(angle), outer_radius * np.sin(angle), z_value],
+                        ],
+                        dtype=float,
+                    ),
+                    color=color,
+                    width=2.4,
                 )
             for radius in (inner_radius, outer_radius):
-                axes.plot(
-                    [radius * np.cos(angle), radius * np.cos(angle)],
-                    [radius * np.sin(angle), radius * np.sin(angle)],
-                    [0.0, height],
-                    color="#89d185" if angle == 0.0 else "#f48771",
-                    linewidth=2.0,
-                    alpha=0.95,
+                canvas.add_polyline(
+                    np.array(
+                        [
+                            [radius * np.cos(angle), radius * np.sin(angle), 0.0],
+                            [radius * np.cos(angle), radius * np.sin(angle), height],
+                        ],
+                        dtype=float,
+                    ),
+                    color=color,
+                    width=2.4,
                 )
-        axes.text((inner_radius + outer_radius) / 2.0, 0.0, height / 2.0, "inlet", color="#89d185")
-        axes.text(0.0, (inner_radius + outer_radius) / 2.0, height / 2.0, "outlet", color="#f48771")
+        canvas.add_text("inlet", ((inner_radius + outer_radius) / 2.0, 0.0, height / 2.0), color=(0.54, 0.82, 0.52), size=14)
+        canvas.add_text("outlet", (0.0, (inner_radius + outer_radius) / 2.0, height / 2.0), color=(0.96, 0.53, 0.44), size=14)
         return np.vstack(points)
-
-    def _style_domain_preview_axes(self, axes, template: ComputationDomainTemplate) -> None:
-        axes.set_axis_off()
 
     def _open_domain_preview_dialog(self):
         template = self._selected_domain_template() if self._current_project is not None else self._context.project_service.domain_templates()[0]
@@ -2141,13 +2142,9 @@ class MainWindow(QMainWindow):
         dialog.setMinimumSize(600, 450)
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(0, 0, 0, 0)
-        figure = Figure(figsize=(10, 8), facecolor="#1e1e1e", tight_layout=True)
-        canvas = FigureCanvas(figure)
+        canvas = NativeVtkPreviewWidget(dialog, background=(0.12, 0.12, 0.12))
         layout.addWidget(canvas)
-        axes = figure.add_subplot(111, projection="3d", facecolor="#1e1e1e")
-        axes.set_title("Domain and STL Preview", color="#d4d4d4", pad=10)
-        self._style_domain_preview_axes(axes, template)
-        domain_points = self._draw_domain_template_wireframe(axes, template)
+        domain_points = self._draw_domain_template_vtk(canvas, template)
         points_for_limits = [domain_points]
         if self._current_project is not None:
             for asset in self._context.geometry_import_service.list_assets(self._current_project):
@@ -2159,24 +2156,14 @@ class MainWindow(QMainWindow):
                     continue
                 if points.size == 0 or faces.size == 0:
                     continue
-                sampled = faces
-                if len(sampled) > 5000:
-                    idx = np.linspace(0, len(sampled) - 1, 5000, dtype=int)
-                    sampled = sampled[idx]
-                polygons = [points[np.asarray(f, dtype=int)] for f in sampled]
-                coll = Poly3DCollection(polygons, facecolors=(0.25, 0.74, 1.0, 0.42), edgecolors=(0.03, 0.18, 0.28, 0.35), linewidths=0.2)
-                axes.add_collection3d(coll)
+                canvas.add_polydata(
+                    self._polydata_from_points_faces(points, faces),
+                    color=(0.25, 0.74, 1.0),
+                    opacity=0.42,
+                    edge_color=(0.03, 0.18, 0.28),
+                )
                 points_for_limits.append(points)
-        all_pts = np.vstack(points_for_limits)
-        mins = all_pts.min(axis=0)
-        maxs = all_pts.max(axis=0)
-        center = (mins + maxs) / 2.0
-        radius = max(float((maxs - mins).max()) / 2.0, 0.55)
-        axes.set_xlim(center[0] - radius, center[0] + radius)
-        axes.set_ylim(center[1] - radius, center[1] + radius)
-        axes.set_zlim(center[2] - radius, center[2] + radius)
-        axes.view_init(elev=24, azim=-55)
-        canvas.draw()
+        canvas.finish(np.vstack(points_for_limits))
         dialog.exec()
 
 
@@ -2643,17 +2630,14 @@ class MainWindow(QMainWindow):
 
 
     def _refresh_domain_preview(self) -> None:
-        if not hasattr(self, "_domain_preview_figure") or not hasattr(self, "_domain_preview_canvas"):
+        if not hasattr(self, "_domain_preview_canvas"):
             return
-        if hasattr(self, "_domain_preview_axes"):
-            self._domain_preview_axes.remove()
-        self._domain_preview_axes = self._domain_preview_figure.add_subplot(111, projection="3d", facecolor="#1e1e1e")
-        axes = self._domain_preview_axes
-        axes.set_title("Domain and STL Position Preview", color="#d4d4d4", pad=10)
-
+        canvas = self._domain_preview_canvas
+        if not isinstance(canvas, NativeVtkPreviewWidget):
+            return
+        canvas.clear((0.12, 0.12, 0.12))
         template = self._selected_domain_template()
-        self._style_domain_preview_axes(axes, template)
-        domain_points = self._draw_domain_template_wireframe(axes, template)
+        domain_points = self._draw_domain_template_vtk(canvas, template)
         points_for_limits = [domain_points]
         if self._current_project is not None:
             for asset in self._context.geometry_import_service.list_assets(self._current_project):
@@ -2665,32 +2649,17 @@ class MainWindow(QMainWindow):
                     continue
                 if points.size == 0 or faces.size == 0:
                     continue
-                sampled_faces = faces
-                if len(sampled_faces) > 3000:
-                    indices = np.linspace(0, len(sampled_faces) - 1, 3000, dtype=int)
-                    sampled_faces = sampled_faces[indices]
-                polygons = [points[np.asarray(face, dtype=int)] for face in sampled_faces]
-                collection = Poly3DCollection(
-                    polygons,
-                    facecolors=(0.25, 0.74, 1.0, 0.42),
-                    edgecolors=(0.03, 0.18, 0.28, 0.35),
-                    linewidths=0.2,
+                canvas.add_polydata(
+                    self._polydata_from_points_faces(points, faces),
+                    color=(0.25, 0.74, 1.0),
+                    opacity=0.42,
+                    edge_color=(0.03, 0.18, 0.28),
                 )
-                axes.add_collection3d(collection)
                 points_for_limits.append(points)
         else:
-            axes.text2D(0.05, 0.9, "Select a project first.", color="#d4d4d4")
+            canvas.add_message("Select a project first.")
 
-        all_points = np.vstack(points_for_limits)
-        mins = all_points.min(axis=0)
-        maxs = all_points.max(axis=0)
-        center = (mins + maxs) / 2.0
-        radius = max(float((maxs - mins).max()) / 2.0, 0.55)
-        axes.set_xlim(center[0] - radius, center[0] + radius)
-        axes.set_ylim(center[1] - radius, center[1] + radius)
-        axes.set_zlim(center[2] - radius, center[2] + radius)
-        axes.view_init(elev=24, azim=-55)
-        self._domain_preview_canvas.draw()
+        canvas.finish(np.vstack(points_for_limits))
 
     def _current_domain_template(self) -> ComputationDomainTemplate:
         if self._current_project is not None:
@@ -5312,8 +5281,9 @@ boundaryField
         self._persist_draw_geometry_state()
 
 
-    def _draw_edge_in_preview(self, axes, verts, etype, start, end, interp_str):
-        if start >= len(verts) or end >= len(verts): return
+    def _edge_preview_points(self, verts, etype, start, end, interp_str) -> np.ndarray:
+        if start >= len(verts) or end >= len(verts):
+            return np.empty((0, 3), dtype=float)
         p0 = np.array(verts[start]); p1 = np.array(verts[end])
         try: coords = [float(v) for v in interp_str.split()]
         except ValueError: coords = []
@@ -5322,7 +5292,7 @@ boundaryField
             mid = (p0+p1)/2.0; offset = interp - mid
             t = np.linspace(0,1,60)
             pts = (1-t)[:,None]*p0 + t[:,None]*p1 + np.sin(t*np.pi)[:,None]*offset
-            axes.plot(pts[:,0],pts[:,1],pts[:,2], color="#4fc1ff", linewidth=1.4, alpha=0.9)
+            return pts
         elif etype in ("spline","polyLine","BSpline") and len(coords) >= 3:
             ctrl = [p0]
             for k in range(len(coords)//3):
@@ -5332,16 +5302,12 @@ boundaryField
             import math
             for k in range(n+1):
                 pts += math.comb(n,k) * (t**k)[:,None] * ((1-t)**(n-k))[:,None] * ctrl[k]
-            axes.plot(pts[:,0],pts[:,1],pts[:,2], color="#4fc1ff", linewidth=1.4, alpha=0.9)
-        else:
-            axes.plot([p0[0],p1[0]],[p0[1],p1[1]],[p0[2],p1[2]], color="#4fc1ff", linewidth=1.4, alpha=0.9)
+            return pts
+        return np.array([p0, p1], dtype=float)
 
     def _refresh_draw_geo_preview(self):
-        if not hasattr(self,"_geo_preview_fig") or not hasattr(self,"_geo_preview_canvas"): return
-        self._geo_preview_fig.clear()
-        axes = self._geo_preview_fig.add_subplot(111, projection="3d", facecolor="#1e1e1e")
-        self._render_draw_geometry_preview_axes(axes)
-        self._geo_preview_canvas.draw()
+        if not hasattr(self,"_geo_preview_canvas"): return
+        self._render_draw_geometry_preview_vtk(self._geo_preview_canvas)
 
     def _open_draw_geometry_preview_dialog(self) -> None:
         self._save_current_object()
@@ -5352,11 +5318,9 @@ boundaryField
         layout.setContentsMargins(10, 10, 10, 10)
         hint = QLabel("放大预览只用于查看当前绘制几何，不会修改 blockMeshDict、STL 或仿真参数。")
         hint.setWordWrap(True)
-        figure = Figure(figsize=(10, 7.2), facecolor="#1e1e1e", tight_layout=True)
-        canvas = FigureCanvas(figure)
+        canvas = NativeVtkPreviewWidget(dialog, background=(0.12, 0.12, 0.12))
         canvas.setMinimumHeight(680)
-        axes = figure.add_subplot(111, projection="3d", facecolor="#1e1e1e")
-        self._render_draw_geometry_preview_axes(axes)
+        self._render_draw_geometry_preview_vtk(canvas)
         layout.addWidget(hint)
         layout.addWidget(canvas, 1)
         button_row = QHBoxLayout()
@@ -5365,13 +5329,13 @@ boundaryField
         close_button.clicked.connect(dialog.close)
         button_row.addWidget(close_button)
         layout.addLayout(button_row)
-        canvas.draw()
         dialog.exec()
 
-    def _render_draw_geometry_preview_axes(self, axes) -> None:
-        axes.set_title("Geometry Preview", color="#d4d4d4", pad=10)
-        axes.set_axis_off()
+    def _render_draw_geometry_preview_vtk(self, canvas: NativeVtkPreviewWidget) -> None:
+        canvas.clear((0.12, 0.12, 0.12))
         if not self._geo_objects:
+            canvas.add_message("No geometry to preview.")
+            canvas.finish()
             return
 
         all_pts = []
@@ -5384,45 +5348,43 @@ boundaryField
             is_active = (oi == self._active_obj_idx)
 
             if is_domain:
-                axes.scatter(corners[:,0],corners[:,1],corners[:,2], c="#ff9944", s=30, alpha=0.9)
                 for i,v in enumerate(verts):
-                    axes.text(v[0],v[1],v[2], str(i), color="#ff9944", fontsize=8)
+                    canvas.add_text(str(i), tuple(v), color=(1.0, 0.6, 0.27), size=12)
                 for edef in obj.get("edges",[]):
-                    self._draw_edge_in_preview(axes, verts, edef[0],edef[1],edef[2],edef[3])
+                    canvas.add_polyline(
+                        self._edge_preview_points(verts, edef[0],edef[1],edef[2],edef[3]),
+                        color=(0.31, 0.76, 1.0),
+                        width=2.0,
+                        opacity=0.95,
+                    )
                 bv = obj.get("block_v",[0,1,2,3,4,5,6,7])
                 if all(v < len(verts) for v in bv):
                     faces = [[0,3,7,4],[1,5,6,2],[0,1,2,3],[4,5,6,7],[0,1,5,4],[3,2,6,7]]
-                    fc = [(0.537,0.820,0.522,0.25),(0.957,0.529,0.443,0.25)] + [(0.310,0.757,1.000,0.08)]*4
-                    ec = [(0.537,0.820,0.522,0.50),(0.957,0.529,0.443,0.50)] + [(0.310,0.757,1.000,0.30)]*4
-                    for face,fcol,ecol in zip(faces,fc,ec):
-                        vs = [corners[bv[i]] for i in face]
-                        axes.add_collection3d(Poly3DCollection([vs], facecolors=[fcol], edgecolors=[ecol], linewidths=1.2))
-                    axes.text(corners[bv[0],0],corners[bv[0],1],corners[bv[0],2], "inlet", color="#89d185")
-                    axes.text(corners[bv[1],0],corners[bv[1],1],corners[bv[1],2], "outlet", color="#f48771")
+                    fc = [(0.537,0.820,0.522),(0.957,0.529,0.443)] + [(0.310,0.757,1.000)]*4
+                    alpha = [0.25, 0.25] + [0.08] * 4
+                    for face,fcol,opacity in zip(faces,fc,alpha):
+                        vs = np.array([corners[bv[i]] for i in face], dtype=float)
+                        canvas.add_polygon(vs, color=fcol, opacity=opacity, edge_color=fcol)
+                    canvas.add_text("inlet", tuple(corners[bv[0]]), color=(0.54, 0.82, 0.52), size=14)
+                    canvas.add_text("outlet", tuple(corners[bv[1]]), color=(0.96, 0.53, 0.44), size=14)
             else:
-                alpha = 0.65 if is_active else 0.35
                 ec = (1.0,0.6,0.2,0.9) if is_active else (0.5,0.5,0.5,0.6)
                 fc = (1.0,0.6,0.2,0.30) if is_active else (0.5,0.5,0.5,0.15)
                 if len(verts) >= 8:
                     esc = [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)]
                     for s,e in esc:
                         if s<len(verts) and e<len(verts):
-                            axes.plot([corners[s,0],corners[e,0]],[corners[s,1],corners[e,1]],[corners[s,2],corners[e,2]], color=ec, linewidth=1.5, alpha=0.9)
+                            canvas.add_polyline(corners[[s,e]], color=ec[:3], width=2.0, opacity=ec[3])
                     faces = [[0,3,7,4],[1,5,6,2],[0,1,2,3],[4,5,6,7],[0,1,5,4],[3,2,6,7]]
                     for face in faces:
                         if all(v<len(verts) for v in face):
-                            vs = [corners[v] for v in face]
-                            axes.add_collection3d(Poly3DCollection([vs], facecolors=[fc], edgecolors=[ec], linewidths=1.0))
+                            vs = np.array([corners[v] for v in face], dtype=float)
+                            canvas.add_polygon(vs, color=fc[:3], opacity=fc[3], edge_color=ec[:3])
 
         if all_pts:
-            ap = np.vstack(all_pts)
-            mn = ap.min(axis=0); mx = ap.max(axis=0)
-            ct = (mn+mx)/2.0
-            rad = max(float((mx-mn).max())/2.0, 0.55)
-            axes.set_xlim(ct[0]-rad, ct[0]+rad)
-            axes.set_ylim(ct[1]-rad, ct[1]+rad)
-            axes.set_zlim(ct[2]-rad, ct[2]+rad)
-        axes.view_init(elev=24, azim=-55)
+            canvas.finish(np.vstack(all_pts))
+        else:
+            canvas.finish()
 
     def _apply_draw_geometry(self):
         if self._current_project is None:
