@@ -4813,79 +4813,92 @@ class MainWindow(QMainWindow):
         color_range: tuple[float, float],
     ) -> None:
         if mode.startswith("Surface"):
-            if storage != "point":
-                self._show_error(f"{display_name} 当前是单元字段，Surface v1 先支持点字段。后续会增加单元字段转点字段。")
+            try:
+                output, field_array = self._ensure_point_field(output, field_array, storage)
+            except RuntimeError as error:
+                self._show_error(str(error))
                 return
-            self._ensure_vtk_viewer()
-            face_count = self._vtk_viewer.plot_field_surface(output, field_array, color_range, display_name)
+            self._ensure_native_vtk_viewer()
+            self._native_vtk_viewer.plot_surface(output, field_array, color_range, display_name)
+            face_count = output.GetNumberOfPolys()
             self._finish_result_visualization(
-                f"Surface 表面云图已加载到 3D 窗口：field={display_name}, time={selected_time}, faces={face_count}, range={color_range}"
+                f"Surface 表面云图已加载到原生 VTK 3D 窗口：field={display_name}, time={selected_time}, faces={face_count}, range={color_range}"
             )
             return
         if mode.startswith("Contour"):
-            self._ensure_vtk_viewer()
-            vector_array = output.GetPointData().GetArray("U")
+            vector_output, vector_array = self._point_vector_field(output, "U")
             if vector_array is None:
                 self._show_error("Contour 等值线当前先支持速度 U 的 |U| 等值线。请先确认当前 Case 输出了 U。")
                 return
             axis = self._result_slice_axis_combo.currentText().strip()
             position = self._result_slice_position_input.value()
-            point_count, resolved_axis, center, speed_range = self._vtk_viewer.plot_velocity_contour_lines(
-                output,
+            speed_range = self._vector_magnitude_range(vector_array)
+            self._ensure_native_vtk_viewer()
+            resolved_axis, center = self._native_vtk_viewer.plot_contour(
+                vector_output,
                 vector_array,
+                speed_range,
+                "mag(U)",
                 None if axis == "自动" else axis,
                 position,
             )
             self._finish_result_visualization(
-                f"Contour 等值线已加载到 3D 窗口：time={selected_time}, axis={resolved_axis}, center={center:.6g}, points={point_count}, speedRange={speed_range}"
+                f"Contour 等值线已加载到原生 VTK 3D 窗口：time={selected_time}, axis={resolved_axis}, center={center:.6g}, speedRange={speed_range}"
             )
             return
         if mode.startswith("Iso-surface"):
-            if storage != "point":
-                self._show_error(f"{display_name} 当前是单元字段，Iso-surface v1 先支持点字段。")
+            try:
+                output, field_array = self._ensure_point_field(output, field_array, storage)
+            except RuntimeError as error:
+                self._show_error(str(error))
                 return
-            self._ensure_vtk_viewer()
-            face_count, resolved_range = self._vtk_viewer.plot_field_iso_surface(
+            self._ensure_native_vtk_viewer()
+            self._native_vtk_viewer.plot_iso_surface(
                 output,
                 field_array,
                 color_range,
                 display_name,
             )
             self._finish_result_visualization(
-                f"Iso-surface 等值面已加载到 3D 窗口：field={display_name}, time={selected_time}, faces={face_count}, range={resolved_range}"
+                f"Iso-surface 等值面已加载到原生 VTK 3D 窗口：field={display_name}, time={selected_time}, range={color_range}"
             )
             return
         if mode.startswith("Vector") or mode.startswith("Glyph"):
-            vector_array = output.GetPointData().GetArray("U")
+            output, vector_array = self._point_vector_field(output, "U")
             if vector_array is None:
                 self._show_error("矢量箭头/Glyph 当前需要点字段 U。请先确认当前 Case 输出了 U。")
                 return
-            self._ensure_vtk_viewer()
-            point_count, speed_range = self._vtk_viewer.plot_velocity_vectors(output, vector_array)
+            self._ensure_native_vtk_viewer()
+            self._native_vtk_viewer.plot_vectors(output, vector_array)
+            point_count = min(output.GetNumberOfPoints(), 900)
+            speed_range = self._vector_magnitude_range(vector_array)
             self._finish_result_visualization(
-                f"{mode} 已加载到 3D 窗口：time={selected_time}, arrows={point_count}, speedRange={speed_range}"
+                f"{mode} 已加载到原生 VTK 3D 窗口：time={selected_time}, arrows≈{point_count}, speedRange={speed_range}"
             )
             return
         if mode.startswith("Slice"):
-            self._ensure_vtk_viewer()
-            vector_array = output.GetPointData().GetArray("U")
+            output, vector_array = self._point_vector_field(output, "U")
             if vector_array is None:
                 self._show_error("切片当前先支持速度 U 的 |U| 切片。请先确认当前 Case 输出了 U。")
                 return
             axis = self._result_slice_axis_combo.currentText().strip()
             position = self._result_slice_position_input.value()
-            point_count, resolved_axis, center, speed_range = self._vtk_viewer.plot_velocity_slice_contour(
+            speed_range = self._vector_magnitude_range(vector_array)
+            self._ensure_native_vtk_viewer()
+            resolved_axis, center = self._native_vtk_viewer.plot_slice(
                 output,
                 vector_array,
+                speed_range,
+                "mag(U)",
                 None if axis == "自动" else axis,
                 position,
             )
             self._finish_result_visualization(
-                f"Slice 切片已加载到 3D 窗口：time={selected_time}, axis={resolved_axis}, center={center:.6g}, points={point_count}, speedRange={speed_range}"
+                f"Slice 切片已加载到原生 VTK 3D 窗口：time={selected_time}, axis={resolved_axis}, center={center:.6g}, speedRange={speed_range}"
             )
             return
         if mode.startswith("Streamline"):
-            vector_array = output.GetPointData().GetArray("U")
+            output, vector_array = self._point_vector_field(output, "U")
             if vector_array is None:
                 self._show_error("流线当前需要点字段 U。请先确认当前 Case 输出了 U。")
                 return
@@ -4894,27 +4907,65 @@ class MainWindow(QMainWindow):
             except RuntimeError as error:
                 self._show_error(f"生成流线失败：{error}")
                 return
-            self._ensure_vtk_viewer()
-            line_count, point_count, _axis, resolved_range = self._vtk_viewer.plot_velocity_streamlines(
+            self._ensure_native_vtk_viewer()
+            self._native_vtk_viewer.plot_streamlines(
                 output,
                 streamline_output,
-                main_axis,
                 speed_range,
             )
+            line_count = streamline_output.GetNumberOfLines()
+            point_count = streamline_output.GetNumberOfPoints()
             self._finish_result_visualization(
-                f"Streamline 流线已加载到 3D 窗口：time={selected_time}, mainAxis={main_axis}, seeds={seed_count}, lines={line_count}, points={point_count}, speedRange={resolved_range}"
+                f"Streamline 流线已加载到原生 VTK 3D 窗口：time={selected_time}, mainAxis={main_axis}, seeds={seed_count}, lines={line_count}, points={point_count}, speedRange={speed_range}"
             )
             return
 
         self._show_error(f"{mode} 已放入界面结构，但 VTK 专项实现还未接入。")
 
+    def _ensure_point_field(self, output, field_array, storage: str):
+        if storage == "point":
+            return output, field_array
+        array_name = field_array.GetName()
+        converter = vtk.vtkCellDataToPointData()
+        converter.SetInputData(output)
+        converter.PassCellDataOn()
+        converter.Update()
+        converted_output = converter.GetOutput()
+        converted_array = converted_output.GetPointData().GetArray(array_name)
+        if converted_array is None:
+            raise RuntimeError(f"{array_name} 当前是单元字段，转换为点字段失败。")
+        return converted_output, converted_array
+
+    def _point_vector_field(self, output, array_name: str):
+        vector_array = output.GetPointData().GetArray(array_name)
+        if vector_array is not None:
+            return output, vector_array
+        cell_vector = output.GetCellData().GetArray(array_name)
+        if cell_vector is None:
+            return output, None
+        return self._ensure_point_field(output, cell_vector, "cell")
+
+    def _vector_magnitude_range(self, vector_array) -> tuple[float, float]:
+        vectors = vtk_to_numpy(vector_array)
+        if vectors.size == 0:
+            return (0.0, 1.0)
+        if vectors.ndim == 1:
+            values = np.abs(vectors.astype(float))
+        else:
+            values = np.linalg.norm(vectors[:, : min(vectors.shape[1], 3)], axis=1)
+        minimum = float(values.min())
+        maximum = float(values.max())
+        if maximum <= minimum:
+            return minimum - 1.0, maximum + 1.0
+        return minimum, maximum
+
     def _configure_result_animation_source(self) -> None:
         if not hasattr(self, "_result_time_combo"):
             return
-        self._ensure_vtk_viewer()
+        self._ensure_native_vtk_viewer()
         frame_count = self._result_time_combo.count()
         if frame_count <= 1:
-            self._vtk_viewer.set_animation_source(0, None)
+            self._native_vtk_viewer.set_animation_source(0, None)
             return
 
         def render_frame(frame_index: int) -> None:
@@ -4926,13 +4977,13 @@ class MainWindow(QMainWindow):
                 output, field_array, display_name, selected_time, storage = self._load_result_field_data()
             except (OSError, RuntimeError, ValueError) as error:
                 self._show_error(f"播放动画失败：{error}")
-                if self._vtk_viewer is not None:
-                    self._vtk_viewer.pause_animation()
+                if self._native_vtk_viewer is not None:
+                    self._native_vtk_viewer.pause_animation()
                 return
             color_range = self._selected_result_color_range(field_array)
             self._render_result_display(output, field_array, display_name, selected_time, storage, mode, color_range)
 
-        self._vtk_viewer.set_animation_source(frame_count, render_frame)
+        self._native_vtk_viewer.set_animation_source(frame_count, render_frame)
 
     def _load_result_field_data(self):
         if self._current_project is None:
