@@ -1,67 +1,39 @@
 from __future__ import annotations
 
-import json
-import shlex
-import re
-from pathlib import Path
-from typing import Callable
-
-import vtk
-import numpy as np
-from matplotlib import colormaps
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from PySide6.QtCore import QPoint, Qt
-from PySide6.QtCore import QProcess, QTimer
+from PySide6.QtCore import Qt
+from PySide6.QtCore import QProcess
 from PySide6.QtGui import QFont
-from vtkmodules.vtkCommonCore import vtkPoints
-from vtkmodules.vtkCommonDataModel import vtkPolyData
-from vtkmodules.vtkCommonMath import vtkRungeKutta4
-from vtkmodules.vtkFiltersFlowPaths import vtkStreamTracer
-from vtkmodules.vtkIOGeometry import vtkSTLReader
-from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 from PySide6.QtWidgets import (
     QComboBox,
-    QCheckBox,
-    QDialog,
-    QDialogButtonBox,
     QDoubleSpinBox,
-    QFileDialog,
     QFontComboBox,
     QFrame,
     QFormLayout,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
-    QApplication,
     QMainWindow,
     QMenu,
     QMenuBar,
-    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
     QSpinBox,
     QTableWidget,
-    QTableWidgetItem,
     QSplitter,
     QStatusBar,
     QTabWidget,
     QTextEdit,
     QTreeWidget,
-    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
-from vtkmodules.util.numpy_support import numpy_to_vtk, vtk_to_numpy
 
 from foamdesk.app.bootstrap import ApplicationContext
 from foamdesk.domain.models import SimulationParameters, SimulationProject
-from foamdesk.services.geometry_import_service import GeometryAsset, SnappyHexMeshSettings, StlTransform
-from foamdesk.services.project_service import BoundaryConditionSettings, ComputationDomainTemplate
-from foamdesk.ui.startup_window import StartupWindow
-from foamdesk.ui.theme import THEMES, build_stylesheet
+from foamdesk.ui.theme import THEMES
 from foamdesk.ui.visualization_widgets import NativeVtkPreviewWidget, NativeVtkViewerDialog, VtkViewerDialog
 from foamdesk.ui.main_window_geometry_logic import GeometryLogicMixin
 from foamdesk.ui.main_window_results_logic import ResultsLogicMixin
@@ -137,14 +109,6 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         "p",
         "T",
         "k",
-        "epsilon",
-        "omega",
-        "nut",
-        "yPlus",
-        "wallShearStress",
-        "vorticity",
-        "Q",
-        "alpha.water",
     ]
     RESULT_FIELD_UNITS = {
         "U": "m/s",
@@ -152,25 +116,45 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         "p": "m2/s2 或 Pa",
         "T": "K",
         "k": "m2/s2",
-        "epsilon": "m2/s3",
-        "omega": "1/s",
-        "nut": "m2/s",
-        "yPlus": "无量纲",
-        "wallShearStress": "Pa 或 m2/s2",
-        "vorticity": "1/s",
-        "Q": "1/s2",
-        "alpha.water": "0-1",
     }
     RESULT_DISPLAY_MODES = [
         "Surface 表面云图",
         "Slice 切片",
         "Contour 等值线",
         "Iso-surface 等值面",
-        "Vector 矢量箭头",
         "Streamline 流线",
-        "Glyph 箭头",
-        "Volume rendering 体渲染",
     ]
+    RESULT_FIELD_DISPLAY_MODES = {
+        "U": [
+            "Surface 表面云图",
+            "Slice 切片",
+            "Streamline 流线",
+        ],
+        "mag(U)": [
+            "Surface 表面云图",
+            "Slice 切片",
+            "Contour 等值线",
+            "Iso-surface 等值面",
+        ],
+        "p": [
+            "Surface 表面云图",
+            "Slice 切片",
+            "Contour 等值线",
+            "Iso-surface 等值面",
+        ],
+        "T": [
+            "Surface 表面云图",
+            "Slice 切片",
+            "Contour 等值线",
+            "Iso-surface 等值面",
+        ],
+        "k": [
+            "Surface 表面云图",
+            "Slice 切片",
+            "Contour 等值线",
+            "Iso-surface 等值面",
+        ],
+    }
 
     def __init__(self, context: ApplicationContext, initial_project: SimulationProject | None = None) -> None:
         super().__init__()
@@ -869,7 +853,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
 
         title = QLabel("结果")
         title.setStyleSheet("font-size: 22px; font-weight: 600;")
-        description = QLabel("当前页面按“结果场选择 + 显示方式选择”组织后处理入口。先接入表面云图、切片、矢量箭头和流线。")
+        description = QLabel("当前页面按“结果场选择 + 显示方式选择”组织后处理入口。先接入表面云图、切片、等值线、等值面和流线。")
         description.setWordWrap(True)
 
         result_data_button = self._make_menu_button(
@@ -918,7 +902,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._result_minmax_label = QLabel("最大/最小值：未刷新")
         refresh_fields_button = QPushButton("刷新字段/时间步")
         refresh_fields_button.clicked.connect(lambda _checked=False: self._refresh_result_field_panel())
-        self._result_field_combo.currentTextChanged.connect(lambda _text: self._update_result_field_metadata())
+        self._result_field_combo.currentTextChanged.connect(lambda _text: self._on_result_field_changed())
         field_row.addWidget(QLabel("变量"))
         field_row.addWidget(self._result_field_combo, 2)
         field_row.addWidget(QLabel("时间步"))
@@ -960,13 +944,14 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         display_row.addWidget(self._result_slice_position_input)
         display_row.addWidget(load_display_button)
         display_hint = QLabel(
-            "已接入：Surface、Slice、Vector、Streamline、Glyph。Contour、Iso-surface、Volume rendering 后续接入 VTK 专项算法。"
+            "已接入：Surface、Slice、Contour、Iso-surface、Streamline。"
         )
         display_hint.setWordWrap(True)
         display_hint.setObjectName("sectionHint")
         display_layout.addWidget(display_title)
         display_layout.addLayout(display_row)
         display_layout.addWidget(display_hint)
+        self._refresh_result_display_modes()
 
         self._results_text = QTextEdit()
         self._results_text.setReadOnly(True)

@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QMessageBox
 from vtkmodules.util.numpy_support import numpy_to_vtk, vtk_to_numpy
 from vtkmodules.vtkCommonCore import vtkPoints
 from vtkmodules.vtkCommonDataModel import vtkPolyData
-from vtkmodules.vtkCommonMath import vtkRungeKutta4
+from vtkmodules.vtkCommonMath import vtkRungeKutta45
 from vtkmodules.vtkFiltersFlowPaths import vtkStreamTracer
 
 from foamdesk.ui.visualization_widgets import NativeVtkViewerDialog, VtkViewerDialog
@@ -207,6 +207,7 @@ class ResultsLogicMixin:
         elif "U" in available:
             self._result_field_combo.setCurrentText("U")
         self._result_field_combo.blockSignals(False)
+        self._refresh_result_display_modes()
 
         times = [f"{time:g}" for time in case_info.time_values]
         self._result_time_combo.addItems(times)
@@ -218,6 +219,25 @@ class ResultsLogicMixin:
             f"fields={sorted(available)}, supported={self.RESULT_FIELDS}, times={times or ['默认']}"
         )
         self._set_status("结果场已刷新。")
+
+    def _on_result_field_changed(self) -> None:
+        self._refresh_result_display_modes()
+        self._update_result_field_metadata()
+
+    def _refresh_result_display_modes(self) -> None:
+        if not hasattr(self, "_result_field_combo") or not hasattr(self, "_result_display_combo"):
+            return
+        field_name = self._result_field_combo.currentText().strip()
+        allowed_modes = self.RESULT_FIELD_DISPLAY_MODES.get(field_name, self.RESULT_DISPLAY_MODES)
+        current_mode = self._result_display_combo.currentText().strip()
+        self._result_display_combo.blockSignals(True)
+        self._result_display_combo.clear()
+        self._result_display_combo.addItems(allowed_modes)
+        if current_mode in allowed_modes:
+            self._result_display_combo.setCurrentText(current_mode)
+        elif allowed_modes:
+            self._result_display_combo.setCurrentIndex(0)
+        self._result_display_combo.blockSignals(False)
 
     def _update_result_field_metadata(self) -> None:
         if not hasattr(self, "_result_field_combo"):
@@ -249,6 +269,11 @@ class ResultsLogicMixin:
             self._show_error("请先新建或打开项目。")
             return
         mode = self._result_display_combo.currentText().strip()
+        field_name = self._result_field_combo.currentText().strip()
+        if mode not in self.RESULT_FIELD_DISPLAY_MODES.get(field_name, []):
+            self._show_error(f"{field_name} 不支持 {mode}。请重新选择显示方式。")
+            self._refresh_result_display_modes()
+            return
         try:
             output, field_array, display_name, selected_time, storage = self._load_result_field_data()
         except (OSError, RuntimeError, ValueError) as error:
@@ -257,7 +282,8 @@ class ResultsLogicMixin:
 
         color_range = self._selected_result_color_range(field_array)
         self._render_result_display(output, field_array, display_name, selected_time, storage, mode, color_range)
-        self._configure_result_animation_source()
+        if not mode.startswith("Streamline"):
+            self._configure_result_animation_source()
 
     def _render_result_display(
         self,
@@ -283,24 +309,24 @@ class ResultsLogicMixin:
             )
             return
         if mode.startswith("Contour"):
-            vector_output, vector_array = self._point_vector_field(output, "U")
-            if vector_array is None:
-                self._show_error("Contour 等值线当前先支持速度 U 的 |U| 等值线。请先确认当前 Case 输出了 U。")
+            try:
+                output, field_array = self._ensure_point_field(output, field_array, storage)
+            except RuntimeError as error:
+                self._show_error(str(error))
                 return
             axis = self._result_slice_axis_combo.currentText().strip()
             position = self._result_slice_position_input.value()
-            speed_range = self._vector_magnitude_range(vector_array)
             self._ensure_native_vtk_viewer()
             resolved_axis, center = self._native_vtk_viewer.plot_contour(
-                vector_output,
-                vector_array,
-                speed_range,
-                "mag(U)",
+                output,
+                field_array,
+                color_range,
+                display_name,
                 None if axis == "自动" else axis,
                 position,
             )
             self._finish_result_visualization(
-                f"Contour 等值线已加载到原生 VTK 3D 窗口：time={selected_time}, axis={resolved_axis}, center={center:.6g}, speedRange={speed_range}"
+                f"Contour 等值线已加载到原生 VTK 3D 窗口：field={display_name}, time={selected_time}, axis={resolved_axis}, center={center:.6g}, range={color_range}"
             )
             return
         if mode.startswith("Iso-surface"):
@@ -320,55 +346,55 @@ class ResultsLogicMixin:
                 f"Iso-surface 等值面已加载到原生 VTK 3D 窗口：field={display_name}, time={selected_time}, range={color_range}"
             )
             return
-        if mode.startswith("Vector") or mode.startswith("Glyph"):
-            output, vector_array = self._point_vector_field(output, "U")
-            if vector_array is None:
-                self._show_error("矢量箭头/Glyph 当前需要点字段 U。请先确认当前 Case 输出了 U。")
-                return
-            self._ensure_native_vtk_viewer()
-            self._native_vtk_viewer.plot_vectors(output, vector_array)
-            point_count = min(output.GetNumberOfPoints(), 900)
-            speed_range = self._vector_magnitude_range(vector_array)
-            self._finish_result_visualization(
-                f"{mode} 已加载到原生 VTK 3D 窗口：time={selected_time}, arrows≈{point_count}, speedRange={speed_range}"
-            )
-            return
         if mode.startswith("Slice"):
-            output, vector_array = self._point_vector_field(output, "U")
-            if vector_array is None:
-                self._show_error("切片当前先支持速度 U 的 |U| 切片。请先确认当前 Case 输出了 U。")
+            try:
+                output, field_array = self._ensure_point_field(output, field_array, storage)
+            except RuntimeError as error:
+                self._show_error(str(error))
                 return
             axis = self._result_slice_axis_combo.currentText().strip()
             position = self._result_slice_position_input.value()
-            speed_range = self._vector_magnitude_range(vector_array)
             self._ensure_native_vtk_viewer()
             resolved_axis, center = self._native_vtk_viewer.plot_slice(
                 output,
-                vector_array,
-                speed_range,
-                "mag(U)",
+                field_array,
+                color_range,
+                display_name,
                 None if axis == "自动" else axis,
                 position,
             )
             self._finish_result_visualization(
-                f"Slice 切片已加载到原生 VTK 3D 窗口：time={selected_time}, axis={resolved_axis}, center={center:.6g}, speedRange={speed_range}"
+                f"Slice 切片已加载到原生 VTK 3D 窗口：field={display_name}, time={selected_time}, axis={resolved_axis}, center={center:.6g}, range={color_range}"
             )
             return
         if mode.startswith("Streamline"):
+            field_name = self._result_field_combo.currentText().strip()
+            if field_name != "U":
+                self._show_error("流线需要速度矢量场 U，不能直接使用 p、T、k 等标量场生成。")
+                self._refresh_result_display_modes()
+                return
             output, vector_array = self._point_vector_field(output, "U")
             if vector_array is None:
                 self._show_error("流线当前需要点字段 U。请先确认当前 Case 输出了 U。")
                 return
             try:
-                streamline_output, main_axis, seed_count, speed_range = self._build_vtk_streamlines(output, vector_array)
-            except RuntimeError as error:
+                stream_input = self._context.openfoam_vtk_service.build_case_output(
+                    self._current_project,
+                    time_value=self._selected_result_time_value(),
+                )
+                streamline_output, main_axis, seed_count, speed_range = self._build_vtk_streamlines(
+                    stream_input,
+                    output,
+                    vector_array,
+                )
+            except (OSError, RuntimeError, ValueError) as error:
                 self._show_error(f"生成流线失败：{error}")
                 return
             self._ensure_native_vtk_viewer()
             self._native_vtk_viewer.plot_streamlines(
                 output,
                 streamline_output,
-                speed_range,
+                color_range if color_range[1] > color_range[0] else speed_range,
             )
             line_count = streamline_output.GetNumberOfLines()
             point_count = streamline_output.GetNumberOfPoints()
@@ -505,13 +531,16 @@ class ResultsLogicMixin:
 
     def _build_vtk_streamlines(
         self,
-        poly_data,
+        stream_input,
+        bounds_poly_data,
         velocity_array,
-        seed_count_limit: int = 24,
-        length_factor: float = 2.5,
-        step_factor: float = 0.02,
+        seed_resolution_x: int = 12,
+        seed_resolution_y: int = 6,
+        margin_ratio: float = 0.08,
+        length_factor: float = 4.0,
+        step_factor: float = 0.01,
     ):
-        vtk_points = poly_data.GetPoints()
+        vtk_points = bounds_poly_data.GetPoints()
         if vtk_points is None:
             points = np.empty((0, 3), dtype=float)
         else:
@@ -532,20 +561,41 @@ class ResultsLogicMixin:
         main_axis = "XYZ"[axis]
         bounds_min = points.min(axis=0)
         bounds_max = points.max(axis=0)
+        spans = bounds_max - bounds_min
         direction_sign = 1.0 if mean_vector[axis] >= 0 else -1.0
-        seed_plane = bounds_min[axis] if direction_sign >= 0 else bounds_max[axis]
-        plane_tolerance = max(float(bounds_max[axis] - bounds_min[axis]) * 0.08, 1e-9)
-        seed_mask = np.abs(points[:, axis] - seed_plane) <= plane_tolerance
-        seed_points = points[seed_mask & usable]
-        seed_count_limit = max(4, min(int(seed_count_limit), 96))
+        domain_size = max(float(spans.max()), 1e-9)
+        inlet_value = bounds_min[axis] if direction_sign >= 0 else bounds_max[axis]
+        seed_plane = inlet_value + direction_sign * max(float(spans[axis]) * 0.015, domain_size * 0.002)
+        cross_axes = [index for index in range(3) if index != axis]
+        seed_resolution_x = max(4, min(int(seed_resolution_x), 40))
+        seed_resolution_y = max(2, min(int(seed_resolution_y), 24))
         length_factor = max(0.5, min(float(length_factor), 10.0))
         step_factor = max(0.002, min(float(step_factor), 0.1))
-        if len(seed_points) == 0:
-            seed_indices = np.argsort(np.abs(points[:, axis] - seed_plane))[:seed_count_limit]
-            seed_points = points[seed_indices]
-        if len(seed_points) > seed_count_limit:
-            indices = np.linspace(0, len(seed_points) - 1, seed_count_limit, dtype=int)
-            seed_points = seed_points[indices]
+
+        seed_axes_values = []
+        for cross_axis, requested_count in zip(cross_axes, (seed_resolution_x, seed_resolution_y), strict=True):
+            span = float(spans[cross_axis])
+            if span <= domain_size * 1e-5:
+                seed_axes_values.append(np.array([(bounds_min[cross_axis] + bounds_max[cross_axis]) * 0.5], dtype=float))
+                continue
+            margin = min(span * max(margin_ratio, 0.0), span * 0.35)
+            seed_axes_values.append(
+                np.linspace(
+                    float(bounds_min[cross_axis] + margin),
+                    float(bounds_max[cross_axis] - margin),
+                    requested_count,
+                    dtype=float,
+                )
+            )
+
+        seed_points = []
+        for first_value in seed_axes_values[0]:
+            for second_value in seed_axes_values[1]:
+                point = np.zeros(3, dtype=float)
+                point[axis] = seed_plane
+                point[cross_axes[0]] = first_value
+                point[cross_axes[1]] = second_value
+                seed_points.append(point)
 
         vtk_seed_points = vtkPoints()
         for point in seed_points:
@@ -553,27 +603,45 @@ class ResultsLogicMixin:
         seed_data = vtkPolyData()
         seed_data.SetPoints(vtk_seed_points)
 
-        domain_size = max(float((bounds_max - bounds_min).max()), 1e-9)
         initial_step = max(domain_size * step_factor, domain_size * 0.002)
         tracer = vtkStreamTracer()
-        tracer.SetInputData(poly_data)
+        tracer.SetInputDataObject(stream_input)
         tracer.SetSourceData(seed_data)
-        tracer.SetIntegrator(vtkRungeKutta4())
+        tracer.SetIntegrator(vtkRungeKutta45())
         tracer.SetIntegrationDirectionToForward()
         tracer.SetMaximumPropagation(domain_size * length_factor)
         tracer.SetInitialIntegrationStep(initial_step)
         tracer.SetMinimumIntegrationStep(max(initial_step * 0.1, domain_size * 0.0002))
         tracer.SetMaximumIntegrationStep(max(initial_step * 2.5, domain_size * 0.005))
+        if hasattr(tracer, "SetMaximumError"):
+            tracer.SetMaximumError(1e-6)
         tracer.SetComputeVorticity(False)
-        tracer.SetInputArrayToProcess(0, 0, 0, 0, "U")
+        tracer.SetInputArrayToProcess(0, 0, 0, vtk.vtkDataObject.FIELD_ASSOCIATION_POINTS, "U")
         tracer.Update()
         streamline_output = tracer.GetOutput()
         if streamline_output.GetNumberOfLines() == 0:
             raise RuntimeError("VTK StreamTracer 没有生成有效流线。")
+        self._add_streamline_speed_array(streamline_output, "U")
         return streamline_output, main_axis, vtk_seed_points.GetNumberOfPoints(), (
             float(speeds[usable].min()),
             float(speeds[usable].max()),
         )
+
+    def _add_streamline_speed_array(self, streamline_output, vector_name: str) -> None:
+        vector_array = streamline_output.GetPointData().GetArray(vector_name)
+        if vector_array is None:
+            return
+        vectors = vtk_to_numpy(vector_array)
+        if vectors.size == 0:
+            return
+        if vectors.ndim == 1:
+            speed_values = np.abs(vectors.astype(float))
+        else:
+            speed_values = np.linalg.norm(vectors[:, : min(vectors.shape[1], 3)], axis=1)
+        speed_array = numpy_to_vtk(speed_values.astype(float), deep=True)
+        speed_array.SetName("U_mag")
+        streamline_output.GetPointData().AddArray(speed_array)
+        streamline_output.GetPointData().SetActiveScalars("U_mag")
 
     def _ensure_vtk_viewer(self) -> None:
         if self._vtk_viewer is None:
@@ -586,6 +654,12 @@ class ResultsLogicMixin:
         if self._native_vtk_viewer is None:
             self._native_vtk_viewer = NativeVtkViewerDialog(self)
             self._native_vtk_viewer.destroyed.connect(self._clear_native_vtk_viewer)
+        if self._current_project is not None:
+            try:
+                assets = self._context.geometry_import_service.list_assets(self._current_project)
+            except (OSError, ValueError):
+                assets = []
+            self._native_vtk_viewer.set_geometry_assets(assets)
         self._native_vtk_viewer.show()
         self._native_vtk_viewer.raise_()
         self._native_vtk_viewer.activateWindow()

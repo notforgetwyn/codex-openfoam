@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
 
-from PySide6.QtCore import QProcess
-from PySide6.QtWidgets import QFileDialog, QInputDialog, QMessageBox, QTreeWidgetItem
+from PySide6.QtCore import QProcess, Qt
+from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox, QTreeWidgetItem
 
 from foamdesk.domain.models import SimulationProject
+from foamdesk.ui.startup_window import StartupWindow
 
 
 class ProjectProcessLogicMixin:
@@ -243,7 +245,7 @@ class ProjectProcessLogicMixin:
                 app.setQuitOnLastWindowClosed(old_quit_on_close)
             return
 
-        new_window = MainWindow(self._context, initial_project=selected_project)
+        new_window = self.__class__(self._context, initial_project=selected_project)
         if app:
             app._foamdesk_main_window = new_window
         new_window.show()

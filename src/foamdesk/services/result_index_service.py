@@ -8,7 +8,7 @@ from foamdesk.domain.models import CaseResultIndex, SimulationProject
 class ResultIndexService:
     """Indexes the first OpenFOAM result artifacts FoamDesk can show."""
 
-    FIELD_FILE_NAMES = {"U", "p", "T", "k", "epsilon", "omega", "nut", "phi"}
+    FIELD_FILE_NAMES = {"U", "p", "T", "k", "phi"}
 
     def index(self, project: SimulationProject) -> CaseResultIndex:
         case_dir = project.case_dir
