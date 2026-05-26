@@ -534,9 +534,9 @@ class ResultsLogicMixin:
         stream_input,
         bounds_poly_data,
         velocity_array,
-        seed_resolution_x: int = 12,
-        seed_resolution_y: int = 6,
-        margin_ratio: float = 0.08,
+        seed_resolution_x: int = 26,
+        seed_resolution_y: int = 14,
+        margin_ratio: float = 0.04,
         length_factor: float = 4.0,
         step_factor: float = 0.01,
     ):
@@ -567,8 +567,8 @@ class ResultsLogicMixin:
         inlet_value = bounds_min[axis] if direction_sign >= 0 else bounds_max[axis]
         seed_plane = inlet_value + direction_sign * max(float(spans[axis]) * 0.015, domain_size * 0.002)
         cross_axes = [index for index in range(3) if index != axis]
-        seed_resolution_x = max(4, min(int(seed_resolution_x), 40))
-        seed_resolution_y = max(2, min(int(seed_resolution_y), 24))
+        seed_resolution_x = max(4, min(int(seed_resolution_x), 48))
+        seed_resolution_y = max(2, min(int(seed_resolution_y), 28))
         length_factor = max(0.5, min(float(length_factor), 10.0))
         step_factor = max(0.002, min(float(step_factor), 0.1))
 

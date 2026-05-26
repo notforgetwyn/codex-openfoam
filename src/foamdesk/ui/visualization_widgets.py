@@ -24,11 +24,36 @@ from vtkmodules.vtkIOGeometry import vtkSTLReader
 from vtkmodules.util.numpy_support import numpy_to_vtk, vtk_to_numpy
 
 
+def _capability_value(capabilities: str, key: str) -> str:
+    for line in capabilities.splitlines():
+        if key.lower() in line.lower():
+            return line.split(":", 1)[-1].strip() if ":" in line else line.strip()
+    return "unknown"
+
+
+def _log_vtk_render_backend(render_window, label: str) -> None:
+    try:
+        capabilities = render_window.ReportCapabilities()
+    except Exception as error:  # noqa: BLE001
+        print(f"[FoamDesk VTK] {label}: render backend unknown ({error})", flush=True)
+        return
+    renderer = _capability_value(capabilities, "OpenGL renderer string")
+    vendor = _capability_value(capabilities, "OpenGL vendor string")
+    version = _capability_value(capabilities, "OpenGL version string")
+    lower_renderer = renderer.lower()
+    mode = "CPU software rendering" if any(token in lower_renderer for token in ("llvmpipe", "softpipe", "software")) else "GPU hardware rendering"
+    print(
+        f"[FoamDesk VTK] {label}: {mode}; renderer={renderer}; vendor={vendor}; OpenGL={version}",
+        flush=True,
+    )
+
+
 class NativeVtkPreviewWidget(QWidget):
     def __init__(self, parent: QWidget | None = None, background: tuple[float, float, float] = (0.12, 0.12, 0.12)) -> None:
         super().__init__(parent)
         self._background = background
         self._interactor_initialized = False
+        self._render_backend_logged = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self._vtk_widget = QVTKRenderWindowInteractor(self)
@@ -166,7 +191,11 @@ class NativeVtkPreviewWidget(QWidget):
         if not self.isVisible() or not self._vtk_widget.isVisible():
             return
         self._initialize_interactor()
-        self._vtk_widget.GetRenderWindow().Render()
+        render_window = self._vtk_widget.GetRenderWindow()
+        render_window.Render()
+        if not self._render_backend_logged:
+            _log_vtk_render_backend(render_window, "preview widget")
+            self._render_backend_logged = True
 
     def save_png(self, path: Path) -> None:
         self.render()
@@ -346,6 +375,7 @@ class NativeVtkViewerDialog(QDialog):
         self.setWindowTitle("FoamDesk Native VTK 视图")
         self.resize(1120, 760)
         self._interactor_initialized = False
+        self._render_backend_logged = False
         self._animation_render_callback: Callable[[int], None] | None = None
         self._animation_frame_count = 0
         self._animation_frame_index = 0
@@ -394,6 +424,7 @@ class NativeVtkViewerDialog(QDialog):
         self._animation_render_callback = None
         self._renderer.RemoveAllViewProps()
         self._interactor_initialized = False
+        self._render_backend_logged = False
         super().closeEvent(event)
 
     def showEvent(self, event) -> None:  # noqa: N802
@@ -591,25 +622,7 @@ class NativeVtkViewerDialog(QDialog):
         value_min, value_max = speed_range
         if value_max <= value_min:
             value_max = value_min + 1.0
-        tube_radius = self._streamline_tube_radius(source_poly_data)
         lookup_table = self._lookup_table((value_min, value_max))
-        tube = vtk.vtkTubeFilter()
-        tube.SetInputData(streamline_poly_data)
-        tube.SetRadius(tube_radius)
-        tube.SetNumberOfSides(8)
-        tube.CappingOn()
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputConnection(tube.GetOutputPort())
-        mapper.SetScalarModeToUsePointFieldData()
-        mapper.SelectColorArray(speed_array_name)
-        mapper.SetScalarRange(value_min, value_max)
-        mapper.SetLookupTable(lookup_table)
-        actor = vtk.vtkActor()
-        actor.SetMapper(mapper)
-        actor.GetProperty().SetInterpolationToPhong()
-        actor.GetProperty().SetSpecular(0.3)
-        actor.GetProperty().SetSpecularPower(18)
-        self._renderer.AddActor(actor)
         self._configure_streamline_particle_animation(streamline_poly_data, source_poly_data)
         self._add_outline(source_poly_data)
         self._add_flow_labels(source_poly_data)
@@ -642,7 +655,11 @@ class NativeVtkViewerDialog(QDialog):
         if not self.isVisible() or not self._vtk_widget.isVisible():
             return
         self._initialize_interactor()
-        self._vtk_widget.GetRenderWindow().Render()
+        render_window = self._vtk_widget.GetRenderWindow()
+        render_window.Render()
+        if not self._render_backend_logged:
+            _log_vtk_render_backend(render_window, "native result viewer")
+            self._render_backend_logged = True
 
     def _lookup_table(self, scalar_range: tuple[float, float]):
         table = vtk.vtkLookupTable()
@@ -812,9 +829,9 @@ class NativeVtkViewerDialog(QDialog):
         particle_poly_data = vtk.vtkPolyData()
         particle_poly_data.SetPoints(particle_points)
         sphere = vtk.vtkSphereSource()
-        sphere.SetRadius(max(self._streamline_tube_radius(source_poly_data) * 2.8, self._bounds_length(source_poly_data) * 0.001))
-        sphere.SetThetaResolution(12)
-        sphere.SetPhiResolution(8)
+        sphere.SetRadius(max(self._streamline_tube_radius(source_poly_data) * 7.2, self._bounds_length(source_poly_data) * 0.003))
+        sphere.SetThetaResolution(14)
+        sphere.SetPhiResolution(10)
         glyph = vtk.vtkGlyph3DMapper()
         glyph.SetInputData(particle_poly_data)
         glyph.SetSourceConnection(sphere.GetOutputPort())
@@ -832,9 +849,8 @@ class NativeVtkViewerDialog(QDialog):
         def render_particles(frame_index: int) -> None:
             phase = (frame_index % frame_count) / frame_count
             particle_points.Reset()
-            for path_index, path in enumerate(paths):
-                path_phase = (phase + (path_index % 11) / 11.0) % 1.0
-                point = self._point_on_streamline_path(path, path_phase)
+            for path in paths:
+                point = self._point_on_streamline_path(path, phase)
                 particle_points.InsertNextPoint(float(point[0]), float(point[1]), float(point[2]))
             particle_points.Modified()
             particle_poly_data.Modified()
@@ -876,7 +892,7 @@ class NativeVtkViewerDialog(QDialog):
                 path = points[ids]
                 if self._path_length(path) > 1e-12:
                     paths.append(path)
-        max_paths = 90
+        max_paths = 300
         if len(paths) <= max_paths:
             return paths
         selected = np.linspace(0, len(paths) - 1, max_paths, dtype=int)
