@@ -98,7 +98,6 @@ class WindowTitleBar(QFrame):
 class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, SettingsPhysicsLogicMixin, ProjectProcessLogicMixin, DrawGeometryLogicMixin, QMainWindow):
     TAB_PROJECT_HOME = 0
     TAB_DRAW_GEOMETRY = 1
-    TAB_MESH_GENERATION = 2
     TAB_SOLVER_PREPARE = 3
     TAB_SOLVER_SELECT = 4
     TAB_PARAMETERS = 5
@@ -346,42 +345,12 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         wrapper = QWidget()
         layout = QVBoxLayout(wrapper)
         layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-
-        title = QLabel("可视化网格生成")
-        title.setStyleSheet("font-size: 22px; font-weight: 600;")
-        description = QLabel(
-            "本页用于查看当前计算域、STL 和网格准备状态。"
-        )
-        description.setWordWrap(True)
-
-        flow = QLabel("流程：绘制几何/导入 STL -> 在求解流程中自动准备网格配置 -> 查看状态和预览")
-        flow.setWordWrap(True)
-
-        button_row = QHBoxLayout()
-        actions = [
-            ("刷新网格状态", self._refresh_mesh_generation_panel),
-            ("打开绘制几何", self._open_draw_geometry_tab),
-            ("预览计算域/STL", self._open_domain_preview_dialog),
-        ]
-        for text, handler in actions:
-            button = QPushButton(text)
-            button.clicked.connect(lambda _checked=False, callback=handler: callback())
-            button_row.addWidget(button)
-        button_row.addStretch(1)
-
-        self._mesh_generation_status = QLabel("网格状态：未刷新")
-        self._mesh_generation_text = QTextEdit()
-        self._mesh_generation_text.setReadOnly(True)
-        self._mesh_generation_text.setMinimumHeight(360)
-        self._mesh_generation_text.setPlainText("请选择项目和 Case 后点击“刷新网格状态”。")
-
-        layout.addWidget(title)
-        layout.addWidget(description)
-        layout.addWidget(flow)
-        layout.addLayout(button_row)
-        layout.addWidget(self._mesh_generation_status)
-        layout.addWidget(self._mesh_generation_text, 1)
+        layout.addStretch(1)
+        label = QLabel('页面正在开发中')
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet('font-size: 24px; color: #9da5b4;')
+        layout.addWidget(label)
+        layout.addStretch(1)
         return wrapper
 
 
