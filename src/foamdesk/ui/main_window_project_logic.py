@@ -60,7 +60,7 @@ class ProjectProcessLogicMixin:
         self._refresh_solver_run_panel()
         self._refresh_results_panel()
         self._refresh_geometry_panel()
-        self._refresh_mesh_generation_panel()
+
         self._refresh_physics_prepare_panel()
         self._refresh_project_home_summary()
         self._restore_project_result_state()
@@ -443,7 +443,7 @@ class ProjectProcessLogicMixin:
             if self._export_solver_metrics():
                 self._plot_residual_curve()
             self._refresh_geometry_panel()
-            self._refresh_mesh_generation_panel()
+    
             self._refresh_results_panel()
             self._refresh_solver_run_panel("一键仿真流水线完成")
             self._set_status("一键仿真流水线完成。")
@@ -453,7 +453,7 @@ class ProjectProcessLogicMixin:
             self._last_diagnostic_summary = "一键前处理完成。\n\n" + summary
             self._problem_text.setPlainText(self._last_diagnostic_summary)
             self._refresh_geometry_panel()
-            self._refresh_mesh_generation_panel()
+    
             self._refresh_results_panel()
             self._refresh_solver_run_panel("一键前处理完成")
             self._set_status("一键前处理完成。")
@@ -462,7 +462,7 @@ class ProjectProcessLogicMixin:
             self._task_text.setPlainText("任务状态：checkMesh 完成")
             self._last_diagnostic_summary = summary
             self._problem_text.setPlainText(summary)
-            self._refresh_mesh_generation_panel()
+    
             self._refresh_results_panel()
             self._refresh_solver_run_panel("checkMesh 完成")
             self._set_status("checkMesh 完成。")
@@ -470,7 +470,7 @@ class ProjectProcessLogicMixin:
             self._task_text.setPlainText("任务状态：snappyHexMesh 完成")
             self._last_diagnostic_summary = "snappyHexMesh 正常完成，没有失败诊断。"
             self._refresh_geometry_panel()
-            self._refresh_mesh_generation_panel()
+    
             self._refresh_results_panel()
             self._refresh_solver_run_panel("snappyHexMesh 完成")
             self._set_status("snappyHexMesh 完成。")
@@ -494,7 +494,7 @@ class ProjectProcessLogicMixin:
                 self._problem_text.setPlainText(self._last_diagnostic_summary)
                 self._bottom_tabs.setCurrentIndex(2)
             self._task_text.setPlainText(f"任务状态：{label}失败，退出码 {exit_code}")
-            self._refresh_mesh_generation_panel()
+    
             self._refresh_solver_run_panel(f"{label}失败，退出码 {exit_code}")
             self._set_status(f"{label}失败，退出码 {exit_code}。")
 

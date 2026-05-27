@@ -6,6 +6,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtCore import QProcess
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QButtonGroup,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -14,12 +16,14 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMenu,
     QMenuBar,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSizePolicy,
     QSpinBox,
@@ -37,7 +41,10 @@ from foamdesk.app.bootstrap import ApplicationContext
 from foamdesk.domain.models import SimulationParameters, SimulationProject
 from foamdesk.ui.theme import THEMES
 from foamdesk.ui.visualization_widgets import NativeVtkPreviewWidget, NativeVtkViewerDialog, VtkViewerDialog
-from foamdesk.ui.main_window_geometry_logic import GeometryLogicMixin
+from foamdesk.ui.main_window_geometry_logic import (
+    BOUNDARY_TYPE_LABELS,
+    GeometryLogicMixin,
+)
 from foamdesk.ui.main_window_results_logic import ResultsLogicMixin
 from foamdesk.ui.main_window_parameters_logic import ParametersLogicMixin
 from foamdesk.ui.main_window_project_logic import ProjectProcessLogicMixin
@@ -98,7 +105,6 @@ class WindowTitleBar(QFrame):
 class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, SettingsPhysicsLogicMixin, ProjectProcessLogicMixin, DrawGeometryLogicMixin, QMainWindow):
     TAB_PROJECT_HOME = 0
     TAB_DRAW_GEOMETRY = 1
-    TAB_MESH_GENERATION = 2
     TAB_SOLVER_PREPARE = 3
     TAB_SOLVER_SELECT = 4
     TAB_PARAMETERS = 5
@@ -348,44 +354,128 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
 
     def _build_mesh_generation_tab(self) -> QWidget:
         wrapper = QWidget()
+
+        self._init_mesh_import_state()
+
+        # ── bottom: VTK 3D view ──
+        vtk_group = QGroupBox("几何预览")
+        vtk_layout = QVBoxLayout(vtk_group)
+        vtk_layout.setContentsMargins(0, 0, 0, 0)
+        self._mesh_grid_vtk = NativeVtkPreviewWidget(wrapper, background=(0.12, 0.12, 0.12))
+        vtk_layout.addWidget(self._mesh_grid_vtk)
+        self._setup_boundary_picker()
+
+        # ── top: scrollable parameter panel ──
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+        scroll_layout.setContentsMargins(16, 16, 16, 16)
+        scroll_layout.setSpacing(12)
+
+        # Group 1 — import & geometry management
+        g1 = QGroupBox("导入与几何管理")
+        g1_layout = QHBoxLayout(g1)
+        import_btn = QPushButton("导入几何")
+        import_btn.clicked.connect(self._import_geometry_file)
+        self._mesh_import_combo = QComboBox()
+        self._mesh_import_combo.setMinimumWidth(160)
+        self._mesh_import_combo.currentIndexChanged.connect(
+            self._on_mesh_import_selection_changed)
+        self._mesh_import_visible_check = QCheckBox("显示几何")
+        self._mesh_import_visible_check.setChecked(True)
+        self._mesh_import_visible_check.toggled.connect(
+            self._on_import_visibility_toggled)
+        self._mesh_import_opacity_check = QCheckBox("半透明")
+        self._mesh_import_opacity_check.toggled.connect(
+            self._on_import_opacity_toggled)
+        clear_btn = QPushButton("清空几何")
+        clear_btn.clicked.connect(self._clear_mesh_imports)
+        g1_layout.addWidget(import_btn)
+        g1_layout.addWidget(QLabel("当前选中:"))
+        g1_layout.addWidget(self._mesh_import_combo, 1)
+        g1_layout.addWidget(self._mesh_import_visible_check)
+        g1_layout.addWidget(self._mesh_import_opacity_check)
+        g1_layout.addWidget(clear_btn)
+        scroll_layout.addWidget(g1)
+
+        # Group 2 — boundary face configuration
+        g2 = QGroupBox("边界面配置")
+        g2_layout = QHBoxLayout(g2)
+        # left: pick controls
+        left_widget = QWidget()
+        left = QVBoxLayout(left_widget)
+        left.setContentsMargins(0, 0, 0, 0)
+        pick_mode_group = QButtonGroup(self)
+        self._boundary_pick_point_rb = QRadioButton("点选面")
+        self._boundary_pick_point_rb.setChecked(True)
+        pick_mode_group.addButton(self._boundary_pick_point_rb)
+        left.addWidget(self._boundary_pick_point_rb)
+        self._boundary_pick_btn = QPushButton("拾取面")
+        self._boundary_pick_btn.clicked.connect(self._toggle_boundary_pick)
+        left.addWidget(self._boundary_pick_btn)
+        cancel_pick_btn = QPushButton("取消选中")
+        cancel_pick_btn.clicked.connect(
+            lambda: self._boundary_pending_cells.clear() or self._redraw_mesh_grid_vtk())
+        left.addWidget(cancel_pick_btn)
+        clear_all_btn = QPushButton("清空所有边界")
+        clear_all_btn.clicked.connect(self._clear_all_boundary_groups)
+        left.addWidget(clear_all_btn)
+        left.addStretch(1)
+        g2_layout.addWidget(left_widget)
+        # right: boundary properties + table
+        right_widget = QWidget()
+        right = QVBoxLayout(right_widget)
+        right.setContentsMargins(0, 0, 0, 0)
+        prop_row = QHBoxLayout()
+        self._boundary_type_combo = QComboBox()
+        for key, label in BOUNDARY_TYPE_LABELS.items():
+            self._boundary_type_combo.addItem(label, key)
+        self._boundary_type_combo.currentIndexChanged.connect(
+            self._on_boundary_type_changed)
+        self._boundary_name_input = QLineEdit()
+        self._boundary_name_input.setPlaceholderText("边界名称（默认同类型）")
+        apply_btn = QPushButton("应用到选中面")
+        apply_btn.clicked.connect(self._apply_boundary_to_selected)
+        prop_row.addWidget(QLabel("类型:"))
+        prop_row.addWidget(self._boundary_type_combo)
+        prop_row.addWidget(QLabel("名称:"))
+        prop_row.addWidget(self._boundary_name_input, 1)
+        prop_row.addWidget(apply_btn)
+        right.addLayout(prop_row)
+        self._boundary_table = QTableWidget(0, 4)
+        self._boundary_table.setHorizontalHeaderLabels(
+            ["边界名称", "边界类型", "面片数量", "操作"])
+        self._boundary_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch)
+        right.addWidget(self._boundary_table)
+        g2_layout.addWidget(right_widget, 1)
+        scroll_layout.addWidget(g2)
+
+        # Groups 3–5 — placeholders
+        for title in ("基础计算域网格（背景网格）",
+                      "模型贴体网格加密", "网格质量约束"):
+            ph = QGroupBox(title)
+            ph_layout = QVBoxLayout(ph)
+            ph_label = QLabel("页面正在开发中")
+            ph_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            ph_label.setStyleSheet("color: #9da5b4; padding: 12px;")
+            ph_layout.addWidget(ph_label)
+            scroll_layout.addWidget(ph)
+
+        scroll_layout.addStretch(1)
+        scroll.setWidget(scroll_widget)
+
+        # ── splitter ──
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.addWidget(scroll)
+        splitter.addWidget(vtk_group)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+
         layout = QVBoxLayout(wrapper)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-
-        title = QLabel("可视化网格生成")
-        title.setStyleSheet("font-size: 22px; font-weight: 600;")
-        description = QLabel(
-            "本页用于查看当前计算域、STL 和网格准备状态。"
-        )
-        description.setWordWrap(True)
-
-        flow = QLabel("流程：绘制几何/导入 STL -> 在求解流程中自动准备网格配置 -> 查看状态和预览")
-        flow.setWordWrap(True)
-
-        button_row = QHBoxLayout()
-        actions = [
-            ("刷新网格状态", self._refresh_mesh_generation_panel),
-            ("打开绘制几何", self._open_draw_geometry_tab),
-            ("预览计算域/STL", self._open_domain_preview_dialog),
-        ]
-        for text, handler in actions:
-            button = QPushButton(text)
-            button.clicked.connect(lambda _checked=False, callback=handler: callback())
-            button_row.addWidget(button)
-        button_row.addStretch(1)
-
-        self._mesh_generation_status = QLabel("网格状态：未刷新")
-        self._mesh_generation_text = QTextEdit()
-        self._mesh_generation_text.setReadOnly(True)
-        self._mesh_generation_text.setMinimumHeight(360)
-        self._mesh_generation_text.setPlainText("请选择项目和 Case 后点击“刷新网格状态”。")
-
-        layout.addWidget(title)
-        layout.addWidget(description)
-        layout.addWidget(flow)
-        layout.addLayout(button_row)
-        layout.addWidget(self._mesh_generation_status)
-        layout.addWidget(self._mesh_generation_text, 1)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(splitter)
         return wrapper
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shlex
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -23,6 +24,40 @@ from foamdesk.domain.models import SimulationParameters
 from foamdesk.services.geometry_import_service import SnappyHexMeshSettings
 from foamdesk.services.project_service import ComputationDomainTemplate
 from foamdesk.ui.visualization_widgets import NativeVtkPreviewWidget
+
+
+@dataclass
+class MeshImportAsset:
+    name: str
+    source_path: Path
+    polydata: object  # vtkPolyData (cached for redraw)
+    visible: bool = True
+    translucent: bool = False
+    color: tuple[float, float, float] = (0.58, 0.62, 0.66)
+
+
+@dataclass
+class BoundaryFaceGroup:
+    name: str
+    boundary_type: str
+    cell_ids: set[int]
+
+
+BOUNDARY_COLORS = {
+    "inlet": (1.0, 0.18, 0.18),
+    "outlet": (0.18, 0.35, 1.0),
+    "wall": (0.52, 0.52, 0.52),
+    "symmetry": (0.16, 0.78, 0.35),
+    "patch": (1.0, 0.85, 0.15),
+}
+
+BOUNDARY_TYPE_LABELS = {
+    "inlet": "速度入口 inlet",
+    "outlet": "压力出口 outlet",
+    "wall": "固壁 wall",
+    "symmetry": "对称面 symmetry",
+    "patch": "计算域外边界 patch",
+}
 
 
 class GeometryLogicMixin:
@@ -180,38 +215,6 @@ class GeometryLogicMixin:
         canvas.add_text("inlet", ((inner_radius + outer_radius) / 2.0, 0.0, height / 2.0), color=(0.54, 0.82, 0.52), size=14)
         canvas.add_text("outlet", (0.0, (inner_radius + outer_radius) / 2.0, height / 2.0), color=(0.96, 0.53, 0.44), size=14)
         return np.vstack(points)
-
-    def _open_domain_preview_dialog(self):
-        template = self._selected_domain_template() if self._current_project is not None else self._context.project_service.domain_templates()[0]
-        dialog = QDialog(self)
-        dialog.setWindowTitle("计算域 3D 预览")
-        dialog.resize(900, 700)
-        dialog.setMinimumSize(600, 450)
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(0, 0, 0, 0)
-        canvas = NativeVtkPreviewWidget(dialog, background=(0.12, 0.12, 0.12))
-        layout.addWidget(canvas)
-        domain_points = self._draw_domain_template_vtk(canvas, template)
-        points_for_limits = [domain_points]
-        if self._current_project is not None:
-            for asset in self._context.geometry_import_service.list_assets(self._current_project):
-                if asset.format.upper() != "STL" or not asset.stored_path.exists():
-                    continue
-                try:
-                    points, faces = self._read_stl_preview_mesh(asset.stored_path)
-                except (OSError, ValueError):
-                    continue
-                if points.size == 0 or faces.size == 0:
-                    continue
-                canvas.add_polydata(
-                    self._polydata_from_points_faces(points, faces),
-                    color=(0.25, 0.74, 1.0),
-                    opacity=0.42,
-                    edge_color=(0.03, 0.18, 0.28),
-                )
-                points_for_limits.append(points)
-        canvas.finish(np.vstack(points_for_limits))
-        dialog.exec()
 
     def _refresh_geometry_panel(self) -> None:
         if not hasattr(self, "_geometry_text"):
@@ -582,77 +585,287 @@ class GeometryLogicMixin:
             f"checkMesh -> {parameters.solver_name}"
         )
 
-    def _refresh_mesh_generation_panel(self) -> None:
-        if not hasattr(self, "_mesh_generation_text"):
-            return
-        if self._current_project is None:
-            self._mesh_generation_status.setText("网格状态：未选择 Case")
-            self._mesh_generation_text.setPlainText("请先新建或打开项目，并选择一个 Case。")
-            return
+    # ── mesh import / Group 1 logic ──────────────────────────
 
-        project = self._current_project
-        case_dir = project.case_dir
-        system_dir = case_dir / "system"
-        mesh_dir = case_dir / "constant" / "polyMesh"
-        tri_surface_dir = case_dir / "constant" / "triSurface"
-        required_files = [
-            system_dir / "blockMeshDict",
-            system_dir / "snappyHexMeshDict",
-        ]
-        lines = [
-            "网格生成状态",
-            "",
-            f"- 项目：{project.name}",
-            f"- Case：{project.case_name}",
-            f"- Case 路径：{case_dir}",
-            "",
-            "1. 输入物检查：",
-        ]
-        for path in required_files:
-            lines.append(f"- {'OK' if path.exists() else '缺失'}：{path.relative_to(case_dir)}")
+    def _init_mesh_import_state(self) -> None:
+        self._mesh_imports: list[MeshImportAsset] = []
+        self._mesh_import_selected_index: int = -1
+        self._boundary_groups: list[BoundaryFaceGroup] = []
+        self._boundary_pending_cells: set[int] = set()
+        self._boundary_pick_active: bool = False
 
-        try:
-            assets = self._context.geometry_import_service.list_assets(project)
-        except (OSError, ValueError) as error:
-            assets = []
-            lines.append(f"- STL 清单读取失败：{error}")
-        if assets:
-            lines.append(f"- STL 数量：{len(assets)}")
-            for asset in assets:
-                lines.append(f"  - {asset.name} -> {asset.stored_path.relative_to(case_dir)}")
-        else:
-            stl_files = sorted(tri_surface_dir.glob("*.stl")) if tri_surface_dir.exists() else []
-            lines.append(f"- STL 文件：{', '.join(path.name for path in stl_files) if stl_files else '暂无'}")
-
-        lines.extend(["", "2. 网格输出："])
-        if mesh_dir.exists():
-            mesh_files = ["points", "faces", "owner", "neighbour", "boundary"]
-            for name in mesh_files:
-                path = mesh_dir / name
-                lines.append(f"- {'OK' if path.exists() else '缺失'}：constant/polyMesh/{name}")
-        else:
-            lines.append("- constant/polyMesh：未生成")
-
-        lines.extend(["", "3. 操作建议："])
-        if not (system_dir / "blockMeshDict").exists():
-            lines.append("- 先进入“绘制几何”生成 blockMeshDict + STL。")
-        elif assets and not (system_dir / "snappyHexMeshDict").exists():
-            lines.append("- 点击“生成 snappyHexMeshDict”。")
-        elif not mesh_dir.exists():
-            lines.append("- 点击“一键生成网格”执行 blockMesh -> snappyHexMesh -> checkMesh。")
-        else:
-            lines.append("- 网格目录已存在，建议点击“运行 checkMesh”查看网格质量。")
-            lines.append("- checkMesh 通过后，再进入“求解器准备”配置 U/p/物性。")
-
-        if self._last_diagnostic_summary and self._last_diagnostic_summary != "暂无诊断。":
-            lines.extend(["", "4. 最近网格/任务诊断：", self._last_diagnostic_summary])
-
-        has_mesh = mesh_dir.exists()
-        has_block = (system_dir / "blockMeshDict").exists()
-        has_snappy = (system_dir / "snappyHexMeshDict").exists()
-        self._mesh_generation_status.setText(
-            f"网格状态：blockMeshDict={'OK' if has_block else '缺失'}，"
-            f"snappyHexMeshDict={'OK' if has_snappy else '缺失'}，"
-            f"polyMesh={'已生成' if has_mesh else '未生成'}"
+    def _import_geometry_file(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "导入 STL 几何",
+            "/home/shihuayue/codex_project/assets/test_geometries",
+            "STL 文件 (*.stl *.STL);;所有文件 (*)",
         )
-        self._mesh_generation_text.setPlainText("\n".join(lines))
+        if not paths:
+            return
+        for fp in paths:
+            source_path = Path(fp)
+            name = source_path.stem
+            reader = vtkSTLReader()
+            reader.SetFileName(str(source_path))
+            reader.Update()
+            polydata = reader.GetOutput()
+            if polydata is None or polydata.GetNumberOfPoints() == 0:
+                continue
+            asset = MeshImportAsset(name=name, source_path=source_path, polydata=polydata)
+            self._mesh_imports.append(asset)
+        self._rebuild_mesh_import_combo()
+        self._redraw_mesh_grid_vtk()
+
+    def _rebuild_mesh_import_combo(self) -> None:
+        combo = self._mesh_import_combo
+        combo.blockSignals(True)
+        combo.clear()
+        for i, asset in enumerate(self._mesh_imports):
+            combo.addItem(asset.name, i)
+        if self._mesh_imports:
+            self._mesh_import_selected_index = len(self._mesh_imports) - 1
+            combo.setCurrentIndex(self._mesh_import_selected_index)
+        else:
+            self._mesh_import_selected_index = -1
+        combo.blockSignals(False)
+
+    def _on_mesh_import_selection_changed(self, _index: int) -> None:
+        data = self._mesh_import_combo.currentData()
+        if data is None:
+            self._mesh_import_selected_index = -1
+            return
+        self._mesh_import_selected_index = int(data)
+        asset = self._mesh_imports[self._mesh_import_selected_index]
+        self._mesh_import_visible_check.blockSignals(True)
+        self._mesh_import_visible_check.setChecked(asset.visible)
+        self._mesh_import_visible_check.blockSignals(False)
+        self._mesh_import_opacity_check.blockSignals(True)
+        self._mesh_import_opacity_check.setChecked(asset.translucent)
+        self._mesh_import_opacity_check.blockSignals(False)
+        self._redraw_mesh_grid_vtk()
+
+    def _on_import_visibility_toggled(self, checked: bool) -> None:
+        if self._mesh_import_selected_index < 0:
+            return
+        self._mesh_imports[self._mesh_import_selected_index].visible = checked
+        self._redraw_mesh_grid_vtk()
+
+    def _on_import_opacity_toggled(self, checked: bool) -> None:
+        if self._mesh_import_selected_index < 0:
+            return
+        self._mesh_imports[self._mesh_import_selected_index].translucent = checked
+        self._redraw_mesh_grid_vtk()
+
+    def _clear_mesh_imports(self) -> None:
+        if self._mesh_import_selected_index < 0:
+            return
+        self._mesh_imports.pop(self._mesh_import_selected_index)
+        self._mesh_import_selected_index = -1
+        self._rebuild_mesh_import_combo()
+        if self._mesh_imports:
+            self._mesh_grid_vtk.clear()
+            self._redraw_mesh_grid_vtk()
+        else:
+            self._mesh_grid_vtk.clear()
+
+    def _redraw_mesh_grid_vtk(self) -> None:
+        canvas = self._mesh_grid_vtk
+        camera = canvas._renderer.GetActiveCamera()
+        has_actors = bool(canvas._renderer.GetActors().GetNumberOfItems())
+        saved = None
+        if has_actors:
+            saved = (
+                camera.GetPosition(),
+                camera.GetFocalPoint(),
+                camera.GetViewUp(),
+                camera.GetViewAngle(),
+            )
+        canvas.clear()
+        for i, asset in enumerate(self._mesh_imports):
+            if not asset.visible:
+                continue
+            opacity = 0.35 if asset.translucent else 0.92
+            if i == self._mesh_import_selected_index:
+                # ── selected geometry: show boundary regions ──
+                has_boundary_data = bool(
+                    self._boundary_groups or self._boundary_pending_cells)
+                if not has_boundary_data:
+                    # no boundaries yet → draw whole polydata
+                    canvas.add_polydata(
+                        asset.polydata, color=(0.25, 0.74, 1.0), opacity=opacity,
+                        edge_color=(0.96, 0.53, 0.12), line_width=1.0,
+                    )
+                else:
+                    all_boundary_cells: set[int] = set()
+                    for group in self._boundary_groups:
+                        boundary_pd = self._extract_boundary_polydata(
+                            asset.polydata, group.cell_ids)
+                        if boundary_pd is not None and boundary_pd.GetNumberOfCells() > 0:
+                            color = BOUNDARY_COLORS.get(
+                                group.boundary_type, (0.7, 0.7, 0.7))
+                            canvas.add_polydata(
+                                boundary_pd, color=color, opacity=opacity)
+                        all_boundary_cells |= group.cell_ids
+                    pending_only = self._boundary_pending_cells - all_boundary_cells
+                    if pending_only:
+                        pending_pd = self._extract_boundary_polydata(
+                            asset.polydata, pending_only)
+                        if pending_pd is not None and pending_pd.GetNumberOfCells() > 0:
+                            canvas.add_polydata(
+                                pending_pd, color=(1.0, 0.6, 0.0), opacity=opacity,
+                                edge_color=(1.0, 0.4, 0.0), line_width=1.2,
+                            )
+                    all_used = all_boundary_cells | self._boundary_pending_cells
+                    total_cells = asset.polydata.GetNumberOfCells()
+                    if len(all_used) < total_cells:
+                        remainder = set(range(total_cells)) - all_used
+                        remainder_pd = self._extract_boundary_polydata(
+                            asset.polydata, remainder)
+                        if remainder_pd is not None and remainder_pd.GetNumberOfCells() > 0:
+                            canvas.add_polydata(
+                                remainder_pd, color=(0.25, 0.74, 1.0), opacity=opacity,
+                                edge_color=(0.96, 0.53, 0.12), line_width=1.0,
+                            )
+            else:
+                canvas.add_polydata(
+                    asset.polydata, color=asset.color, opacity=opacity,
+                )
+        if saved is not None:
+            camera.SetPosition(*saved[0])
+            camera.SetFocalPoint(*saved[1])
+            camera.SetViewUp(*saved[2])
+            camera.SetViewAngle(saved[3])
+            canvas.render()
+        else:
+            canvas.finish()
+
+    # ── boundary face / Group 2 logic ────────────────────────
+
+    def _setup_boundary_picker(self) -> None:
+        canvas = self._mesh_grid_vtk
+        self._cell_picker = vtk.vtkCellPicker()
+        self._cell_picker.SetTolerance(0.01)
+        canvas._interactor.SetPicker(self._cell_picker)
+        self._pick_observer_id = canvas._interactor.AddObserver(
+            "LeftButtonPressEvent", self._on_boundary_pick_event)
+
+    def _on_boundary_pick_event(self, obj, _event) -> None:
+        if not self._boundary_pick_active:
+            return
+        if self._mesh_import_selected_index < 0:
+            return
+        x, y = obj.GetEventPosition()
+        self._cell_picker.Pick(x, y, 0, self._mesh_grid_vtk._renderer)
+        cell_id = self._cell_picker.GetCellId()
+        if cell_id < 0:
+            return
+        asset = self._mesh_imports[self._mesh_import_selected_index]
+        if cell_id >= asset.polydata.GetNumberOfCells():
+            return
+        if cell_id in self._boundary_pending_cells:
+            self._boundary_pending_cells.discard(cell_id)
+        else:
+            self._boundary_pending_cells.add(cell_id)
+        self._redraw_mesh_grid_vtk()
+
+    def _toggle_boundary_pick(self) -> None:
+        self._boundary_pick_active = not self._boundary_pick_active
+        btn = self._boundary_pick_btn
+        if self._boundary_pick_active:
+            btn.setText("拾取中...(再按停止)")
+            btn.setStyleSheet("background: #d9534f; color: #fff; font-weight: bold;")
+            self._set_status("面拾取模式已激活，点击 3D 视图中的几何面片。")
+        else:
+            btn.setText("拾取面")
+            btn.setStyleSheet("")
+            self._set_status("面拾取模式已关闭。")
+
+    def _on_boundary_type_changed(self, _index: int) -> None:
+        btype = self._boundary_type_combo.currentData()
+        if btype and not self._boundary_name_input.text().strip():
+            self._boundary_name_input.setPlaceholderText(f"默认: {btype}")
+
+    def _apply_boundary_to_selected(self) -> None:
+        if not self._boundary_pending_cells:
+            self._show_error("请先在 3D 视图中拾取面片。")
+            return
+        btype = self._boundary_type_combo.currentData()
+        name = self._boundary_name_input.text().strip()
+        if not name:
+            name = btype
+        idx = self._find_boundary_group(name)
+        if idx >= 0:
+            self._boundary_groups[idx].cell_ids |= self._boundary_pending_cells
+        else:
+            self._boundary_groups.append(BoundaryFaceGroup(
+                name=name, boundary_type=btype,
+                cell_ids=set(self._boundary_pending_cells)))
+        self._boundary_pending_cells.clear()
+        self._rebuild_boundary_table()
+        self._redraw_mesh_grid_vtk()
+        self._set_status(f"已将 {len(self._boundary_groups[-1].cell_ids)} 个面片应用到 {name}({btype})。")
+
+    def _find_boundary_group(self, name: str) -> int:
+        for i, group in enumerate(self._boundary_groups):
+            if group.name == name:
+                return i
+        return -1
+
+    def _delete_boundary_group(self, row: int) -> None:
+        if row < 0 or row >= len(self._boundary_groups):
+            return
+        self._boundary_groups.pop(row)
+        self._rebuild_boundary_table()
+        self._redraw_mesh_grid_vtk()
+
+    def _clear_all_boundary_groups(self) -> None:
+        self._boundary_groups.clear()
+        self._boundary_pending_cells.clear()
+        self._rebuild_boundary_table()
+        self._redraw_mesh_grid_vtk()
+        self._set_status("所有边界定义已清空。")
+
+    def _rebuild_boundary_table(self) -> None:
+        table = self._boundary_table
+        table.setRowCount(0)
+        for i, group in enumerate(self._boundary_groups):
+            table.insertRow(i)
+            table.setItem(i, 0, QTableWidgetItem(group.name))
+            table.setItem(i, 1, QTableWidgetItem(
+                BOUNDARY_TYPE_LABELS.get(group.boundary_type, group.boundary_type)))
+            table.setItem(i, 2, QTableWidgetItem(str(len(group.cell_ids))))
+            del_btn = QPushButton("删除")
+            del_btn.clicked.connect(
+                lambda _checked=False, r=i: self._delete_boundary_group(r))
+            table.setCellWidget(i, 3, del_btn)
+
+    def _extract_boundary_polydata(self, source_polydata, cell_ids: set[int]):
+        if not cell_ids:
+            return None
+        try:
+            id_array = vtk.vtkIdTypeArray()
+            id_array.SetNumberOfComponents(1)
+            for cid in sorted(cell_ids):
+                id_array.InsertNextValue(cid)
+            sel_node = vtk.vtkSelectionNode()
+            sel_node.SetFieldType(vtk.vtkSelectionNode.CELL)
+            sel_node.SetContentType(vtk.vtkSelectionNode.INDICES)
+            sel_node.SetSelectionList(id_array)
+            sel = vtk.vtkSelection()
+            sel.AddNode(sel_node)
+            extract = vtk.vtkExtractSelection()
+            extract.SetInputData(0, source_polydata)
+            extract.SetInputData(1, sel)
+            extract.Update()
+            output = extract.GetOutput()
+            if output is None:
+                return None
+            geom_filter = vtk.vtkGeometryFilter()
+            geom_filter.SetInputData(output)
+            geom_filter.Update()
+            result = geom_filter.GetOutput()
+            if result is None or result.GetNumberOfCells() == 0:
+                return None
+            return result
+        except Exception:
+            return None
