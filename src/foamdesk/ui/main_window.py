@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtCore import QProcess
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -343,14 +344,74 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
 
     def _build_mesh_generation_tab(self) -> QWidget:
         wrapper = QWidget()
+
+        self._init_mesh_import_state()
+
+        # ── bottom: VTK 3D view ──
+        vtk_group = QGroupBox("几何预览")
+        vtk_layout = QVBoxLayout(vtk_group)
+        vtk_layout.setContentsMargins(0, 0, 0, 0)
+        self._mesh_grid_vtk = NativeVtkPreviewWidget(wrapper, background=(0.12, 0.12, 0.12))
+        vtk_layout.addWidget(self._mesh_grid_vtk)
+
+        # ── top: scrollable parameter panel ──
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+        scroll_layout.setContentsMargins(16, 16, 16, 16)
+        scroll_layout.setSpacing(12)
+
+        # Group 1 — import & geometry management
+        g1 = QGroupBox("导入与几何管理")
+        g1_layout = QHBoxLayout(g1)
+        import_btn = QPushButton("导入几何")
+        import_btn.clicked.connect(self._import_geometry_file)
+        self._mesh_import_combo = QComboBox()
+        self._mesh_import_combo.setMinimumWidth(160)
+        self._mesh_import_combo.currentIndexChanged.connect(
+            self._on_mesh_import_selection_changed)
+        self._mesh_import_visible_check = QCheckBox("显示几何")
+        self._mesh_import_visible_check.setChecked(True)
+        self._mesh_import_visible_check.toggled.connect(
+            self._on_import_visibility_toggled)
+        self._mesh_import_opacity_check = QCheckBox("半透明")
+        self._mesh_import_opacity_check.toggled.connect(
+            self._on_import_opacity_toggled)
+        clear_btn = QPushButton("清空几何")
+        clear_btn.clicked.connect(self._clear_mesh_imports)
+        g1_layout.addWidget(import_btn)
+        g1_layout.addWidget(QLabel("当前选中:"))
+        g1_layout.addWidget(self._mesh_import_combo, 1)
+        g1_layout.addWidget(self._mesh_import_visible_check)
+        g1_layout.addWidget(self._mesh_import_opacity_check)
+        g1_layout.addWidget(clear_btn)
+        scroll_layout.addWidget(g1)
+
+        # Groups 2–5 — placeholders
+        for title in ("边界面配置", "基础计算域网格（背景网格）",
+                      "模型贴体网格加密", "网格质量约束"):
+            ph = QGroupBox(title)
+            ph_layout = QVBoxLayout(ph)
+            ph_label = QLabel("页面正在开发中")
+            ph_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            ph_label.setStyleSheet("color: #9da5b4; padding: 12px;")
+            ph_layout.addWidget(ph_label)
+            scroll_layout.addWidget(ph)
+
+        scroll_layout.addStretch(1)
+        scroll.setWidget(scroll_widget)
+
+        # ── splitter ──
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.addWidget(scroll)
+        splitter.addWidget(vtk_group)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+
         layout = QVBoxLayout(wrapper)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.addStretch(1)
-        label = QLabel('页面正在开发中')
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label.setStyleSheet('font-size: 24px; color: #9da5b4;')
-        layout.addWidget(label)
-        layout.addStretch(1)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(splitter)
         return wrapper
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shlex
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -23,6 +24,16 @@ from foamdesk.domain.models import SimulationParameters
 from foamdesk.services.geometry_import_service import SnappyHexMeshSettings
 from foamdesk.services.project_service import ComputationDomainTemplate
 from foamdesk.ui.visualization_widgets import NativeVtkPreviewWidget
+
+
+@dataclass
+class MeshImportAsset:
+    name: str
+    source_path: Path
+    polydata: object  # vtkPolyData (cached for redraw)
+    visible: bool = True
+    translucent: bool = False
+    color: tuple[float, float, float] = (0.58, 0.62, 0.66)
 
 
 class GeometryLogicMixin:
@@ -549,3 +560,117 @@ class GeometryLogicMixin:
             "执行流程：生成 snappyHexMeshDict -> blockMesh -> snappyHexMesh -overwrite -> "
             f"checkMesh -> {parameters.solver_name}"
         )
+
+    # ── mesh import / Group 1 logic ──────────────────────────
+
+    def _init_mesh_import_state(self) -> None:
+        self._mesh_imports: list[MeshImportAsset] = []
+        self._mesh_import_selected_index: int = -1
+
+    def _import_geometry_file(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "导入 STL 几何",
+            "/home/shihuayue/codex_project/assets/test_geometries",
+            "STL 文件 (*.stl *.STL);;所有文件 (*)",
+        )
+        if not paths:
+            return
+        for fp in paths:
+            source_path = Path(fp)
+            name = source_path.stem
+            reader = vtkSTLReader()
+            reader.SetFileName(str(source_path))
+            reader.Update()
+            polydata = reader.GetOutput()
+            if polydata is None or polydata.GetNumberOfPoints() == 0:
+                continue
+            asset = MeshImportAsset(name=name, source_path=source_path, polydata=polydata)
+            self._mesh_imports.append(asset)
+        self._rebuild_mesh_import_combo()
+        self._redraw_mesh_grid_vtk()
+
+    def _rebuild_mesh_import_combo(self) -> None:
+        combo = self._mesh_import_combo
+        combo.blockSignals(True)
+        combo.clear()
+        for i, asset in enumerate(self._mesh_imports):
+            combo.addItem(asset.name, i)
+        if self._mesh_imports:
+            self._mesh_import_selected_index = 0
+            combo.setCurrentIndex(0)
+        else:
+            self._mesh_import_selected_index = -1
+        combo.blockSignals(False)
+
+    def _on_mesh_import_selection_changed(self, _index: int) -> None:
+        data = self._mesh_import_combo.currentData()
+        if data is None:
+            self._mesh_import_selected_index = -1
+            return
+        self._mesh_import_selected_index = int(data)
+        asset = self._mesh_imports[self._mesh_import_selected_index]
+        self._mesh_import_visible_check.blockSignals(True)
+        self._mesh_import_visible_check.setChecked(asset.visible)
+        self._mesh_import_visible_check.blockSignals(False)
+        self._mesh_import_opacity_check.blockSignals(True)
+        self._mesh_import_opacity_check.setChecked(asset.translucent)
+        self._mesh_import_opacity_check.blockSignals(False)
+        self._redraw_mesh_grid_vtk()
+
+    def _on_import_visibility_toggled(self, checked: bool) -> None:
+        if self._mesh_import_selected_index < 0:
+            return
+        self._mesh_imports[self._mesh_import_selected_index].visible = checked
+        self._redraw_mesh_grid_vtk()
+
+    def _on_import_opacity_toggled(self, checked: bool) -> None:
+        if self._mesh_import_selected_index < 0:
+            return
+        self._mesh_imports[self._mesh_import_selected_index].translucent = checked
+        self._redraw_mesh_grid_vtk()
+
+    def _clear_mesh_imports(self) -> None:
+        if self._mesh_import_selected_index < 0:
+            return
+        self._mesh_imports.pop(self._mesh_import_selected_index)
+        self._mesh_import_selected_index = -1
+        self._rebuild_mesh_import_combo()
+        if self._mesh_imports:
+            self._mesh_grid_vtk.clear()
+            self._redraw_mesh_grid_vtk()
+        else:
+            self._mesh_grid_vtk.clear()
+
+    def _redraw_mesh_grid_vtk(self) -> None:
+        canvas = self._mesh_grid_vtk
+        camera = canvas._renderer.GetActiveCamera()
+        has_actors = bool(canvas._renderer.GetActors().GetNumberOfItems())
+        saved = None
+        if has_actors:
+            saved = (
+                camera.GetPosition(),
+                camera.GetFocalPoint(),
+                camera.GetViewUp(),
+                camera.GetViewAngle(),
+            )
+        canvas.clear()
+        for i, asset in enumerate(self._mesh_imports):
+            if not asset.visible:
+                continue
+            opacity = 0.35 if asset.translucent else 0.92
+            if i == self._mesh_import_selected_index:
+                canvas.add_polydata(
+                    asset.polydata, color=(0.25, 0.74, 1.0), opacity=opacity,
+                    edge_color=(0.96, 0.53, 0.12), line_width=1.0,
+                )
+            else:
+                canvas.add_polydata(
+                    asset.polydata, color=asset.color, opacity=opacity,
+                )
+        if saved is not None:
+            camera.SetPosition(*saved[0])
+            camera.SetFocalPoint(*saved[1])
+            camera.SetViewUp(*saved[2])
+            camera.SetViewAngle(saved[3])
+        else:
+            canvas.finish()
