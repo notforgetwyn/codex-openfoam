@@ -19,6 +19,7 @@ class GeometryObject:
     actor: object  # vtkActor
     source: object  # vtk source
     visible: bool = True
+    section: str = "stl"  # "domain" or "stl"
     position: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     rotation: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     scale: list[float] = field(default_factory=lambda: [1.0, 1.0, 1.0])
@@ -80,16 +81,7 @@ class DrawGeometryLogicMixin:
         self._modeling_objects: list[GeometryObject] = []
         self._modeling_selected_index: int = -1
         self._modeling_counter: dict[str, int] = {}
-
-    def _setup_modeling_axes(self) -> None:
-        axes = vtk.vtkAxesActor()
-        axes.SetTotalLength(1.5, 1.5, 1.5)
-        axes.GetXAxisCaptionActor2D().SetCaption("X")
-        axes.GetYAxisCaptionActor2D().SetCaption("Y")
-        axes.GetZAxisCaptionActor2D().SetCaption("Z")
-        self._modeling_axes_actor = axes
-        self._modeling_viewport._renderer.AddActor(axes)
-        self._modeling_viewport.render()
+        self._modeling_active_section: str = "stl"
 
     # ------------------------------------------------------------------
     # primitive management
@@ -108,7 +100,7 @@ class DrawGeometryLogicMixin:
         actor.GetProperty().SetColor(0.25, 0.74, 1.0)
         actor.GetProperty().SetInterpolationToPhong()
 
-        obj = GeometryObject(name=name, kind=kind, actor=actor, source=source)
+        obj = GeometryObject(name=name, kind=kind, actor=actor, source=source, section=self._modeling_active_section)
         self._modeling_objects.append(obj)
         self._modeling_viewport._renderer.AddActor(actor)
 
@@ -137,6 +129,16 @@ class DrawGeometryLogicMixin:
         tree = self._modeling_tree
         tree.blockSignals(True)
         tree.clear()
+        active_marker = " ←" if self._modeling_active_section == "domain" else ""
+        domain_header = QTreeWidgetItem([f"计算域{active_marker}", ""])
+        domain_header.setData(0, Qt.ItemDataRole.UserRole, -10)
+        domain_header.setFlags(domain_header.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+        stl_marker = " ←" if self._modeling_active_section == "stl" else ""
+        stl_header = QTreeWidgetItem([f"STL{stl_marker}", ""])
+        stl_header.setData(0, Qt.ItemDataRole.UserRole, -20)
+        stl_header.setFlags(stl_header.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+        tree.addTopLevelItem(domain_header)
+        tree.addTopLevelItem(stl_header)
         for i, obj in enumerate(self._modeling_objects):
             item = QTreeWidgetItem([obj.name, obj.kind])
             item.setData(0, Qt.ItemDataRole.UserRole, i)
@@ -144,17 +146,36 @@ class DrawGeometryLogicMixin:
             item.setCheckState(0, Qt.CheckState.Checked if obj.visible else Qt.CheckState.Unchecked)
             if i == self._modeling_selected_index:
                 tree.setCurrentItem(item)
-            tree.addTopLevelItem(item)
+            if obj.section == "domain":
+                domain_header.addChild(item)
+            else:
+                stl_header.addChild(item)
+        tree.expandAll()
         tree.blockSignals(False)
 
     def _on_tree_item_clicked(self, item: QTreeWidgetItem) -> None:
         idx = item.data(0, Qt.ItemDataRole.UserRole)
-        if idx is not None:
+        if idx is None:
+            return
+        if idx == -10:
+            self._modeling_active_section = "domain"
+            self._rebuild_tree()
+            self._set_modeling_status("当前区间：计算域")
+            return
+        if idx == -20:
+            self._modeling_active_section = "stl"
+            self._rebuild_tree()
+            self._set_modeling_status("当前区间：STL")
+            return
+        if idx >= 0:
             self._select_object(int(idx))
+            obj = self._modeling_objects[int(idx)]
+            self._modeling_active_section = obj.section
+            self._rebuild_tree()
 
     def _on_tree_item_changed(self, item: QTreeWidgetItem) -> None:
         idx = item.data(0, Qt.ItemDataRole.UserRole)
-        if idx is None:
+        if idx is None or idx < 0:
             return
         i = int(idx)
         if i < 0 or i >= len(self._modeling_objects):

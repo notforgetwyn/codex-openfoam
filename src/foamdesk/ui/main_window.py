@@ -176,7 +176,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self.resize(1400, 900)
         self._init_modeling_state()
         self._build_ui()
-        self._setup_modeling_axes()
+        self._rebuild_tree()
         self._apply_settings_theme()
         self._refresh_status_bar()
         if initial_project is not None:
