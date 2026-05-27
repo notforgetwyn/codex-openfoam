@@ -229,15 +229,6 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         case_menu.addAction("删除 Case", self._delete_case)
         case_menu.addAction("打开当前 Case 目录", self._show_current_case_path)
 
-        geometry_menu = menu_bar.addMenu("几何/CAD")
-        geometry_menu.addAction("导入 STL", self._import_stl_geometry)
-        geometry_menu.addAction("打开网格生成", self._open_mesh_generation_tab)
-        geometry_menu.addSeparator()
-        geometry_menu.addAction("生成 snappyHexMeshDict", self._generate_snappy_hex_mesh_dict)
-        geometry_menu.addAction("运行 snappyHexMesh", self._run_snappy_hex_mesh)
-        geometry_menu.addAction("运行 checkMesh", self._run_check_mesh)
-        geometry_menu.addAction("一键前处理", self._run_preprocess_pipeline)
-
         solver_menu = menu_bar.addMenu("求解器")
         solver_menu.addAction("运行最小仿真", self._run_minimal_simulation)
         solver_menu.addAction("停止当前任务", self._stop_current_process)
@@ -360,24 +351,18 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         title = QLabel("可视化网格生成")
         title.setStyleSheet("font-size: 22px; font-weight: 600;")
         description = QLabel(
-            "本页把 OpenFOAM 网格流程集中起来：先检查 blockMesh 背景网格和 STL，"
-            "再生成 snappyHexMeshDict，最后执行 blockMesh、snappyHexMesh 和 checkMesh。"
+            "本页用于查看当前计算域、STL 和网格准备状态。"
         )
         description.setWordWrap(True)
 
-        flow = QLabel("流程：绘制几何/导入 STL -> 生成 snappyHexMeshDict -> blockMesh -> snappyHexMesh -overwrite -> checkMesh")
+        flow = QLabel("流程：绘制几何/导入 STL -> 在求解流程中自动准备网格配置 -> 查看状态和预览")
         flow.setWordWrap(True)
 
         button_row = QHBoxLayout()
         actions = [
             ("刷新网格状态", self._refresh_mesh_generation_panel),
             ("打开绘制几何", self._open_draw_geometry_tab),
-            ("导入 STL", self._import_stl_geometry),
             ("预览计算域/STL", self._open_domain_preview_dialog),
-            ("生成 snappyHexMeshDict", self._generate_snappy_hex_mesh_dict),
-            ("运行 snappyHexMesh", self._run_snappy_hex_mesh),
-            ("运行 checkMesh", self._run_check_mesh),
-            ("一键生成网格", self._run_preprocess_pipeline),
         ]
         for text, handler in actions:
             button = QPushButton(text)
@@ -1031,12 +1016,6 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
     def _open_draw_geometry_tab(self) -> None:
         self._workspace_tabs.setCurrentIndex(self.TAB_DRAW_GEOMETRY)
         self._set_status("已打开绘制几何页。")
-
-    def _open_mesh_generation_tab(self) -> None:
-        self._workspace_tabs.setCurrentIndex(self.TAB_MESH_GENERATION)
-        self._refresh_mesh_generation_panel()
-        self._set_status("已打开网格生成页。")
-
 
     def _set_parameter_inputs_enabled(self, enabled: bool) -> None:
         if not hasattr(self, "_end_time_input"):
