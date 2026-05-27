@@ -20,6 +20,8 @@ class GeometryObject:
     source: object  # vtk source
     visible: bool = True
     section: str = "stl"  # "domain" or "stl"
+    opacity: float = 1.0
+    source_path: str = ""
     position: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     rotation: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     scale: list[float] = field(default_factory=lambda: [1.0, 1.0, 1.0])
@@ -82,6 +84,81 @@ class DrawGeometryLogicMixin:
         self._modeling_selected_index: int = -1
         self._modeling_counter: dict[str, int] = {}
         self._modeling_active_section: str = "stl"
+        self._load_modeling_state()
+
+    # ------------------------------------------------------------------
+    # persistence
+    # ------------------------------------------------------------------
+
+    def _modeling_state_path(self) -> str:
+        from pathlib import Path
+        p = Path(__file__).parent.parent.parent.parent / "config" / "modeling_state.json"
+        return str(p)
+
+    def _save_modeling_state(self) -> None:
+        import json
+        data = []
+        for obj in self._modeling_objects:
+            data.append({
+                "name": obj.name, "kind": obj.kind, "section": obj.section,
+                "position": obj.position, "rotation": obj.rotation,
+                "scale": obj.scale, "color": list(obj.color),
+                "opacity": obj.opacity, "visible": obj.visible,
+                "source_path": obj.source_path,
+            })
+        with open(self._modeling_state_path(), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def _load_modeling_state(self) -> None:
+        import json
+        from pathlib import Path
+        path = self._modeling_state_path()
+        if not Path(path).exists():
+            return
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return
+        for d in data:
+            kind = d.get("kind", "cube")
+            source_path = d.get("source_path", "")
+            if kind == "stl" and source_path:
+                from pathlib import Path as _Path
+                if not _Path(source_path).exists():
+                    continue
+                reader = vtk.vtkSTLReader()
+                reader.SetFileName(source_path)
+                reader.Update()
+                src = reader.GetOutput()
+                if src.GetNumberOfPoints() == 0:
+                    continue
+            elif kind in _PRIMITIVE_FACTORIES:
+                factory, _ = _PRIMITIVE_FACTORIES[kind]
+                src = factory()
+            else:
+                continue
+            mapper = vtk.vtkPolyDataMapper()
+            if isinstance(src, vtk.vtkPolyData):
+                mapper.SetInputData(src)
+            else:
+                mapper.SetInputConnection(src.GetOutputPort())
+            actor = vtk.vtkActor()
+            actor.SetMapper(mapper)
+            actor.GetProperty().SetColor(*d.get("color", [0.25, 0.74, 1.0]))
+            actor.GetProperty().SetOpacity(d.get("opacity", 1.0))
+            actor.GetProperty().SetInterpolationToPhong()
+            obj = GeometryObject(
+                name=d["name"], kind=kind, actor=actor, source=src,
+                section=d.get("section", "stl"),
+                position=d.get("position", [0, 0, 0]),
+                rotation=d.get("rotation", [0, 0, 0]),
+                scale=d.get("scale", [1, 1, 1]),
+                color=tuple(d.get("color", [0.25, 0.74, 1.0])),
+                opacity=d.get("opacity", 1.0),
+                visible=d.get("visible", True),
+                source_path=source_path,
+            )
+            self._modeling_objects.append(obj)
 
     # ------------------------------------------------------------------
     # primitive management
@@ -217,6 +294,68 @@ class DrawGeometryLogicMixin:
     def _activate_select_mode(self) -> None:
         self._set_modeling_status("选择模式：请在模型树中点击选择模型")
 
+    def _import_stl_file(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+        from pathlib import Path
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "导入 STL 文件", "", "STL 文件 (*.stl *.STL)"
+        )
+        if not file_path:
+            return
+        reader = vtk.vtkSTLReader()
+        reader.SetFileName(file_path)
+        reader.Update()
+        poly_data = reader.GetOutput()
+        if poly_data.GetNumberOfPoints() == 0:
+            self._set_modeling_status("STL 文件为空或读取失败")
+            return
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputData(poly_data)
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetColor(0.25, 0.74, 1.0)
+        actor.GetProperty().SetInterpolationToPhong()
+        actor.GetProperty().SetEdgeVisibility(True)
+        actor.GetProperty().SetEdgeColor(0.1, 0.1, 0.1)
+        actor.GetProperty().SetLineWidth(0.5)
+        name = Path(file_path).stem
+        obj = GeometryObject(
+            name=name, kind="stl", actor=actor, source=poly_data,
+            section=self._modeling_active_section, source_path=file_path,
+        )
+        self._modeling_objects.append(obj)
+        self._modeling_viewport._renderer.AddActor(actor)
+        self._rebuild_tree()
+        self._select_object(len(self._modeling_objects) - 1)
+        self._modeling_viewport.render()
+        self._set_modeling_status(f"已导入 {name}")
+
+    def _export_stl_file(self) -> None:
+        if self._modeling_selected_index < 0:
+            self._set_modeling_status("请先选择一个几何体")
+            return
+        from PySide6.QtWidgets import QFileDialog
+        obj = self._modeling_objects[self._modeling_selected_index]
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "导出 STL 文件", f"{obj.name}.stl", "STL 文件 (*.stl)"
+        )
+        if not file_path:
+            return
+        pd = obj.source if isinstance(obj.source, vtk.vtkPolyData) else obj.source.GetOutput()
+        tf = vtk.vtkTransformPolyDataFilter()
+        tf.SetInputData(pd)
+        t = vtk.vtkTransform()
+        t.Translate(*obj.position)
+        t.RotateX(obj.rotation[0]); t.RotateY(obj.rotation[1]); t.RotateZ(obj.rotation[2])
+        t.Scale(*obj.scale)
+        tf.SetTransform(t)
+        tf.Update()
+        writer = vtk.vtkSTLWriter()
+        writer.SetFileName(file_path)
+        writer.SetInputData(tf.GetOutput())
+        writer.Write()
+        self._set_modeling_status(f"已导出 {obj.name} → {file_path}")
+
     # ------------------------------------------------------------------
     # property panel
     # ------------------------------------------------------------------
@@ -241,6 +380,7 @@ class DrawGeometryLogicMixin:
         self._modeling_color_btn.setStyleSheet(
             f"background-color: rgb({int(r*255)},{int(g*255)},{int(b*255)}); border: 1px solid #555;"
         )
+        self._modeling_prop_opacity.setValue(obj.opacity)
         self._block_prop_signals(False)
 
     def _on_prop_name_changed(self) -> None:
@@ -311,8 +451,17 @@ class DrawGeometryLogicMixin:
             self._modeling_prop_rot_x, self._modeling_prop_rot_y, self._modeling_prop_rot_z,
             self._modeling_prop_scl_x, self._modeling_prop_scl_y, self._modeling_prop_scl_z,
             self._modeling_color_btn,
+            self._modeling_prop_opacity,
         ):
             w.setEnabled(enabled)
+
+    def _on_prop_opacity_changed(self) -> None:
+        if self._modeling_selected_index < 0:
+            return
+        obj = self._modeling_objects[self._modeling_selected_index]
+        obj.opacity = self._modeling_prop_opacity.value()
+        obj.actor.GetProperty().SetOpacity(obj.opacity)
+        self._modeling_viewport.render()
 
     def _block_prop_signals(self, block: bool) -> None:
         for w in (

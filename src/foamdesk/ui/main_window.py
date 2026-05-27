@@ -176,6 +176,9 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self.resize(1400, 900)
         self._init_modeling_state()
         self._build_ui()
+        for obj in self._modeling_objects:
+            self._modeling_viewport._renderer.AddActor(obj.actor)
+            self._apply_transform(obj)
         self._rebuild_tree()
         self._apply_settings_theme()
         self._refresh_status_bar()
@@ -183,6 +186,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             self._activate_project(initial_project, "已恢复上次项目。")
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self._save_modeling_state()
         super().closeEvent(event)
 
     def _build_ui(self) -> None:
@@ -552,6 +556,18 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
 
         toolbar.addSpacing(12)
 
+        import_btn = QPushButton("导入 STL")
+        import_btn.setFixedHeight(30)
+        import_btn.clicked.connect(self._import_stl_file)
+        toolbar.addWidget(import_btn)
+
+        export_btn = QPushButton("导出 STL")
+        export_btn.setFixedHeight(30)
+        export_btn.clicked.connect(self._export_stl_file)
+        toolbar.addWidget(export_btn)
+
+        toolbar.addSpacing(12)
+
         reset_btn = QPushButton("重置视角")
         reset_btn.setFixedHeight(30)
         reset_btn.clicked.connect(self._reset_camera)
@@ -633,6 +649,13 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         prop_layout.addWidget(self._modeling_group("缩放", scl_x, scl_y, scl_z))
         prop_layout.addWidget(QLabel("颜色"))
         prop_layout.addWidget(self._modeling_color_btn)
+        prop_layout.addWidget(QLabel("透明度"))
+        self._modeling_prop_opacity = QDoubleSpinBox()
+        self._modeling_prop_opacity.setRange(0.1, 1.0)
+        self._modeling_prop_opacity.setSingleStep(0.1)
+        self._modeling_prop_opacity.setValue(1.0)
+        self._modeling_prop_opacity.valueChanged.connect(self._on_prop_opacity_changed)
+        prop_layout.addWidget(self._modeling_prop_opacity)
         prop_layout.addStretch(1)
         body.addWidget(prop_wrapper)
 
