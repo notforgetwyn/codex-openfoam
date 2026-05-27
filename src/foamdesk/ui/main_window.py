@@ -563,9 +563,19 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._cfg_max_iters.setRange(1, 100000)
         self._cfg_max_iters.setValue(1000)
         self._cfg_relaxation = QLineEdit("0.7")
+        self._cfg_fv_schemes = QComboBox()
+        self._cfg_fv_schemes.addItem("稳定 (upwind)", "stable")
+        self._cfg_fv_schemes.addItem("平衡 (linearUpwind)", "balanced")
+        self._cfg_fv_schemes.addItem("精度 (linear)", "accurate")
+        self._cfg_fv_solution = QComboBox()
+        self._cfg_fv_solution.addItem("默认收敛", "default")
+        self._cfg_fv_solution.addItem("严格收敛", "strict")
+        self._cfg_fv_solution.addItem("快速粗糙", "fast")
         ctrl_form.addRow("残差收敛阈值", self._cfg_residual)
         ctrl_form.addRow("最大迭代步数", self._cfg_max_iters)
         ctrl_form.addRow("松弛因子", self._cfg_relaxation)
+        ctrl_form.addRow("数值格式 fvSchemes", self._cfg_fv_schemes)
+        ctrl_form.addRow("求解设置 fvSolution", self._cfg_fv_solution)
         right_col.addWidget(ctrl_grp)
 
         top.addLayout(left_col)
@@ -709,6 +719,10 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         init_p = self._cfg_init_pressure.text().strip()
         residual = self._cfg_residual.text().strip()
         relaxation = self._cfg_relaxation.text().strip()
+        fv_schemes_key = self._cfg_fv_schemes.currentData()
+        fv_solution_key = self._cfg_fv_solution.currentData()
+        fv_schemes_text = self._build_fv_schemes_text(fv_schemes_key)
+        fv_solution_text = self._build_fv_solution_text(fv_solution_key, residual, relaxation)
 
         preview = (
             f"// system/controlDict\n"
@@ -732,13 +746,52 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             f"boundaryField\n{{\n"
             f"{self._build_boundary_block('p')}\n"
             f"}}\n\n"
-            f"// system/fvSolution\n"
-            f"solvers {{ p {{ solver PCG; preconditioner DIC; tolerance {residual}; relTol 0.01; }}\n"
-            f"  U {{ solver smoothSolver; smoother symGaussSeidel; tolerance {residual}; relTol 0.01; }} }}\n"
-            f"relaxationFactors {{ U {relaxation}; }}\n"
+            f"// system/fvSchemes\n{fv_schemes_text}\n\n"
+            f"// system/fvSolution\n{fv_solution_text}\n"
         )
         self._cfg_dict_preview.setPlainText(preview)
         self._set_status("字典预览已刷新")
+
+    def _build_fv_schemes_text(self, key: str) -> str:
+        if key == "stable":
+            return (
+                "ddtSchemes   { default Euler; }\n"
+                "gradSchemes  { default Gauss linear; }\n"
+                "divSchemes   { default Gauss upwind; }\n"
+                "laplacianSchemes { default Gauss linear corrected; }\n"
+                "interpolationSchemes { default linear; }\n"
+                "snGradSchemes { default corrected; }"
+            )
+        elif key == "accurate":
+            return (
+                "ddtSchemes   { default backward; }\n"
+                "gradSchemes  { default Gauss linear; }\n"
+                "divSchemes   { default Gauss linear; }\n"
+                "laplacianSchemes { default Gauss linear corrected; }\n"
+                "interpolationSchemes { default linear; }\n"
+                "snGradSchemes { default corrected; }"
+            )
+        else:
+            return (
+                "ddtSchemes   { default Euler; }\n"
+                "gradSchemes  { default Gauss linear; }\n"
+                "divSchemes   { default Gauss linearUpwind grad(U); }\n"
+                "laplacianSchemes { default Gauss linear corrected; }\n"
+                "interpolationSchemes { default linear; }\n"
+                "snGradSchemes { default corrected; }"
+            )
+
+    def _build_fv_solution_text(self, key: str, residual: str, relaxation: str) -> str:
+        ncorrectors = "1" if key == "fast" else "2"
+        reltol = "0.1" if key == "fast" else "0.01" if key == "default" else "0.001"
+        return (
+            f"solvers\n{{\n"
+            f"  p {{ solver PCG; preconditioner DIC; tolerance {residual}; relTol {reltol}; }}\n"
+            f"  U {{ solver smoothSolver; smoother symGaussSeidel; tolerance {residual}; relTol {reltol}; }}\n"
+            f"}}\n"
+            f"PIMPLE {{ nCorrectors {ncorrectors}; nNonOrthogonalCorrectors 0; }}\n"
+            f"relaxationFactors {{ U {relaxation}; }}"
+        )
 
     def _export_sim_dicts(self) -> None:
         if self._current_project is None:
@@ -756,6 +809,8 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         init_p = self._cfg_init_pressure.text().strip()
         residual = self._cfg_residual.text().strip()
         relaxation = self._cfg_relaxation.text().strip()
+        fv_schemes_key = self._cfg_fv_schemes.currentData()
+        fv_solution_key = self._cfg_fv_solution.currentData()
 
         control_dict = (
             f"application     {solver};\n"
@@ -787,12 +842,12 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         )
         (case_dir / "0" / "p").write_text(p_field, encoding="utf-8")
 
-        fv_solution = (
-            f"solvers {{\n  p {{ solver PCG; preconditioner DIC; tolerance {residual}; relTol 0.01; }}\n"
-            f"  U {{ solver smoothSolver; smoother symGaussSeidel; tolerance {residual}; relTol 0.01; }}\n}}\n"
-            f"relaxationFactors {{ U {relaxation}; }}\n"
+        (case_dir / "system" / "fvSchemes").write_text(
+            self._build_fv_schemes_text(fv_schemes_key), encoding="utf-8"
         )
-        (case_dir / "system" / "fvSolution").write_text(fv_solution, encoding="utf-8")
+        (case_dir / "system" / "fvSolution").write_text(
+            self._build_fv_solution_text(fv_solution_key, residual, relaxation), encoding="utf-8"
+        )
 
         self._set_status(f"字典已导出到 {case_dir}")
         self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_RUN)
