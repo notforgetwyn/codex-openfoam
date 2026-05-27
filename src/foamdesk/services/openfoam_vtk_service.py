@@ -52,6 +52,25 @@ class OpenFoamVtkService:
             geometry.Update()
         return geometry
 
+    def build_case_output(
+        self,
+        project: SimulationProject,
+        time_value: float | None = None,
+    ):
+        marker_file = self.ensure_marker_file(project)
+        reader = self._build_reader(marker_file)
+        reader.UpdateInformation()
+        self._enable_all_arrays(reader)
+        if time_value is not None:
+            reader.SetTimeValue(time_value)
+        if time_value is not None:
+            reader.UpdateTimeStep(time_value)
+        else:
+            reader.Update()
+        output = reader.GetOutputDataObject(0)
+        output.Register(None)
+        return output
+
     def ensure_marker_file(self, project: SimulationProject) -> Path:
         marker_file = project.case_dir / self.MARKER_FILE_NAME
         marker_file.touch(exist_ok=True)
