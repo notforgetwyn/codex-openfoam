@@ -596,8 +596,8 @@ class GeometryLogicMixin:
         for i, asset in enumerate(self._mesh_imports):
             combo.addItem(asset.name, i)
         if self._mesh_imports:
-            self._mesh_import_selected_index = 0
-            combo.setCurrentIndex(0)
+            self._mesh_import_selected_index = len(self._mesh_imports) - 1
+            combo.setCurrentIndex(self._mesh_import_selected_index)
         else:
             self._mesh_import_selected_index = -1
         combo.blockSignals(False)
@@ -672,5 +672,6 @@ class GeometryLogicMixin:
             camera.SetFocalPoint(*saved[1])
             camera.SetViewUp(*saved[2])
             camera.SetViewAngle(saved[3])
+            canvas.render()
         else:
             canvas.finish()
