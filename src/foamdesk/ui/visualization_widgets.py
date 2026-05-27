@@ -821,7 +821,7 @@ class NativeVtkViewerDialog(QDialog):
         streamline_poly_data,
         source_poly_data,
     ) -> None:
-        paths = self._streamline_paths(streamline_poly_data)
+        paths = self._streamline_path_records(streamline_poly_data)
         if not paths:
             self.set_animation_source(0, None)
             return
@@ -844,19 +844,47 @@ class NativeVtkViewerDialog(QDialog):
         actor.GetProperty().SetSpecular(0.5)
         actor.GetProperty().SetSpecularPower(24)
         self._renderer.AddActor(actor)
-        frame_count = 120
+        interval_ms = 45
+        time_step = interval_ms / 1000.0
+        maximum_speed = max((float(path["speeds"].max()) for path in paths if path["speeds"].size), default=0.0)
+        stop_speed = max(maximum_speed * 1e-4, 1e-9)
+        particles = [{"distance": 0.0, "active": True} for _path in paths]
+
+        def reset_particles() -> None:
+            for particle in particles:
+                particle["distance"] = 0.0
+                particle["active"] = True
 
         def render_particles(frame_index: int) -> None:
-            phase = (frame_index % frame_count) / frame_count
+            if frame_index == 0:
+                reset_particles()
             particle_points.Reset()
-            for path in paths:
-                point = self._point_on_streamline_path(path, phase)
+            active_count = 0
+            for path, particle in zip(paths, particles, strict=False):
+                if not particle["active"]:
+                    continue
+                point, speed = self._point_and_speed_on_streamline_path(path, float(particle["distance"]))
+                if speed <= stop_speed:
+                    particle["active"] = False
+                    continue
                 particle_points.InsertNextPoint(float(point[0]), float(point[1]), float(point[2]))
+                active_count += 1
+                particle["distance"] = float(particle["distance"]) + speed * time_step
+                if float(particle["distance"]) >= float(path["total_length"]):
+                    particle["active"] = False
+            if active_count == 0:
+                reset_particles()
+                for path, particle in zip(paths, particles, strict=False):
+                    point, speed = self._point_and_speed_on_streamline_path(path, 0.0)
+                    if speed <= stop_speed:
+                        particle["active"] = False
+                        continue
+                    particle_points.InsertNextPoint(float(point[0]), float(point[1]), float(point[2]))
             particle_points.Modified()
             particle_poly_data.Modified()
             self._render_window()
 
-        self.set_animation_source(frame_count, render_particles, interval_ms=45)
+        self.set_animation_source(1_000_000, render_particles, interval_ms=interval_ms)
 
     def _streamline_tube_radius(self, poly_data) -> float:
         bounds = poly_data.GetBounds()
@@ -874,45 +902,75 @@ class NativeVtkViewerDialog(QDialog):
         section_scale = float(section_spans.min() if section_spans.size else usable_spans.min())
         return max(min(section_scale * 0.006, max_span * 0.0014), max_span * 0.00035)
 
-    def _streamline_paths(self, streamline_poly_data) -> list[np.ndarray]:
+    def _streamline_path_records(self, streamline_poly_data) -> list[dict[str, np.ndarray | float]]:
         vtk_points = streamline_poly_data.GetPoints()
         lines = streamline_poly_data.GetLines()
         if vtk_points is None or lines is None:
             return []
         points = vtk_to_numpy(vtk_points.GetData())
         raw_lines = vtk_to_numpy(lines.GetData())
-        paths: list[np.ndarray] = []
+        speed_array = streamline_poly_data.GetPointData().GetArray("U_mag")
+        if speed_array is not None:
+            all_speeds = vtk_to_numpy(speed_array).astype(float)
+        else:
+            vector_array = streamline_poly_data.GetPointData().GetArray("U")
+            if vector_array is not None:
+                vectors = vtk_to_numpy(vector_array)
+                all_speeds = np.linalg.norm(vectors[:, : min(vectors.shape[1], 3)], axis=1)
+            else:
+                all_speeds = np.zeros(streamline_poly_data.GetNumberOfPoints(), dtype=float)
+        paths: list[dict[str, np.ndarray | float]] = []
         index = 0
         while index < len(raw_lines):
             count = int(raw_lines[index])
             index += 1
             ids = raw_lines[index : index + count].astype(int)
             index += count
-            if count >= 2:
-                path = points[ids]
-                if self._path_length(path) > 1e-12:
-                    paths.append(path)
+            if count < 2:
+                continue
+            path_points = points[ids]
+            total_length = self._path_length(path_points)
+            if total_length <= 1e-12:
+                continue
+            path_speeds = np.nan_to_num(all_speeds[ids], nan=0.0, posinf=0.0, neginf=0.0)
+            paths.append(
+                {
+                    "points": path_points,
+                    "speeds": np.maximum(path_speeds.astype(float), 0.0),
+                    "total_length": float(total_length),
+                }
+            )
         max_paths = 300
         if len(paths) <= max_paths:
             return paths
         selected = np.linspace(0, len(paths) - 1, max_paths, dtype=int)
         return [paths[int(path_index)] for path_index in selected]
 
-    def _point_on_streamline_path(self, path: np.ndarray, phase: float) -> np.ndarray:
-        if len(path) == 1:
-            return path[0]
-        segments = np.linalg.norm(np.diff(path, axis=0), axis=1)
-        total = float(segments.sum())
+    def _point_and_speed_on_streamline_path(
+        self,
+        path_record: dict[str, np.ndarray | float],
+        distance: float,
+    ) -> tuple[np.ndarray, float]:
+        points = path_record["points"]
+        speeds = path_record["speeds"]
+        if not isinstance(points, np.ndarray) or not isinstance(speeds, np.ndarray):
+            return np.zeros(3, dtype=float), 0.0
+        if len(points) == 1:
+            return points[0], float(speeds[0]) if speeds.size else 0.0
+        segments = np.linalg.norm(np.diff(points, axis=0), axis=1)
+        total = float(path_record["total_length"])
         if total <= 1e-12:
-            return path[0]
-        distance = min(max(float(phase), 0.0), 1.0) * total
+            return points[0], 0.0
+        clamped_distance = min(max(float(distance), 0.0), total)
         cumulative = np.cumsum(segments)
-        segment_index = int(np.searchsorted(cumulative, distance, side="right"))
+        segment_index = int(np.searchsorted(cumulative, clamped_distance, side="right"))
         segment_index = min(segment_index, len(segments) - 1)
         previous = 0.0 if segment_index == 0 else float(cumulative[segment_index - 1])
         local_length = max(float(segments[segment_index]), 1e-12)
-        local_phase = (distance - previous) / local_length
-        return path[segment_index] * (1.0 - local_phase) + path[segment_index + 1] * local_phase
+        local_phase = (clamped_distance - previous) / local_length
+        point = points[segment_index] * (1.0 - local_phase) + points[segment_index + 1] * local_phase
+        speed = float(speeds[segment_index] * (1.0 - local_phase) + speeds[segment_index + 1] * local_phase)
+        return point, max(speed, 0.0)
 
     def _path_length(self, path: np.ndarray) -> float:
         if len(path) < 2:

@@ -12,21 +12,6 @@ from foamdesk.ui.startup_window import StartupWindow
 
 
 class ProjectProcessLogicMixin:
-    def _on_activity_changed(self, index: int) -> None:
-        if index == 0:
-            self._workspace_tabs.setCurrentIndex(self.TAB_PROJECT_HOME)
-            self._set_status("已切换到资源视图。")
-        elif index == 1:
-            self._search_projects()
-        elif index == 2:
-            self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_RUN)
-            self._bottom_tabs.setCurrentIndex(1)
-            self._set_status("已切换到任务视图。")
-        elif index == 3:
-            self._workspace_tabs.setCurrentIndex(self.TAB_RESULTS)
-            self._refresh_results_panel()
-            self._set_status("已切换到结果视图。")
-
     def _save_current_state(self) -> None:
         self._save_settings()
         self._append_log("保存：当前设置已写入本地配置。")
@@ -168,7 +153,7 @@ class ProjectProcessLogicMixin:
                 "建议下一步：",
                 "- 如果缺少 blockMeshDict：进入“绘制几何”生成 blockMeshDict + STL。",
                 "- 如果缺少 U/p/物性：进入“求解器准备”补齐边界和物性。",
-                "- 如果网格未生成：进入“几何/CAD”生成 snappyHexMeshDict 并运行网格流程。",
+                "- 如果网格未生成：进入“可视化网格生成”页生成 snappyHexMeshDict 并运行网格流程。",
                 "- 如果已有结果字段：进入“结果”选择字段和显示方式查看 3D 结果。",
             ]
         )
