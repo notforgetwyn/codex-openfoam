@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtCore import QProcess
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -15,12 +16,14 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMenu,
     QMenuBar,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSizePolicy,
     QSpinBox,
@@ -38,7 +41,10 @@ from foamdesk.app.bootstrap import ApplicationContext
 from foamdesk.domain.models import SimulationParameters, SimulationProject
 from foamdesk.ui.theme import THEMES
 from foamdesk.ui.visualization_widgets import NativeVtkPreviewWidget, NativeVtkViewerDialog, VtkViewerDialog
-from foamdesk.ui.main_window_geometry_logic import GeometryLogicMixin
+from foamdesk.ui.main_window_geometry_logic import (
+    BOUNDARY_TYPE_LABELS,
+    GeometryLogicMixin,
+)
 from foamdesk.ui.main_window_results_logic import ResultsLogicMixin
 from foamdesk.ui.main_window_parameters_logic import ParametersLogicMixin
 from foamdesk.ui.main_window_project_logic import ProjectProcessLogicMixin
@@ -353,6 +359,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         vtk_layout.setContentsMargins(0, 0, 0, 0)
         self._mesh_grid_vtk = NativeVtkPreviewWidget(wrapper, background=(0.12, 0.12, 0.12))
         vtk_layout.addWidget(self._mesh_grid_vtk)
+        self._setup_boundary_picker()
 
         # ── top: scrollable parameter panel ──
         scroll = QScrollArea()
@@ -388,8 +395,61 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         g1_layout.addWidget(clear_btn)
         scroll_layout.addWidget(g1)
 
-        # Groups 2–5 — placeholders
-        for title in ("边界面配置", "基础计算域网格（背景网格）",
+        # Group 2 — boundary face configuration
+        g2 = QGroupBox("边界面配置")
+        g2_layout = QHBoxLayout(g2)
+        # left: pick controls
+        left_widget = QWidget()
+        left = QVBoxLayout(left_widget)
+        left.setContentsMargins(0, 0, 0, 0)
+        pick_mode_group = QButtonGroup(self)
+        self._boundary_pick_point_rb = QRadioButton("点选面")
+        self._boundary_pick_point_rb.setChecked(True)
+        pick_mode_group.addButton(self._boundary_pick_point_rb)
+        left.addWidget(self._boundary_pick_point_rb)
+        self._boundary_pick_btn = QPushButton("拾取面")
+        self._boundary_pick_btn.clicked.connect(self._toggle_boundary_pick)
+        left.addWidget(self._boundary_pick_btn)
+        cancel_pick_btn = QPushButton("取消选中")
+        cancel_pick_btn.clicked.connect(
+            lambda: self._boundary_pending_cells.clear() or self._redraw_mesh_grid_vtk())
+        left.addWidget(cancel_pick_btn)
+        clear_all_btn = QPushButton("清空所有边界")
+        clear_all_btn.clicked.connect(self._clear_all_boundary_groups)
+        left.addWidget(clear_all_btn)
+        left.addStretch(1)
+        g2_layout.addWidget(left_widget)
+        # right: boundary properties + table
+        right_widget = QWidget()
+        right = QVBoxLayout(right_widget)
+        right.setContentsMargins(0, 0, 0, 0)
+        prop_row = QHBoxLayout()
+        self._boundary_type_combo = QComboBox()
+        for key, label in BOUNDARY_TYPE_LABELS.items():
+            self._boundary_type_combo.addItem(label, key)
+        self._boundary_type_combo.currentIndexChanged.connect(
+            self._on_boundary_type_changed)
+        self._boundary_name_input = QLineEdit()
+        self._boundary_name_input.setPlaceholderText("边界名称（默认同类型）")
+        apply_btn = QPushButton("应用到选中面")
+        apply_btn.clicked.connect(self._apply_boundary_to_selected)
+        prop_row.addWidget(QLabel("类型:"))
+        prop_row.addWidget(self._boundary_type_combo)
+        prop_row.addWidget(QLabel("名称:"))
+        prop_row.addWidget(self._boundary_name_input, 1)
+        prop_row.addWidget(apply_btn)
+        right.addLayout(prop_row)
+        self._boundary_table = QTableWidget(0, 4)
+        self._boundary_table.setHorizontalHeaderLabels(
+            ["边界名称", "边界类型", "面片数量", "操作"])
+        self._boundary_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch)
+        right.addWidget(self._boundary_table)
+        g2_layout.addWidget(right_widget, 1)
+        scroll_layout.addWidget(g2)
+
+        # Groups 3–5 — placeholders
+        for title in ("基础计算域网格（背景网格）",
                       "模型贴体网格加密", "网格质量约束"):
             ph = QGroupBox(title)
             ph_layout = QVBoxLayout(ph)

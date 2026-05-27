@@ -36,6 +36,30 @@ class MeshImportAsset:
     color: tuple[float, float, float] = (0.58, 0.62, 0.66)
 
 
+@dataclass
+class BoundaryFaceGroup:
+    name: str
+    boundary_type: str
+    cell_ids: set[int]
+
+
+BOUNDARY_COLORS = {
+    "inlet": (1.0, 0.18, 0.18),
+    "outlet": (0.18, 0.35, 1.0),
+    "wall": (0.52, 0.52, 0.52),
+    "symmetry": (0.16, 0.78, 0.35),
+    "patch": (1.0, 0.85, 0.15),
+}
+
+BOUNDARY_TYPE_LABELS = {
+    "inlet": "速度入口 inlet",
+    "outlet": "压力出口 outlet",
+    "wall": "固壁 wall",
+    "symmetry": "对称面 symmetry",
+    "patch": "计算域外边界 patch",
+}
+
+
 class GeometryLogicMixin:
     def _read_stl_preview_mesh(self, source_path: Path) -> tuple[np.ndarray, np.ndarray]:
         reader = vtkSTLReader()
@@ -566,6 +590,9 @@ class GeometryLogicMixin:
     def _init_mesh_import_state(self) -> None:
         self._mesh_imports: list[MeshImportAsset] = []
         self._mesh_import_selected_index: int = -1
+        self._boundary_groups: list[BoundaryFaceGroup] = []
+        self._boundary_pending_cells: set[int] = set()
+        self._boundary_pick_active: bool = False
 
     def _import_geometry_file(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
@@ -659,10 +686,46 @@ class GeometryLogicMixin:
                 continue
             opacity = 0.35 if asset.translucent else 0.92
             if i == self._mesh_import_selected_index:
-                canvas.add_polydata(
-                    asset.polydata, color=(0.25, 0.74, 1.0), opacity=opacity,
-                    edge_color=(0.96, 0.53, 0.12), line_width=1.0,
-                )
+                # ── selected geometry: show boundary regions ──
+                has_boundary_data = bool(
+                    self._boundary_groups or self._boundary_pending_cells)
+                if not has_boundary_data:
+                    # no boundaries yet → draw whole polydata
+                    canvas.add_polydata(
+                        asset.polydata, color=(0.25, 0.74, 1.0), opacity=opacity,
+                        edge_color=(0.96, 0.53, 0.12), line_width=1.0,
+                    )
+                else:
+                    all_boundary_cells: set[int] = set()
+                    for group in self._boundary_groups:
+                        boundary_pd = self._extract_boundary_polydata(
+                            asset.polydata, group.cell_ids)
+                        if boundary_pd is not None and boundary_pd.GetNumberOfCells() > 0:
+                            color = BOUNDARY_COLORS.get(
+                                group.boundary_type, (0.7, 0.7, 0.7))
+                            canvas.add_polydata(
+                                boundary_pd, color=color, opacity=opacity)
+                        all_boundary_cells |= group.cell_ids
+                    pending_only = self._boundary_pending_cells - all_boundary_cells
+                    if pending_only:
+                        pending_pd = self._extract_boundary_polydata(
+                            asset.polydata, pending_only)
+                        if pending_pd is not None and pending_pd.GetNumberOfCells() > 0:
+                            canvas.add_polydata(
+                                pending_pd, color=(1.0, 0.6, 0.0), opacity=opacity,
+                                edge_color=(1.0, 0.4, 0.0), line_width=1.2,
+                            )
+                    all_used = all_boundary_cells | self._boundary_pending_cells
+                    total_cells = asset.polydata.GetNumberOfCells()
+                    if len(all_used) < total_cells:
+                        remainder = set(range(total_cells)) - all_used
+                        remainder_pd = self._extract_boundary_polydata(
+                            asset.polydata, remainder)
+                        if remainder_pd is not None and remainder_pd.GetNumberOfCells() > 0:
+                            canvas.add_polydata(
+                                remainder_pd, color=(0.25, 0.74, 1.0), opacity=opacity,
+                                edge_color=(0.96, 0.53, 0.12), line_width=1.0,
+                            )
             else:
                 canvas.add_polydata(
                     asset.polydata, color=asset.color, opacity=opacity,
@@ -675,3 +738,134 @@ class GeometryLogicMixin:
             canvas.render()
         else:
             canvas.finish()
+
+    # ── boundary face / Group 2 logic ────────────────────────
+
+    def _setup_boundary_picker(self) -> None:
+        canvas = self._mesh_grid_vtk
+        self._cell_picker = vtk.vtkCellPicker()
+        self._cell_picker.SetTolerance(0.01)
+        canvas._interactor.SetPicker(self._cell_picker)
+        self._pick_observer_id = canvas._interactor.AddObserver(
+            "LeftButtonPressEvent", self._on_boundary_pick_event)
+
+    def _on_boundary_pick_event(self, obj, _event) -> None:
+        if not self._boundary_pick_active:
+            return
+        if self._mesh_import_selected_index < 0:
+            return
+        x, y = obj.GetEventPosition()
+        self._cell_picker.Pick(x, y, 0, self._mesh_grid_vtk._renderer)
+        cell_id = self._cell_picker.GetCellId()
+        if cell_id < 0:
+            return
+        asset = self._mesh_imports[self._mesh_import_selected_index]
+        if cell_id >= asset.polydata.GetNumberOfCells():
+            return
+        if cell_id in self._boundary_pending_cells:
+            self._boundary_pending_cells.discard(cell_id)
+        else:
+            self._boundary_pending_cells.add(cell_id)
+        self._redraw_mesh_grid_vtk()
+
+    def _toggle_boundary_pick(self) -> None:
+        self._boundary_pick_active = not self._boundary_pick_active
+        btn = self._boundary_pick_btn
+        if self._boundary_pick_active:
+            btn.setText("拾取中...(再按停止)")
+            btn.setStyleSheet("background: #d9534f; color: #fff; font-weight: bold;")
+            self._set_status("面拾取模式已激活，点击 3D 视图中的几何面片。")
+        else:
+            btn.setText("拾取面")
+            btn.setStyleSheet("")
+            self._set_status("面拾取模式已关闭。")
+
+    def _on_boundary_type_changed(self, _index: int) -> None:
+        btype = self._boundary_type_combo.currentData()
+        if btype and not self._boundary_name_input.text().strip():
+            self._boundary_name_input.setPlaceholderText(f"默认: {btype}")
+
+    def _apply_boundary_to_selected(self) -> None:
+        if not self._boundary_pending_cells:
+            self._show_error("请先在 3D 视图中拾取面片。")
+            return
+        btype = self._boundary_type_combo.currentData()
+        name = self._boundary_name_input.text().strip()
+        if not name:
+            name = btype
+        idx = self._find_boundary_group(name)
+        if idx >= 0:
+            self._boundary_groups[idx].cell_ids |= self._boundary_pending_cells
+        else:
+            self._boundary_groups.append(BoundaryFaceGroup(
+                name=name, boundary_type=btype,
+                cell_ids=set(self._boundary_pending_cells)))
+        self._boundary_pending_cells.clear()
+        self._rebuild_boundary_table()
+        self._redraw_mesh_grid_vtk()
+        self._set_status(f"已将 {len(self._boundary_groups[-1].cell_ids)} 个面片应用到 {name}({btype})。")
+
+    def _find_boundary_group(self, name: str) -> int:
+        for i, group in enumerate(self._boundary_groups):
+            if group.name == name:
+                return i
+        return -1
+
+    def _delete_boundary_group(self, row: int) -> None:
+        if row < 0 or row >= len(self._boundary_groups):
+            return
+        self._boundary_groups.pop(row)
+        self._rebuild_boundary_table()
+        self._redraw_mesh_grid_vtk()
+
+    def _clear_all_boundary_groups(self) -> None:
+        self._boundary_groups.clear()
+        self._boundary_pending_cells.clear()
+        self._rebuild_boundary_table()
+        self._redraw_mesh_grid_vtk()
+        self._set_status("所有边界定义已清空。")
+
+    def _rebuild_boundary_table(self) -> None:
+        table = self._boundary_table
+        table.setRowCount(0)
+        for i, group in enumerate(self._boundary_groups):
+            table.insertRow(i)
+            table.setItem(i, 0, QTableWidgetItem(group.name))
+            table.setItem(i, 1, QTableWidgetItem(
+                BOUNDARY_TYPE_LABELS.get(group.boundary_type, group.boundary_type)))
+            table.setItem(i, 2, QTableWidgetItem(str(len(group.cell_ids))))
+            del_btn = QPushButton("删除")
+            del_btn.clicked.connect(
+                lambda _checked=False, r=i: self._delete_boundary_group(r))
+            table.setCellWidget(i, 3, del_btn)
+
+    def _extract_boundary_polydata(self, source_polydata, cell_ids: set[int]):
+        if not cell_ids:
+            return None
+        try:
+            id_array = vtk.vtkIdTypeArray()
+            id_array.SetNumberOfComponents(1)
+            for cid in sorted(cell_ids):
+                id_array.InsertNextValue(cid)
+            sel_node = vtk.vtkSelectionNode()
+            sel_node.SetFieldType(vtk.vtkSelectionNode.CELL)
+            sel_node.SetContentType(vtk.vtkSelectionNode.INDICES)
+            sel_node.SetSelectionList(id_array)
+            sel = vtk.vtkSelection()
+            sel.AddNode(sel_node)
+            extract = vtk.vtkExtractSelection()
+            extract.SetInputData(0, source_polydata)
+            extract.SetInputData(1, sel)
+            extract.Update()
+            output = extract.GetOutput()
+            if output is None:
+                return None
+            geom_filter = vtk.vtkGeometryFilter()
+            geom_filter.SetInputData(output)
+            geom_filter.Update()
+            result = geom_filter.GetOutput()
+            if result is None or result.GetNumberOfCells() == 0:
+                return None
+            return result
+        except Exception:
+            return None
