@@ -75,7 +75,6 @@ class ProjectProcessLogicMixin:
         self._refresh_solver_run_panel()
         self._refresh_results_panel()
         self._refresh_geometry_panel()
-        self._load_draw_geometry_state()
         self._refresh_mesh_generation_panel()
         self._refresh_physics_prepare_panel()
         self._refresh_project_home_summary()
@@ -224,6 +223,39 @@ class ProjectProcessLogicMixin:
             return
         self._activate_project(project, "Case 创建完成。")
         self._append_log(f"已创建 Case：{project.case_dir}")
+
+    def _delete_case(self) -> None:
+        if self._current_project is None:
+            self._show_error("请先选择项目。")
+            return
+        case_name = self._current_project.case_name
+        cases = self._context.project_service.list_cases(self._current_project)
+        if len(cases) <= 1:
+            self._show_error("不能删除最后一个 Case。")
+            return
+        confirm = QMessageBox.question(
+            self,
+            "删除 Case",
+            f"确定要删除 Case \"{case_name}\" 吗？\n\n此操作不可撤销，Case 目录将被永久删除。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            deleted_index = cases.index(case_name)
+        except ValueError:
+            self._show_error(f"Case \"{case_name}\" 不在项目列表中。")
+            return
+        fallback = cases[deleted_index - 1] if deleted_index > 0 else cases[deleted_index + 1]
+        try:
+            self._context.project_service.delete_case(self._current_project, case_name)
+        except ValueError as error:
+            self._show_error(str(error))
+            return
+        self._append_log(f"已删除 Case：{case_name}")
+        project = self._context.project_service.switch_case(self._current_project, fallback)
+        self._activate_project(project, f"Case 已回退到：{fallback}")
 
     def _return_to_project_selection(self) -> None:
         app = QApplication.instance()
