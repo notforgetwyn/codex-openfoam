@@ -8,9 +8,11 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFontComboBox,
     QFrame,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -40,6 +42,7 @@ from foamdesk.ui.main_window_results_logic import ResultsLogicMixin
 from foamdesk.ui.main_window_parameters_logic import ParametersLogicMixin
 from foamdesk.ui.main_window_project_logic import ProjectProcessLogicMixin
 from foamdesk.ui.main_window_settings_physics_logic import SettingsPhysicsLogicMixin
+from foamdesk.ui.draw_geometry_tab import DrawGeometryLogicMixin
 
 
 class WindowTitleBar(QFrame):
@@ -92,7 +95,7 @@ class WindowTitleBar(QFrame):
             self._window.showMaximized()
 
 
-class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, SettingsPhysicsLogicMixin, ProjectProcessLogicMixin, QMainWindow):
+class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, SettingsPhysicsLogicMixin, ProjectProcessLogicMixin, DrawGeometryLogicMixin, QMainWindow):
     TAB_PROJECT_HOME = 0
     TAB_DRAW_GEOMETRY = 1
     TAB_MESH_GENERATION = 2
@@ -171,14 +174,15 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._native_vtk_viewer: NativeVtkViewerDialog | None = None
         self.setWindowTitle("FoamDesk")
         self.resize(1400, 900)
+        self._init_modeling_state()
         self._build_ui()
+        self._setup_modeling_axes()
         self._apply_settings_theme()
         self._refresh_status_bar()
         if initial_project is not None:
             self._activate_project(initial_project, "已恢复上次项目。")
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        self._persist_draw_geometry_state()
         super().closeEvent(event)
 
     def _build_ui(self) -> None:
@@ -222,6 +226,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
 
         case_menu = menu_bar.addMenu("Case")
         case_menu.addAction("新增 Case", self._create_case)
+        case_menu.addAction("删除 Case", self._delete_case)
         case_menu.addAction("打开当前 Case 目录", self._show_current_case_path)
 
         solver_menu = menu_bar.addMenu("求解器")
@@ -513,161 +518,160 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
 
     def _build_draw_geometry_tab(self) -> QWidget:
         wrapper = QWidget()
-        root_layout = QVBoxLayout(wrapper)
-        root_layout.setContentsMargins(0, 0, 0, 0)
-        root_layout.setSpacing(0)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        content = QWidget()
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(10)
+        root = QVBoxLayout(wrapper)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        title = QLabel("绘制几何")
-        title.setStyleSheet("font-size: 22px; font-weight: 600;")
-        desc = QLabel("可视化编辑 blockMesh。计算域 + 几何体共用同一套顶点/边编辑。")
-        desc.setWordWrap(True)
-        layout.addWidget(title)
-        layout.addWidget(desc)
+        # --- toolbar ---
+        toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(8, 4, 8, 4)
+        toolbar.setSpacing(4)
 
-        self._geo_objects = self._default_draw_geometry_objects()
-        self._active_obj_idx = 0
+        primitives = [
+            ("cube", "立方体"), ("sphere", "球体"),
+            ("cylinder", "圆柱"), ("cone", "圆锥"),
+        ]
+        for kind, label in primitives:
+            btn = QPushButton(label)
+            btn.setFixedHeight(30)
+            btn.clicked.connect(lambda _checked=False, k=kind: self._add_primitive(k))
+            toolbar.addWidget(btn)
 
-        obj_row = QHBoxLayout()
-        obj_row.setSpacing(8)
-        self._obj_combo = QComboBox()
-        self._obj_combo.currentIndexChanged.connect(self._switch_active_object)
-        new_btn = QPushButton("+ 新建几何体")
-        new_btn.clicked.connect(self._new_geo_object)
-        del_btn = QPushButton("- 删除当前")
-        del_btn.clicked.connect(self._delete_geo_object)
-        obj_row.addWidget(QLabel("编辑对象"))
-        obj_row.addWidget(self._obj_combo, 1)
-        obj_row.addWidget(new_btn)
-        obj_row.addWidget(del_btn)
-        layout.addLayout(obj_row)
-        self._rebuild_obj_combo()
+        toolbar.addSpacing(12)
 
-        vh = QHBoxLayout()
-        vh.addWidget(QLabel("顶点列表"))
-        add_v = QPushButton("+ 添加")
-        csv_v = QPushButton("导入CSV")
-        csv_v.clicked.connect(self._import_vertices_csv)
-        del_v = QPushButton("- 删除")
-        vh.addStretch(1); vh.addWidget(add_v); clear_v = QPushButton("清空"); clear_v.clicked.connect(self._clear_all_vertices); vh.addWidget(del_v); vh.addWidget(clear_v); vh.addWidget(csv_v)
-        layout.addLayout(vh)
+        for text, handler, extra in [
+            ("选择", self._activate_select_mode, ""),
+            ("删除", self._delete_selected, "color: #f48771;"),
+        ]:
+            btn = QPushButton(text)
+            btn.setFixedHeight(30)
+            if extra:
+                btn.setStyleSheet(extra)
+            btn.clicked.connect(handler)
+            toolbar.addWidget(btn)
 
-        self._vertex_table = QTableWidget(0, 3)
-        self._vertex_table.setHorizontalHeaderLabels(["X", "Y", "Z"])
-        self._vertex_table.horizontalHeader().setStretchLastSection(True)
-        self._vertex_table.setMinimumHeight(180)
-        self._vertex_table.cellChanged.connect(self._on_vertex_table_changed)
-        add_v.clicked.connect(lambda: (self._add_vertex_row(0,0,0), self._save_vertex_table(), self._refresh_draw_geo_preview()))
-        del_v.clicked.connect(self._delete_selected_vertex)
-        layout.addWidget(self._vertex_table)
+        toolbar.addSpacing(12)
 
-        elab = QLabel("边 (Edges)")
-        elab.setStyleSheet("font-weight: 600; margin-top: 8px;")
-        layout.addWidget(elab)
-        ef = QHBoxLayout(); ef.setSpacing(6)
-        self._edge_type_combo = QComboBox()
-        self._edge_type_combo.addItems(["arc","spline","polyLine","BSpline"])
-        self._edge_start = QSpinBox(); self._edge_start.setRange(0,99); self._edge_start.setValue(0)
-        self._edge_end = QSpinBox(); self._edge_end.setRange(0,99); self._edge_end.setValue(1)
-        self._edge_interp = QLineEdit("0.5 0.5 0.5")
-        self._edge_interp.setPlaceholderText("x y z")
-        self._edge_interp.setMinimumWidth(160)
-        ae = QPushButton("添加边")
-        ae.clicked.connect(self._add_edge_to_current)
-        ef.addWidget(QLabel("类型")); ef.addWidget(self._edge_type_combo)
-        ef.addWidget(QLabel("起点")); ef.addWidget(self._edge_start)
-        ef.addWidget(QLabel("终点")); ef.addWidget(self._edge_end)
-        ef.addWidget(QLabel("插值点")); ef.addWidget(self._edge_interp)
-        csv_e = QPushButton("导入CSV")
-        csv_e.clicked.connect(self._import_edges_csv)
-        ef.addWidget(ae); ef.addWidget(csv_e); ef.addStretch(1)
-        layout.addLayout(ef)
+        reset_btn = QPushButton("重置视角")
+        reset_btn.setFixedHeight(30)
+        reset_btn.clicked.connect(self._reset_camera)
+        toolbar.addWidget(reset_btn)
+        toolbar.addStretch(1)
+        root.addLayout(toolbar)
 
-        self._edge_list = QTextEdit()
-        self._edge_list.setReadOnly(True); self._edge_list.setMaximumHeight(80)
-        self._edge_list.setPlaceholderText("当前对象的边显示在这里。")
-        layout.addWidget(self._edge_list)
-        de_btn = QPushButton("删除选中边")
-        de_btn.clicked.connect(self._delete_selected_edge)
-        clr_e = QPushButton("清空边")
-        clr_e.clicked.connect(self._clear_all_edges)
-        er = QHBoxLayout(); er.setSpacing(6)
-        er.addWidget(de_btn); er.addWidget(clr_e); er.addStretch(1)
-        layout.addLayout(er)
-        self._edge_defs = []
+        # --- body: scene tree | viewport | property panel ---
+        body = QSplitter(Qt.Orientation.Horizontal)
 
-        self._block_widget = QWidget()
-        blk = QVBoxLayout(self._block_widget)
-        blk.setContentsMargins(0,0,0,0); blk.setSpacing(6)
-        bl = QLabel("块 (Blocks)")
-        bl.setStyleSheet("font-weight: 600;")
-        blk.addWidget(bl)
-        br = QHBoxLayout(); br.setSpacing(6)
-        self._block_vert_inputs = []
-        for i in range(8):
-            sb = QSpinBox(); sb.setRange(0,99); sb.setValue(i)
-            sb.valueChanged.connect(self._on_block_vert_changed)
-            self._block_vert_inputs.append(sb)
-            br.addWidget(QLabel(str(i))); br.addWidget(sb)
-        br.addStretch(1)
-        blk.addLayout(br)
+        # scene tree
+        tree_wrapper = QWidget()
+        tree_layout = QVBoxLayout(tree_wrapper)
+        tree_layout.setContentsMargins(8, 8, 8, 8)
+        tree_layout.setSpacing(6)
+        tree_title = QLabel("模型树")
+        tree_title.setStyleSheet("font-size: 15px; font-weight: 600;")
+        tree_layout.addWidget(tree_title)
+        self._modeling_tree = QTreeWidget()
+        self._modeling_tree.setHeaderLabels(["模型", "类型"])
+        self._modeling_tree.setColumnWidth(0, 100)
+        self._modeling_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._modeling_tree.customContextMenuRequested.connect(self._tree_context_menu)
+        self._modeling_tree.itemClicked.connect(self._on_tree_item_clicked)
+        self._modeling_tree.itemChanged.connect(self._on_tree_item_changed)
+        tree_layout.addWidget(self._modeling_tree, 1)
+        body.addWidget(tree_wrapper)
 
-        cr = QHBoxLayout(); cr.setSpacing(8)
-        self._geo_nx = QSpinBox(); self._geo_nx.setRange(1,500); self._geo_nx.setValue(10)
-        self._geo_ny = QSpinBox(); self._geo_ny.setRange(1,500); self._geo_ny.setValue(10)
-        self._geo_nz = QSpinBox(); self._geo_nz.setRange(1,500); self._geo_nz.setValue(10)
-        for w in (self._geo_nx,self._geo_ny,self._geo_nz):
-            w.valueChanged.connect(self._on_cell_changed); w.setMinimumWidth(80)
-        cr.addWidget(QLabel("Nx")); cr.addWidget(self._geo_nx)
-        cr.addWidget(QLabel("Ny")); cr.addWidget(self._geo_ny)
-        cr.addWidget(QLabel("Nz")); cr.addWidget(self._geo_nz)
-        self._geo_grading = QLineEdit("1 1 1")
-        self._geo_grading.setMaximumWidth(120)
-        self._geo_grading.textChanged.connect(self._on_grading_changed)
-        cr.addWidget(QLabel("Grading")); cr.addWidget(self._geo_grading)
-        cr.addStretch(1)
-        blk.addLayout(cr)
-        layout.addWidget(self._block_widget)
+        # viewport
+        viewport_wrapper = QWidget()
+        vp_layout = QVBoxLayout(viewport_wrapper)
+        vp_layout.setContentsMargins(0, 0, 0, 0)
+        self._modeling_viewport = NativeVtkPreviewWidget(viewport_wrapper, background=(0.94, 0.94, 0.94))
+        vp_layout.addWidget(self._modeling_viewport, 1)
+        body.addWidget(viewport_wrapper)
 
-        self._boundary_widget = QWidget()
-        bnr = QHBoxLayout(self._boundary_widget)
-        bnr.setContentsMargins(0,0,0,0); bnr.setSpacing(8)
-        bnr.addWidget(QLabel("入口"))
-        self._geo_inlet = QLineEdit("inlet"); bnr.addWidget(self._geo_inlet)
-        bnr.addWidget(QLabel("出口"))
-        self._geo_outlet = QLineEdit("outlet"); bnr.addWidget(self._geo_outlet)
-        bnr.addWidget(QLabel("壁面"))
-        self._geo_walls = QLineEdit("fixedWalls"); bnr.addWidget(self._geo_walls)
-        bnr.addStretch(1)
-        layout.addWidget(self._boundary_widget)
+        # property panel
+        prop_wrapper = QWidget()
+        prop_wrapper.setStyleSheet("background: #252526;")
+        prop_layout = QVBoxLayout(prop_wrapper)
+        prop_layout.setContentsMargins(12, 12, 12, 12)
+        prop_layout.setSpacing(10)
+        prop_title = QLabel("属性")
+        prop_title.setStyleSheet("font-size: 15px; font-weight: 600;")
+        prop_layout.addWidget(prop_title)
 
-        self._geo_preview_canvas = NativeVtkPreviewWidget(wrapper, background=(0.12, 0.12, 0.12))
-        self._geo_preview_canvas.setMinimumHeight(380)
-        layout.addWidget(self._geo_preview_canvas)
+        self._modeling_prop_name = QLineEdit()
+        self._modeling_prop_name.setPlaceholderText("模型名称")
+        self._modeling_prop_name.setEnabled(False)
+        self._modeling_prop_name.editingFinished.connect(self._on_prop_name_changed)
 
-        br2 = QHBoxLayout(); br2.setSpacing(8)
-        gb = QPushButton("生成 blockMeshDict + STL")
-        gb.clicked.connect(lambda _checked=False: self._apply_draw_geometry())
-        zoom_btn = QPushButton("放大预览")
-        zoom_btn.clicked.connect(lambda _checked=False: self._open_draw_geometry_preview_dialog())
-        rb = QPushButton("重置全部")
-        rb.clicked.connect(lambda _checked=False: self._reset_draw_geometry())
-        br2.addWidget(gb); br2.addWidget(zoom_btn); br2.addWidget(rb); br2.addStretch(1)
-        layout.addLayout(br2)
+        self._modeling_prop_kind = QLabel("—")
+        self._modeling_prop_kind.setStyleSheet("color: #9da5b4;")
 
-        layout.addStretch(1)
-        scroll.setWidget(content)
-        root_layout.addWidget(scroll)
-        self._load_draw_geometry_state()
-        self._load_active_object_to_ui()
-        self._refresh_draw_geo_preview()
+        pos_x = self._make_modeling_spinbox(-100, 100, 0.1, self._on_prop_transform_changed)
+        pos_y = self._make_modeling_spinbox(-100, 100, 0.1, self._on_prop_transform_changed)
+        pos_z = self._make_modeling_spinbox(-100, 100, 0.1, self._on_prop_transform_changed)
+        rot_x = self._make_modeling_spinbox(-360, 360, 1.0, self._on_prop_transform_changed)
+        rot_y = self._make_modeling_spinbox(-360, 360, 1.0, self._on_prop_transform_changed)
+        rot_z = self._make_modeling_spinbox(-360, 360, 1.0, self._on_prop_transform_changed)
+        scl_x = self._make_modeling_spinbox(0.01, 100, 0.1, self._on_prop_transform_changed)
+        scl_y = self._make_modeling_spinbox(0.01, 100, 0.1, self._on_prop_transform_changed)
+        scl_z = self._make_modeling_spinbox(0.01, 100, 0.1, self._on_prop_transform_changed)
+        scl_x.setValue(1.0); scl_y.setValue(1.0); scl_z.setValue(1.0)
+        self._modeling_prop_pos_x, self._modeling_prop_pos_y, self._modeling_prop_pos_z = pos_x, pos_y, pos_z
+        self._modeling_prop_rot_x, self._modeling_prop_rot_y, self._modeling_prop_rot_z = rot_x, rot_y, rot_z
+        self._modeling_prop_scl_x, self._modeling_prop_scl_y, self._modeling_prop_scl_z = scl_x, scl_y, scl_z
+
+        self._modeling_color_btn = QPushButton("■")
+        self._modeling_color_btn.setFixedSize(36, 36)
+        self._modeling_color_btn.clicked.connect(self._on_color_pick)
+
+        prop_layout.addWidget(QLabel("名称"))
+        prop_layout.addWidget(self._modeling_prop_name)
+        prop_layout.addWidget(QLabel("类型"))
+        prop_layout.addWidget(self._modeling_prop_kind)
+        prop_layout.addWidget(self._modeling_group("位置", pos_x, pos_y, pos_z))
+        prop_layout.addWidget(self._modeling_group("旋转 (°)", rot_x, rot_y, rot_z))
+        prop_layout.addWidget(self._modeling_group("缩放", scl_x, scl_y, scl_z))
+        prop_layout.addWidget(QLabel("颜色"))
+        prop_layout.addWidget(self._modeling_color_btn)
+        prop_layout.addStretch(1)
+        body.addWidget(prop_wrapper)
+
+        body.setSizes([200, 520, 220])
+        root.addWidget(body, 1)
+
+        # --- status bar ---
+        status_bar = QWidget()
+        status_bar.setStyleSheet("background: #007acc;")
+        sb_layout = QHBoxLayout(status_bar)
+        sb_layout.setContentsMargins(12, 2, 12, 2)
+        self._modeling_status_label = QLabel("就绪")
+        self._modeling_status_label.setStyleSheet("color: #ffffff; background: transparent;")
+        sb_layout.addWidget(self._modeling_status_label)
+        sb_layout.addStretch(1)
+        mode_label = QLabel("相机模式")
+        mode_label.setStyleSheet("color: #ffffff; background: transparent;")
+        sb_layout.addWidget(mode_label)
+        root.addWidget(status_bar)
+
         return wrapper
+
+    def _make_modeling_spinbox(self, min_val, max_val, step, callback):
+        sb = QDoubleSpinBox()
+        sb.setRange(min_val, max_val)
+        sb.setDecimals(2)
+        sb.setSingleStep(step)
+        sb.valueChanged.connect(callback)
+        return sb
+
+    def _modeling_group(self, label_text, x, y, z) -> QGroupBox:
+        gb = QGroupBox(label_text)
+        form = QFormLayout(gb)
+        form.setContentsMargins(8, 12, 8, 8)
+        form.setSpacing(4)
+        form.addRow("X", x)
+        form.addRow("Y", y)
+        form.addRow("Z", z)
+        return gb
 
     def _build_physics_prepare_tab(self) -> QWidget:
         wrapper = QWidget()

@@ -26,6 +26,182 @@ from foamdesk.ui.visualization_widgets import NativeVtkPreviewWidget
 
 
 class GeometryLogicMixin:
+    def _import_stl_geometry(self) -> None:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "导入 STL 几何",
+            str(self._current_project.path),
+            "STL 几何 (*.stl *.STL)",
+        )
+        if not file_path:
+            return
+        domain_tmpl = self._current_domain_template() if self._current_project is not None else None
+        transform = self._read_stl_transform_dialog(Path(file_path), template=domain_tmpl)
+        if transform is None:
+            return
+        try:
+            asset = self._context.geometry_import_service.import_stl(
+                self._current_project,
+                Path(file_path),
+                transform,
+            )
+        except (OSError, ValueError) as error:
+            self._show_error(f"导入 STL 失败：{error}")
+            return
+        self._append_log(f"STL 几何已导入：{asset.stored_path}")
+        self._refresh_geometry_panel()
+        self._workspace_tabs.setCurrentIndex(self.TAB_MESH_GENERATION)
+        self._set_status("STL 几何导入完成。")
+
+    def _read_stl_transform_dialog(
+        self,
+        source_path: Path,
+        initial_transform: StlTransform | None = None,
+        template: ComputationDomainTemplate | None = None,
+    ) -> StlTransform | None:
+        resolved_transform = initial_transform or StlTransform()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("导入 STL：位置和缩放")
+        dialog.resize(760, 620)
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+        scale_input = QDoubleSpinBox()
+        scale_input.setRange(0.0001, 10000.0)
+        scale_input.setDecimals(4)
+        scale_input.setValue(resolved_transform.scale)
+        scale_input.setSingleStep(0.1)
+        x_input = QDoubleSpinBox()
+        y_input = QDoubleSpinBox()
+        z_input = QDoubleSpinBox()
+        rx_input = QDoubleSpinBox()
+        ry_input = QDoubleSpinBox()
+        rz_input = QDoubleSpinBox()
+        for input_widget in (x_input, y_input, z_input):
+            input_widget.setRange(-100000.0, 100000.0)
+            input_widget.setDecimals(4)
+            input_widget.setSingleStep(0.1)
+        for input_widget in (rx_input, ry_input, rz_input):
+            input_widget.setRange(-3600.0, 3600.0)
+            input_widget.setDecimals(3)
+            input_widget.setSingleStep(5.0)
+        x_input.setValue(resolved_transform.translate[0])
+        y_input.setValue(resolved_transform.translate[1])
+        z_input.setValue(resolved_transform.translate[2])
+        rx_input.setValue(resolved_transform.rotate_degrees[0])
+        ry_input.setValue(resolved_transform.rotate_degrees[1])
+        rz_input.setValue(resolved_transform.rotate_degrees[2])
+        hint = QLabel("这些参数会直接修改导入后的 STL 顶点坐标。变换顺序：缩放 -> 旋转 -> 平移。")
+        hint.setWordWrap(True)
+        preview_hint = QLabel("预览说明：半透明区域为当前计算域，蓝色几何是当前缩放和平移后的 STL 位置。")
+        preview_hint.setWordWrap(True)
+        preview_canvas = NativeVtkPreviewWidget(dialog, background=(0.12, 0.12, 0.12))
+        preview_canvas.setMinimumHeight(320)
+
+        def current_transform() -> StlTransform:
+            return StlTransform(
+                translate=(x_input.value(), y_input.value(), z_input.value()),
+                scale=scale_input.value(),
+                rotate_degrees=(rx_input.value(), ry_input.value(), rz_input.value()),
+            )
+
+        def refresh_preview() -> None:
+            self._draw_stl_transform_preview(preview_canvas, source_path, current_transform(), template)
+
+        scale_input.valueChanged.connect(refresh_preview)
+        x_input.valueChanged.connect(refresh_preview)
+        y_input.valueChanged.connect(refresh_preview)
+        z_input.valueChanged.connect(refresh_preview)
+        rx_input.valueChanged.connect(refresh_preview)
+        ry_input.valueChanged.connect(refresh_preview)
+        rz_input.valueChanged.connect(refresh_preview)
+        form.addRow("缩放 scale", scale_input)
+        form.addRow("平移 X", x_input)
+        form.addRow("平移 Y", y_input)
+        form.addRow("平移 Z", z_input)
+        form.addRow("旋转 X°", rx_input)
+        form.addRow("旋转 Y°", ry_input)
+        form.addRow("旋转 Z°", rz_input)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(hint)
+        layout.addLayout(form)
+        layout.addWidget(preview_hint)
+        layout.addWidget(preview_canvas)
+        layout.addWidget(buttons)
+        refresh_preview()
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return current_transform()
+
+    def _draw_stl_transform_preview(
+        self,
+        canvas: NativeVtkPreviewWidget,
+        source_path: Path,
+        transform: StlTransform,
+        template: ComputationDomainTemplate | None = None,
+    ) -> None:
+        canvas.clear((0.12, 0.12, 0.12))
+        points_for_limits: list[np.ndarray] = []
+        if template is not None:
+            points_for_limits.append(self._draw_domain_template_vtk(canvas, template))
+        else:
+            points_for_limits.append(self._draw_box_domain_vtk(canvas, np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], dtype=float)))
+
+        if self._current_project is not None:
+            for asset in self._context.geometry_import_service.list_assets(self._current_project):
+                if asset.format.upper() != "STL" or not asset.stored_path.exists():
+                    continue
+                try:
+                    pts, fcs = self._read_stl_preview_mesh(asset.stored_path)
+                    if pts.size and fcs.size:
+                        canvas.add_polydata(
+                            self._polydata_from_points_faces(pts, fcs),
+                            color=(0.55, 0.55, 0.55),
+                            opacity=0.35,
+                            edge_color=(0.25, 0.25, 0.25),
+                        )
+                        points_for_limits.append(pts)
+                except (OSError, ValueError):
+                    pass
+
+        try:
+            points, faces = self._read_stl_preview_mesh(source_path)
+        except (OSError, ValueError) as error:
+            canvas.add_message(f"STL preview failed: {error}")
+            canvas.finish(np.vstack(points_for_limits) if points_for_limits else None)
+            return
+
+        if points.size == 0 or faces.size == 0:
+            canvas.add_message("No STL triangles to preview.")
+            canvas.finish(np.vstack(points_for_limits) if points_for_limits else None)
+            return
+
+        rotation = self._context.geometry_import_service._rotation_matrix(transform.rotate_degrees)
+        transformed_points = np.array(
+            [
+                self._context.geometry_import_service._transform_vertex(
+                    (float(point[0]), float(point[1]), float(point[2])),
+                    float(transform.scale),
+                    rotation,
+                    transform.translate,
+                )
+                for point in points
+            ],
+            dtype=float,
+        )
+        canvas.add_polydata(
+            self._polydata_from_points_faces(transformed_points, faces),
+            color=(0.25, 0.74, 1.0),
+            opacity=0.72,
+            edge_color=(0.03, 0.18, 0.28),
+        )
+        points_for_limits.append(transformed_points)
+        canvas.finish(np.vstack(points_for_limits))
+
     def _read_stl_preview_mesh(self, source_path: Path) -> tuple[np.ndarray, np.ndarray]:
         reader = vtkSTLReader()
         reader.SetFileName(str(source_path))
@@ -582,537 +758,39 @@ class GeometryLogicMixin:
             f"checkMesh -> {parameters.solver_name}"
         )
 
-    def _default_draw_geometry_objects(self) -> list[dict]:
-        dv = [(0,0,0),(1,0,0),(1,1,0),(0,1,0),(0,0,1),(1,0,1),(1,1,1),(0,1,1)]
-        return [{"name":"计算域","verts":list(dv),"edges":[],"block_v":[0,1,2,3,4,5,6,7],"is_domain":True,"nx":10,"ny":10,"nz":10,"grading":"1 1 1"}]
-
-    def _draw_geometry_state_path(self) -> Path | None:
+    def _preview_imported_stl(self) -> None:
         if self._current_project is None:
-            return None
-        return self._current_project.case_dir / ".foamdesk" / "draw_geometry_state.json"
-
-    def _normalize_draw_geometry_object(self, raw: dict, index: int) -> dict:
-        fallback = self._default_draw_geometry_objects()[0] if index == 0 else {"name":f"几何体{index}","verts":[],"edges":[],"is_domain":False}
-        if not isinstance(raw, dict):
-            raw = fallback
-        obj = dict(raw)
-        obj["name"] = str(obj.get("name") or fallback["name"])
-        verts = []
-        for vert in obj.get("verts", []):
-            if not isinstance(vert, (list, tuple)) or len(vert) < 3:
-                continue
-            try:
-                verts.append((float(vert[0]), float(vert[1]), float(vert[2])))
-            except (TypeError, ValueError):
-                continue
-        obj["verts"] = verts or list(fallback.get("verts", []))
-        edges = []
-        for edge in obj.get("edges", []):
-            if not isinstance(edge, (list, tuple)) or len(edge) < 3:
-                continue
-            try:
-                edges.append((str(edge[0]), int(edge[1]), int(edge[2]), str(edge[3]) if len(edge) > 3 else ""))
-            except (TypeError, ValueError):
-                continue
-        obj["edges"] = edges
-        if index == 0:
-            obj["is_domain"] = True
-            block_v = obj.get("block_v", fallback["block_v"])
-            obj["block_v"] = [int(v) for v in block_v[:8]] if isinstance(block_v, list) else list(fallback["block_v"])
-            while len(obj["block_v"]) < 8:
-                obj["block_v"].append(len(obj["block_v"]))
-            obj["nx"] = max(1, int(obj.get("nx", 10)))
-            obj["ny"] = max(1, int(obj.get("ny", 10)))
-            obj["nz"] = max(1, int(obj.get("nz", 10)))
-            obj["grading"] = str(obj.get("grading") or "1 1 1")
-        else:
-            obj["is_domain"] = False
-        return obj
-
-    def _load_draw_geometry_state(self) -> bool:
-        path = self._draw_geometry_state_path()
-        if path is None or not path.exists() or not hasattr(self, "_obj_combo"):
-            return False
+            self._show_error("请先新建或打开项目。")
+            return
+        assets = self._context.geometry_import_service.list_assets(self._current_project)
+        stl_assets = [asset for asset in assets if asset.format.upper() == "STL" and asset.stored_path.exists()]
+        if not stl_assets:
+            self._show_error("当前 Case 没有可预览的 STL，请先导入 STL。")
+            return
+        selected_asset = self._pick_stl_asset_dialog(stl_assets, "预览 STL")
+        if selected_asset is None:
+            return
+        self._ensure_vtk_viewer()
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            self._append_log(f"绘制几何草稿读取失败：{error}")
-            return False
-        raw_objects = data.get("objects", [])
-        if not isinstance(raw_objects, list) or not raw_objects:
-            return False
-        self._suspend_draw_geometry_persist = True
-        try:
-            self._geo_objects = [self._normalize_draw_geometry_object(obj, idx) for idx, obj in enumerate(raw_objects)]
-            self._active_obj_idx = min(max(int(data.get("active_object_index", 0)), 0), len(self._geo_objects) - 1)
-            boundary = data.get("boundary", {}) if isinstance(data.get("boundary", {}), dict) else {}
-            if hasattr(self, "_geo_inlet"):
-                self._geo_inlet.setText(str(boundary.get("inlet", "inlet")))
-                self._geo_outlet.setText(str(boundary.get("outlet", "outlet")))
-                self._geo_walls.setText(str(boundary.get("walls", "fixedWalls")))
-            self._rebuild_obj_combo()
-            self._load_active_object_to_ui()
-            self._refresh_draw_geo_preview()
-        finally:
-            self._suspend_draw_geometry_persist = False
-        self._append_log(f"已恢复绘制几何草稿：{path}")
-        return True
-
-    def _persist_draw_geometry_state(self) -> None:
-        if getattr(self, "_suspend_draw_geometry_persist", False):
+            point_count, face_count = self._vtk_viewer.plot_stl_file(selected_asset.stored_path)
+        except RuntimeError as error:
+            self._show_error(f"预览 STL 失败：{error}")
             return
-        path = self._draw_geometry_state_path()
-        if path is None or not hasattr(self, "_vertex_table") or not hasattr(self, "_geo_inlet"):
-            return
-        try:
-            self._save_current_object()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            data = {
-                "version": 1,
-                "active_object_index": self._active_obj_idx,
-                "boundary": {
-                    "inlet": self._geo_inlet.text().strip() or "inlet",
-                    "outlet": self._geo_outlet.text().strip() or "outlet",
-                    "walls": self._geo_walls.text().strip() or "fixedWalls",
-                },
-                "objects": self._geo_objects,
-            }
-            path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        except (OSError, ValueError) as error:
-            self._append_log(f"绘制几何草稿保存失败：{error}")
+        self._append_log(
+            f"STL 预览已加载：name={selected_asset.name}, points={point_count}, faces={face_count}"
+        )
+        self._set_status("STL 预览已加载。")
 
-    # --- Object management ---
+    def _show_cad_import_limitations(self) -> None:
+        QMessageBox.information(
+            self,
+            "STEP/IGES 支持说明",
+            "当前 Sprint 28 先完成 STL 导入 MVP。\n\n"
+            "原因：STL 是 OpenFOAM triSurface 最直接支持的几何格式，适合先打通流程。\n\n"
+            "STEP、IGES、CATIA、SolidWorks 属于 CAD B-Rep/装配模型，"
+            "需要后续接入 OCCT/CAD 内核做读取、修复、三角化和单位处理。",
+        )
 
-    def _rebuild_obj_combo(self):
-        self._obj_combo.blockSignals(True)
-        self._obj_combo.clear()
-        for obj in self._geo_objects:
-            self._obj_combo.addItem(obj["name"])
-        self._obj_combo.setCurrentIndex(self._active_obj_idx)
-        self._obj_combo.blockSignals(False)
-        is_domain = (self._active_obj_idx == 0)
-        if hasattr(self, "_block_widget"):
-            self._block_widget.setVisible(is_domain)
-        if hasattr(self, "_boundary_widget"):
-            self._boundary_widget.setVisible(is_domain)
-
-    def _save_current_object(self):
-        if not self._geo_objects: return
-        obj = self._geo_objects[self._active_obj_idx]
-        obj["verts"] = self._read_draw_geo_vertices()
-        obj["edges"] = list(self._edge_defs)
-        if self._active_obj_idx == 0:
-            obj["block_v"] = [sb.value() for sb in self._block_vert_inputs]
-            obj["nx"] = self._geo_nx.value()
-            obj["ny"] = self._geo_ny.value()
-            obj["nz"] = self._geo_nz.value()
-            obj["grading"] = self._geo_grading.text().strip() or "1 1 1"
-
-    def _switch_active_object(self, idx):
-        if idx < 0 or idx >= len(self._geo_objects): return
-        self._save_current_object()
-        self._active_obj_idx = idx
-        self._load_active_object_to_ui()
-        self._rebuild_obj_combo()
-        self._refresh_draw_geo_preview()
-        self._persist_draw_geometry_state()
-
-    def _load_active_object_to_ui(self):
-        obj = self._geo_objects[self._active_obj_idx]
-        self._edge_defs = list(obj.get("edges", []))
-        self._vertex_table.blockSignals(True)
-        while self._vertex_table.rowCount() > 0:
-            self._vertex_table.removeRow(0)
-        for x,y,z in obj["verts"]:
-            self._add_vertex_row(x,y,z)
-        self._vertex_table.blockSignals(False)
-        self._update_edge_list()
-        if self._active_obj_idx == 0:
-            bv = obj.get("block_v",[0,1,2,3,4,5,6,7])
-            for i,sb in enumerate(self._block_vert_inputs):
-                sb.setValue(bv[i] if i<len(bv) else i)
-            self._geo_nx.setValue(obj.get("nx",10))
-            self._geo_ny.setValue(obj.get("ny",10))
-            self._geo_nz.setValue(obj.get("nz",10))
-            self._geo_grading.setText(obj.get("grading","1 1 1"))
-
-    def _new_geo_object(self):
-        self._save_current_object()
-        name = "几何体" + str(len(self._geo_objects))
-        domain_verts = self._geo_objects[0]["verts"]
-        xs = [v[0] for v in domain_verts]; ys = [v[1] for v in domain_verts]; zs = [v[2] for v in domain_verts]
-        s = 0.25  # half-size = 50% of domain = 0.25 from center
-        dx = (max(xs)-min(xs))*s; dy = (max(ys)-min(ys))*s; dz = (max(zs)-min(zs))*s
-        cx = (min(xs)+max(xs))/2; cy = (min(ys)+max(ys))/2; cz = (min(zs)+max(zs))/2
-        dv = [(cx-dx,cy-dy,cz-dz),(cx+dx,cy-dy,cz-dz),(cx+dx,cy+dy,cz-dz),(cx-dx,cy+dy,cz-dz),
-              (cx-dx,cy-dy,cz+dz),(cx+dx,cy-dy,cz+dz),(cx+dx,cy+dy,cz+dz),(cx-dx,cy+dy,cz+dz)]
-        self._geo_objects.append({"name":name,"verts":list(dv),"edges":[],"is_domain":False})
-        self._active_obj_idx = len(self._geo_objects) - 1
-        self._load_active_object_to_ui()
-        self._rebuild_obj_combo()
-        self._refresh_draw_geo_preview()
-        self._persist_draw_geometry_state()
-
-    def _delete_geo_object(self):
-        if self._active_obj_idx == 0:
-            self._show_error("不能删除计算域。")
-            return
-        self._geo_objects.pop(self._active_obj_idx)
-        self._active_obj_idx = 0
-        self._load_active_object_to_ui()
-        self._rebuild_obj_combo()
-        self._refresh_draw_geo_preview()
-        self._persist_draw_geometry_state()
-
-    # --- Vertex helpers ---
-
-    def _import_vertices_csv(self):
-        fp, _ = QFileDialog.getOpenFileName(self, "导入顶点 CSV", "", "CSV (*.csv)")
-        if not fp: return
-        import csv
-        with open(fp, newline="") as f:
-            reader = csv.reader(f)
-            for row in reader:
-                clean = [v.strip() for v in row if v.strip()]
-                if len(clean) >= 3:
-                    try:
-                        x, y, z = float(clean[0]), float(clean[1]), float(clean[2])
-                        self._add_vertex_row(x, y, z)
-                    except ValueError:
-                        continue
-        self._save_vertex_table()
-        self._refresh_draw_geo_preview()
-        self._persist_draw_geometry_state()
-
-    def _import_edges_csv(self):
-        fp, _ = QFileDialog.getOpenFileName(self, "导入边 CSV", "", "CSV (*.csv)")
-        if not fp: return
-        import csv
-        with open(fp, newline="") as f:
-            reader = csv.reader(f)
-            for row in reader:
-                clean = [v.strip() for v in row if v.strip()]
-                if len(clean) < 3: continue
-                etype = clean[0]
-                if etype not in ("arc","spline","polyLine","BSpline"): continue
-                try:
-                    s = int(clean[1]); e = int(clean[2])
-                    interp = " ".join(clean[3:]) if len(clean) > 3 else ""
-                    self._edge_defs.append((etype, s, e, interp))
-                except ValueError:
-                    continue
-        if self._geo_objects:
-            self._geo_objects[self._active_obj_idx]["edges"] = list(self._edge_defs)
-        self._update_edge_list()
-        self._refresh_draw_geo_preview()
-        self._persist_draw_geometry_state()
-
-    def _clear_all_vertices(self):
-        self._vertex_table.blockSignals(True)
-        while self._vertex_table.rowCount() > 0:
-            self._vertex_table.removeRow(0)
-        self._vertex_table.blockSignals(False)
-        self._save_vertex_table()
-        self._refresh_draw_geo_preview()
-        self._persist_draw_geometry_state()
-
-    def _clear_all_edges(self):
-        self._edge_defs = []
-        if self._geo_objects:
-            self._geo_objects[self._active_obj_idx]["edges"] = []
-        self._update_edge_list()
-        self._refresh_draw_geo_preview()
-        self._persist_draw_geometry_state()
-
-    def _add_vertex_row(self, x=0.0, y=0.0, z=0.0):
-        r = self._vertex_table.rowCount()
-        self._vertex_table.insertRow(r)
-        for j,v in enumerate([x,y,z]):
-            self._vertex_table.setItem(r, j, QTableWidgetItem(str(float(v))))
-
-    def _read_draw_geo_vertices(self):
-        verts = []
-        for i in range(self._vertex_table.rowCount()):
-            row = []
-            for j in range(3):
-                item = self._vertex_table.item(i,j)
-                try: row.append(float(item.text()) if item else 0.0)
-                except ValueError: row.append(0.0)
-            verts.append(tuple(row))
-        return verts
-
-    def _save_vertex_table(self):
-        if self._geo_objects:
-            self._geo_objects[self._active_obj_idx]["verts"] = self._read_draw_geo_vertices()
-
-    def _on_vertex_table_changed(self):
-        self._save_vertex_table()
-        self._refresh_draw_geo_preview()
-        self._persist_draw_geometry_state()
-
-    def _delete_selected_vertex(self):
-        rows = set(i.row() for i in self._vertex_table.selectedIndexes())
-        for r in sorted(rows, reverse=True):
-            self._vertex_table.removeRow(r)
-        self._save_vertex_table()
-        self._refresh_draw_geo_preview()
-        self._persist_draw_geometry_state()
-
-    # --- Edge helpers ---
-
-    def _add_edge_to_current(self):
-        et = self._edge_type_combo.currentText()
-        s = self._edge_start.value(); e = self._edge_end.value()
-        ip = self._edge_interp.text().strip()
-        self._edge_defs.append((et,s,e,ip))
-        if self._geo_objects:
-            self._geo_objects[self._active_obj_idx]["edges"] = list(self._edge_defs)
-        self._update_edge_list()
-        self._refresh_draw_geo_preview()
-        self._persist_draw_geometry_state()
-
-    def _update_edge_list(self):
-        lines = []
-        for et,s,e,ip in self._edge_defs:
-            lines.append(et + " " + str(s) + " " + str(e) + (" (" + ip + ")" if ip else ""))
-        self._edge_list.setPlainText("\n".join(lines))
-
-    def _delete_selected_edge(self):
-        cur = self._edge_list.textCursor()
-        if cur.hasSelection():
-            st = cur.selectionStart(); ed = cur.selectionEnd()
-            text = self._edge_list.toPlainText()
-            lines = text.split("\n")
-            pos = 0; rm = []
-            for i,line in enumerate(lines):
-                le = pos + len(line)
-                if st < le and ed > pos: rm.append(i)
-                pos = le + 1
-            for i in sorted(rm, reverse=True):
-                if i < len(lines): lines.pop(i)
-                if i < len(self._edge_defs): self._edge_defs.pop(i)
-            if self._geo_objects:
-                self._geo_objects[self._active_obj_idx]["edges"] = list(self._edge_defs)
-            self._edge_list.setPlainText("\n".join(lines))
-            self._refresh_draw_geo_preview()
-            self._persist_draw_geometry_state()
-
-    # --- Block helpers ---
-
-    def _on_block_vert_changed(self):
-        if self._geo_objects and self._active_obj_idx == 0:
-            self._geo_objects[0]["block_v"] = [sb.value() for sb in self._block_vert_inputs]
-        self._refresh_draw_geo_preview()
-        self._persist_draw_geometry_state()
-
-    def _on_cell_changed(self):
-        if self._geo_objects and self._active_obj_idx == 0:
-            obj = self._geo_objects[0]
-            obj["nx"] = self._geo_nx.value()
-            obj["ny"] = self._geo_ny.value()
-            obj["nz"] = self._geo_nz.value()
-        self._persist_draw_geometry_state()
-
-    def _on_grading_changed(self):
-        if self._geo_objects and self._active_obj_idx == 0:
-            self._geo_objects[0]["grading"] = self._geo_grading.text().strip() or "1 1 1"
-        self._persist_draw_geometry_state()
-
-    def _edge_preview_points(self, verts, etype, start, end, interp_str) -> np.ndarray:
-        if start >= len(verts) or end >= len(verts):
-            return np.empty((0, 3), dtype=float)
-        p0 = np.array(verts[start]); p1 = np.array(verts[end])
-        try: coords = [float(v) for v in interp_str.split()]
-        except ValueError: coords = []
-        if etype == "arc" and len(coords) >= 3:
-            interp = np.array(coords[:3])
-            mid = (p0+p1)/2.0; offset = interp - mid
-            t = np.linspace(0,1,60)
-            pts = (1-t)[:,None]*p0 + t[:,None]*p1 + np.sin(t*np.pi)[:,None]*offset
-            return pts
-        elif etype in ("spline","polyLine","BSpline") and len(coords) >= 3:
-            ctrl = [p0]
-            for k in range(len(coords)//3):
-                ctrl.append(np.array(coords[k*3:(k+1)*3]))
-            ctrl.append(p1); ctrl = np.array(ctrl)
-            t = np.linspace(0,1,60); n = len(ctrl)-1; pts = np.zeros((len(t),3))
-            import math
-            for k in range(n+1):
-                pts += math.comb(n,k) * (t**k)[:,None] * ((1-t)**(n-k))[:,None] * ctrl[k]
-            return pts
-        return np.array([p0, p1], dtype=float)
-
-    def _refresh_draw_geo_preview(self):
-        if not hasattr(self,"_geo_preview_canvas"): return
-        self._render_draw_geometry_preview_vtk(self._geo_preview_canvas)
-
-    def _open_draw_geometry_preview_dialog(self) -> None:
-        self._save_current_object()
-        dialog = QDialog(self)
-        dialog.setWindowTitle("绘制几何 - 放大预览")
-        dialog.resize(1100, 820)
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(10, 10, 10, 10)
-        hint = QLabel("放大预览只用于查看当前绘制几何，不会修改 blockMeshDict、STL 或仿真参数。")
-        hint.setWordWrap(True)
-        canvas = NativeVtkPreviewWidget(dialog, background=(0.12, 0.12, 0.12))
-        canvas.setMinimumHeight(680)
-        self._render_draw_geometry_preview_vtk(canvas)
-        layout.addWidget(hint)
-        layout.addWidget(canvas, 1)
-        button_row = QHBoxLayout()
-        button_row.addStretch(1)
-        close_button = QPushButton("关闭")
-        close_button.clicked.connect(dialog.close)
-        button_row.addWidget(close_button)
-        layout.addLayout(button_row)
-        dialog.exec()
-
-    def _render_draw_geometry_preview_vtk(self, canvas: NativeVtkPreviewWidget) -> None:
-        canvas.clear((0.12, 0.12, 0.12))
-        if not self._geo_objects:
-            canvas.add_message("No geometry to preview.")
-            canvas.finish()
-            return
-
-        all_pts = []
-        for oi, obj in enumerate(self._geo_objects):
-            verts = obj.get("verts", [])
-            if not verts: continue
-            corners = np.array(verts, dtype=float)
-            all_pts.append(corners)
-            is_domain = (oi == 0)
-            is_active = (oi == self._active_obj_idx)
-
-            if is_domain:
-                for i,v in enumerate(verts):
-                    canvas.add_text(str(i), tuple(v), color=(1.0, 0.6, 0.27), size=12)
-                for edef in obj.get("edges",[]):
-                    canvas.add_polyline(
-                        self._edge_preview_points(verts, edef[0],edef[1],edef[2],edef[3]),
-                        color=(0.31, 0.76, 1.0),
-                        width=2.0,
-                        opacity=0.95,
-                    )
-                bv = obj.get("block_v",[0,1,2,3,4,5,6,7])
-                if all(v < len(verts) for v in bv):
-                    faces = [[0,3,7,4],[1,5,6,2],[0,1,2,3],[4,5,6,7],[0,1,5,4],[3,2,6,7]]
-                    fc = [(0.537,0.820,0.522),(0.957,0.529,0.443)] + [(0.310,0.757,1.000)]*4
-                    alpha = [0.25, 0.25] + [0.08] * 4
-                    for face,fcol,opacity in zip(faces,fc,alpha):
-                        vs = np.array([corners[bv[i]] for i in face], dtype=float)
-                        canvas.add_polygon(vs, color=fcol, opacity=opacity, edge_color=fcol)
-                    canvas.add_text("inlet", tuple(corners[bv[0]]), color=(0.54, 0.82, 0.52), size=14)
-                    canvas.add_text("outlet", tuple(corners[bv[1]]), color=(0.96, 0.53, 0.44), size=14)
-            else:
-                ec = (1.0,0.6,0.2,0.9) if is_active else (0.5,0.5,0.5,0.6)
-                fc = (1.0,0.6,0.2,0.30) if is_active else (0.5,0.5,0.5,0.15)
-                if len(verts) >= 8:
-                    esc = [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)]
-                    for s,e in esc:
-                        if s<len(verts) and e<len(verts):
-                            canvas.add_polyline(corners[[s,e]], color=ec[:3], width=2.0, opacity=ec[3])
-                    faces = [[0,3,7,4],[1,5,6,2],[0,1,2,3],[4,5,6,7],[0,1,5,4],[3,2,6,7]]
-                    for face in faces:
-                        if all(v<len(verts) for v in face):
-                            vs = np.array([corners[v] for v in face], dtype=float)
-                            canvas.add_polygon(vs, color=fc[:3], opacity=fc[3], edge_color=ec[:3])
-
-        if all_pts:
-            canvas.finish(np.vstack(all_pts))
-        else:
-            canvas.finish()
-
-    def _apply_draw_geometry(self):
-        if self._current_project is None:
-            self._show_error("请先新建或打开项目。"); return
-        self._save_current_object()
-        domain = self._geo_objects[0]
-        verts = domain.get("verts", [])
-        if len(verts) < 8:
-            self._show_error("计算域至少需要 8 个顶点。"); return
-        nx = domain.get("nx",10); ny = domain.get("ny",10); nz = domain.get("nz",10)
-        grading = domain.get("grading","1 1 1")
-        xs = [v[0] for v in verts]; ys = [v[1] for v in verts]; zs = [v[2] for v in verts]
-        min_x, max_x = min(xs), max(xs)
-        min_y, max_y = min(ys), max(ys)
-        min_z, max_z = min(zs), max(zs)
-        mesh_verts = [
-            (min_x, min_y, min_z),
-            (max_x, min_y, min_z),
-            (max_x, max_y, min_z),
-            (min_x, max_y, min_z),
-            (min_x, min_y, max_z),
-            (max_x, min_y, max_z),
-            (max_x, max_y, max_z),
-            (min_x, max_y, max_z),
-        ]
-        bv = [0,1,2,3,4,5,6,7]
-        vl = "\n".join("    ({} {} {})".format(x,y,z) for x,y,z in mesh_verts)
-        el = ""
-        bl_line = "    hex ({}) ({} {} {}) simpleGrading ({})\n".format(" ".join(str(v) for v in bv), nx, ny, nz, grading)
-        il = self._geo_inlet.text().strip() or "inlet"
-        ol = self._geo_outlet.text().strip() or "outlet"
-        wl = self._geo_walls.text().strip() or "fixedWalls"
-        bm = ("FoamFile\n{{\n    version     2.0;\n    format      ascii;\n"
-              "    class       dictionary;\n    object      blockMeshDict;\n}}\n\n"
-              "convertToMeters 1;\n\nvertices\n(\n{});\n\n"
-              "blocks\n(\n{});\n\nedges\n(\n{});\n\n"
-              "boundary\n(\n    {} {{ type patch; faces ((0 4 7 3)); }}\n"
-              "    {} {{ type patch; faces ((1 2 6 5)); }}\n"
-              "    {} {{ type wall; faces ((0 1 5 4) (0 3 2 1) (4 5 6 7) (3 7 6 2)); }}\n);\n\n"
-              "mergePatchPairs\n(\n);\n").format(vl, bl_line, el, il, ol, wl)
-        bp = self._current_project.case_dir / "system" / "blockMeshDict"
-        bp.parent.mkdir(parents=True, exist_ok=True)
-        bp.write_text(bm, encoding="utf-8")
-        size = (max(xs)-min(xs), max(ys)-min(ys), max(zs)-min(zs))
-        import json as _json
-        dc_path = self._current_project.case_dir / "system" / "domain_config.json"
-        dc_path.write_text(_json.dumps({"key":"custom_domain","name":"手工绘制","size":[round(v,4) for v in size],"cells":[nx,ny,nz],"suggested_location_in_mesh":[round(size[0]*0.1,4),round(size[1]*0.5,4),round(size[2]*0.5,4)],"shape":"box"}, ensure_ascii=False, indent=2), encoding="utf-8")
-        self._append_log("blockMeshDict 已生成 (domain): {} 顶点 {}x{}x{}".format(len(verts), nx, ny, nz))
-
-        import struct as _struct
-        stl_dir = self._current_project.case_dir / "constant" / "triSurface"
-        stl_dir.mkdir(parents=True, exist_ok=True)
-        for bi, body in enumerate(self._geo_objects[1:], 1):
-            bverts = body.get("verts", [])
-            if len(bverts) < 8: continue
-            tris = []
-            vv = [(float(x),float(y),float(z)) for x,y,z in bverts]
-            faces_b = [(0,3,1),(1,3,2),(4,5,7),(5,6,7),(0,1,5),(0,5,4),(3,7,6),(3,6,2),(0,4,7),(0,7,3),(1,2,6),(1,6,5)]
-            for f in faces_b:
-                if all(idx < len(vv) for idx in f):
-                    tris.append((vv[f[0]], vv[f[1]], vv[f[2]]))
-            if not tris: continue
-            import numpy as _np
-            stl_name = "body_{}_{}.stl".format(bi, body["name"])
-            stl_path = stl_dir / stl_name
-            with open(stl_path, "wb") as sf:
-                sf.write(b"\x00"*80)
-                sf.write(_struct.pack("<I", len(tris)))
-                for v0,v1,v2 in tris:
-                    u = _np.array(v1)-_np.array(v0); v = _np.array(v2)-_np.array(v0)
-                    n = _np.cross(u,v); n = n/(_np.linalg.norm(n)+1e-12)
-                    sf.write(_struct.pack("<3f", *n))
-                    sf.write(_struct.pack("<3f", *v0))
-                    sf.write(_struct.pack("<3f", *v1))
-                    sf.write(_struct.pack("<3f", *v2))
-                    sf.write(_struct.pack("<H", 0))
-            self._append_log("STL 已导出: " + stl_name + " (" + str(len(tris)) + " 三角形)")
-        self._set_status("blockMeshDict + STL 已生成。")
-        self._persist_draw_geometry_state()
-
-    def _reset_draw_geometry(self):
-        self._geo_objects = self._default_draw_geometry_objects()
-        self._active_obj_idx = 0
-        self._edge_defs = []
-        self._geo_inlet.setText("inlet")
-        self._geo_outlet.setText("outlet")
-        self._geo_walls.setText("fixedWalls")
-        self._rebuild_obj_combo()
-        self._load_active_object_to_ui()
-        self._refresh_draw_geo_preview()
-        self._persist_draw_geometry_state()
 
     def _refresh_mesh_generation_panel(self) -> None:
         if not hasattr(self, "_mesh_generation_text"):

@@ -410,6 +410,19 @@ class ProjectService:
             return []
         return self._sync_field_boundaries_for_names(project.case_dir, clean_names)
 
+    def delete_case(self, project: SimulationProject, case_name: str) -> None:
+        clean_name = self._normalize_project_name(case_name)
+        case_dir = project.path / clean_name
+        if not case_dir.exists():
+            raise ValueError(f"Case 不存在：{clean_name}")
+        if not (case_dir / "system").exists() or not (case_dir / "constant").exists():
+            raise ValueError(f"所选目录不是有效 Case：{clean_name}")
+        remaining = self.list_cases(project)
+        if len(remaining) <= 1:
+            raise ValueError("不能删除最后一个 Case。")
+        import shutil
+        shutil.rmtree(str(case_dir))
+
     def delete_project(self, path):
         import shutil
         d = path.expanduser().resolve()
