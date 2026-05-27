@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QTableWidget,
+    QTableWidgetItem,
     QSplitter,
     QStatusBar,
     QTabWidget,
@@ -477,14 +478,324 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
 
     def _build_simulation_config_tab(self) -> QWidget:
         wrapper = QWidget()
-        layout = QVBoxLayout(wrapper)
-        label = QLabel("仿真参数配置功能开发中...")
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label.setStyleSheet("font-size: 18px; color: #9da5b4;")
-        layout.addStretch(1)
-        layout.addWidget(label)
-        layout.addStretch(1)
+        root = QVBoxLayout(wrapper)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(12)
+
+        title = QLabel("仿真参数配置")
+        title.setStyleSheet("font-size: 22px; font-weight: 600;")
+        root.addWidget(title)
+
+        # top area: parameter groups in a 2x2 grid
+        top = QHBoxLayout()
+        left_col = QVBoxLayout()
+        right_col = QVBoxLayout()
+
+        # === solver basics group ===
+        solver_grp = QGroupBox("求解器基础")
+        solver_form = QFormLayout(solver_grp)
+        self._cfg_solver_combo = QComboBox()
+        self._cfg_solver_combo.addItem("simpleFoam - 稳态不可压", "simpleFoam")
+        self._cfg_solver_combo.addItem("pimpleFoam - 瞬态不可压", "pimpleFoam")
+        self._cfg_solver_combo.addItem("icoFoam - 入门瞬态", "icoFoam")
+        self._cfg_solver_combo.addItem("pisoFoam - 瞬态不可压", "pisoFoam")
+        self._cfg_end_time = QLineEdit("1.0")
+        self._cfg_delta_t = QLineEdit("0.001")
+        self._cfg_write_interval = QSpinBox()
+        self._cfg_write_interval.setRange(1, 1000000)
+        self._cfg_write_interval.setValue(100)
+        solver_form.addRow("求解类型", self._cfg_solver_combo)
+        solver_form.addRow("总计算时长 (s)", self._cfg_end_time)
+        solver_form.addRow("时间步长 (s)", self._cfg_delta_t)
+        solver_form.addRow("输出间隔 (步)", self._cfg_write_interval)
+        left_col.addWidget(solver_grp)
+
+        # === global fields group ===
+        field_grp = QGroupBox("全局场参数")
+        field_form = QFormLayout(field_grp)
+        self._cfg_init_velocity = QLineEdit("(0 0 0)")
+        self._cfg_init_pressure = QLineEdit("0")
+        field_form.addRow("初始速度 (m/s)", self._cfg_init_velocity)
+        field_form.addRow("初始压力 (Pa)", self._cfg_init_pressure)
+        left_col.addWidget(field_grp)
+
+        # === boundary conditions group ===
+        bc_grp = QGroupBox("边界条件")
+        bc_layout = QVBoxLayout(bc_grp)
+        bc_top = QHBoxLayout()
+        self._cfg_boundary_table = QTableWidget(0, 4)
+        self._cfg_boundary_table.setHorizontalHeaderLabels(["边界名", "类型", "速度 U", "压力 p"])
+        self._cfg_boundary_table.horizontalHeader().setStretchLastSection(True)
+        self._cfg_boundary_table.setMinimumHeight(130)
+        self._cfg_boundary_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._cfg_boundary_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self._cfg_boundary_table.selectionModel().selectionChanged.connect(
+            lambda sel, desel: self._on_boundary_row_selected(
+                self._cfg_boundary_table.currentRow()
+            )
+        )
+        bc_layout.addWidget(self._cfg_boundary_table)
+        bc_form = QFormLayout()
+        self._cfg_bc_name = QLabel("—")
+        bc_form.addRow("选中边界", self._cfg_bc_name)
+        self._cfg_bc_type = QComboBox()
+        self._cfg_bc_type.addItems(["inlet", "outlet", "wall", "symmetry", "empty"])
+        self._cfg_bc_type.currentIndexChanged.connect(self._on_boundary_type_changed)
+        bc_form.addRow("边界类型", self._cfg_bc_type)
+        self._cfg_bc_u_value = QLineEdit()
+        self._cfg_bc_u_value.editingFinished.connect(
+            lambda: self._sync_boundary_table_from_ui(self._cfg_boundary_table.currentRow())
+        )
+        bc_form.addRow("速度 U", self._cfg_bc_u_value)
+        self._cfg_bc_p_value = QLineEdit()
+        self._cfg_bc_p_value.editingFinished.connect(
+            lambda: self._sync_boundary_table_from_ui(self._cfg_boundary_table.currentRow())
+        )
+        bc_form.addRow("压力 p", self._cfg_bc_p_value)
+        bc_layout.addLayout(bc_form)
+        right_col.addWidget(bc_grp)
+
+        # === solver control group ===
+        ctrl_grp = QGroupBox("求解控制")
+        ctrl_form = QFormLayout(ctrl_grp)
+        self._cfg_residual = QLineEdit("1e-6")
+        self._cfg_max_iters = QSpinBox()
+        self._cfg_max_iters.setRange(1, 100000)
+        self._cfg_max_iters.setValue(1000)
+        self._cfg_relaxation = QLineEdit("0.7")
+        ctrl_form.addRow("残差收敛阈值", self._cfg_residual)
+        ctrl_form.addRow("最大迭代步数", self._cfg_max_iters)
+        ctrl_form.addRow("松弛因子", self._cfg_relaxation)
+        right_col.addWidget(ctrl_grp)
+
+        top.addLayout(left_col)
+        top.addLayout(right_col)
+        root.addLayout(top)
+
+        # === bottom: dictionary preview + export ===
+        preview_label = QLabel("字典预览")
+        preview_label.setStyleSheet("font-weight: 600; margin-top: 8px;")
+        root.addWidget(preview_label)
+        self._cfg_dict_preview = QTextEdit()
+        self._cfg_dict_preview.setReadOnly(True)
+        self._cfg_dict_preview.setMinimumHeight(150)
+        self._cfg_dict_preview.setPlaceholderText("配置参数后点击 [刷新预览] 查看生成的 OpenFOAM 字典文件内容...")
+        root.addWidget(self._cfg_dict_preview, 1)
+
+        btn_row = QHBoxLayout()
+        refresh_btn = QPushButton("刷新预览")
+        refresh_btn.clicked.connect(self._refresh_dict_preview)
+        export_btn = QPushButton("导出全部仿真字典")
+        export_btn.clicked.connect(self._export_sim_dicts)
+        btn_row.addWidget(refresh_btn)
+        btn_row.addWidget(export_btn)
+        btn_row.addStretch(1)
+        root.addLayout(btn_row)
+
         return wrapper
+
+    def _load_boundaries_into_table(self) -> None:
+        self._cfg_boundary_table.setRowCount(0)
+        if self._current_project is None:
+            return
+        bmd = self._current_project.case_dir / "system" / "blockMeshDict"
+        names = self._context.project_service._extract_boundary_names(bmd)
+        if not names:
+            names = ("inlet", "outlet", "fixedWalls")
+        for i, name in enumerate(names):
+            self._cfg_boundary_table.insertRow(i)
+            self._cfg_boundary_table.setItem(i, 0, QTableWidgetItem(name))
+            role = "入口" if "inlet" in name.lower() else "出口" if "outlet" in name.lower() else "壁面" if "wall" in name.lower() else "对称"
+            self._cfg_boundary_table.setItem(i, 1, QTableWidgetItem(role))
+            u_val = "(10 0 0)" if role == "入口" else "noSlip" if role == "壁面" else "zeroGradient"
+            p_val = "0" if role == "出口" else "zeroGradient"
+            self._cfg_boundary_table.setItem(i, 2, QTableWidgetItem(u_val))
+            self._cfg_boundary_table.setItem(i, 3, QTableWidgetItem(p_val))
+        if self._cfg_boundary_table.rowCount() > 0:
+            self._cfg_boundary_table.selectRow(0)
+            self._on_boundary_row_selected(0)
+
+    def _on_boundary_row_selected(self, row: int) -> None:
+        if row < 0 or row >= self._cfg_boundary_table.rowCount():
+            return
+        name_item = self._cfg_boundary_table.item(row, 0)
+        type_item = self._cfg_boundary_table.item(row, 1)
+        u_item = self._cfg_boundary_table.item(row, 2)
+        p_item = self._cfg_boundary_table.item(row, 3)
+        if name_item:
+            self._cfg_bc_name.setText(name_item.text())
+        if type_item:
+            role = type_item.text()
+            idx = self._cfg_bc_type.findText("inlet" if role == "入口" else "outlet" if role == "出口" else "wall")
+            if idx >= 0:
+                self._cfg_bc_type.setCurrentIndex(idx)
+        if u_item:
+            self._cfg_bc_u_value.setText(u_item.text())
+        if p_item:
+            self._cfg_bc_p_value.setText(p_item.text())
+
+    def _sync_boundary_table_from_ui(self, row: int) -> None:
+        if row < 0 or row >= self._cfg_boundary_table.rowCount():
+            return
+        role_text = {0: "入口", 1: "出口", 2: "壁面", 3: "对称", 4: "empty"}
+        bc_type_idx = self._cfg_bc_type.currentIndex()
+        role = role_text.get(bc_type_idx, "壁面")
+        self._cfg_boundary_table.item(row, 1).setText(role)
+        self._cfg_boundary_table.item(row, 2).setText(self._cfg_bc_u_value.text())
+        self._cfg_boundary_table.item(row, 3).setText(self._cfg_bc_p_value.text())
+
+    def _on_boundary_type_changed(self) -> None:
+        row = self._cfg_boundary_table.currentRow()
+        if row < 0:
+            return
+        role_text = {0: "入口", 1: "出口", 2: "壁面", 3: "对称", 4: "empty"}
+        role = role_text.get(self._cfg_bc_type.currentIndex(), "壁面")
+        if role == "入口":
+            self._cfg_bc_u_value.setText("(10 0 0)")
+            self._cfg_bc_p_value.setText("zeroGradient")
+        elif role == "出口":
+            self._cfg_bc_u_value.setText("zeroGradient")
+            self._cfg_bc_p_value.setText("0")
+        else:
+            self._cfg_bc_u_value.setText("noSlip")
+            self._cfg_bc_p_value.setText("zeroGradient")
+        self._sync_boundary_table_from_ui(row)
+
+    def _read_boundary_rows(self) -> list[dict]:
+        rows = []
+        for r in range(self._cfg_boundary_table.rowCount()):
+            name = self._cfg_boundary_table.item(r, 0)
+            role = self._cfg_boundary_table.item(r, 1)
+            u_val = self._cfg_boundary_table.item(r, 2)
+            p_val = self._cfg_boundary_table.item(r, 3)
+            if name and role and u_val and p_val:
+                rows.append({"name": name.text(), "role": role.text(),
+                             "u_value": u_val.text(), "p_value": p_val.text()})
+        return rows
+
+    def _build_boundary_block(self, field: str) -> str:
+        rows = self._read_boundary_rows()
+        if not rows:
+            return "    // 无边界"
+        blocks = []
+        for bc in rows:
+            name = bc["name"]
+            if field == "U":
+                val = bc["u_value"]
+                if val == "noSlip":
+                    blocks.append(f"    {name}\n    {{\n        type            noSlip;\n    }}")
+                elif val == "zeroGradient":
+                    blocks.append(f"    {name}\n    {{\n        type            zeroGradient;\n    }}")
+                elif val == "symmetry":
+                    blocks.append(f"    {name}\n    {{\n        type            symmetry;\n    }}")
+                else:
+                    blocks.append(f"    {name}\n    {{\n        type            fixedValue;\n        value           uniform {val};\n    }}")
+            else:  # p
+                val = bc["p_value"]
+                if val == "zeroGradient":
+                    blocks.append(f"    {name}\n    {{\n        type            zeroGradient;\n    }}")
+                elif val == "symmetry":
+                    blocks.append(f"    {name}\n    {{\n        type            symmetry;\n    }}")
+                else:
+                    blocks.append(f"    {name}\n    {{\n        type            fixedValue;\n        value           uniform {val};\n    }}")
+        return "\n".join(blocks)
+
+    def _refresh_dict_preview(self) -> None:
+        solver = self._cfg_solver_combo.currentData()
+        end_time = self._cfg_end_time.text().strip()
+        delta_t = self._cfg_delta_t.text().strip()
+        write_interval = self._cfg_write_interval.value()
+        init_u = self._cfg_init_velocity.text().strip()
+        init_p = self._cfg_init_pressure.text().strip()
+        residual = self._cfg_residual.text().strip()
+        relaxation = self._cfg_relaxation.text().strip()
+
+        preview = (
+            f"// system/controlDict\n"
+            f"application     {solver};\n"
+            f"startFrom       startTime;\n"
+            f"startTime       0;\n"
+            f"stopAt          endTime;\n"
+            f"endTime         {end_time};\n"
+            f"deltaT          {delta_t};\n"
+            f"writeControl    timeStep;\n"
+            f"writeInterval   {write_interval};\n\n"
+            f"// 0/U\n"
+            f"dimensions      [0 1 -1 0 0 0 0];\n"
+            f"internalField   uniform {init_u};\n"
+            f"boundaryField\n{{\n"
+            f"{self._build_boundary_block('U')}\n"
+            f"}}\n\n"
+            f"// 0/p\n"
+            f"dimensions      [0 2 -2 0 0 0 0];\n"
+            f"internalField   uniform {init_p};\n"
+            f"boundaryField\n{{\n"
+            f"{self._build_boundary_block('p')}\n"
+            f"}}\n\n"
+            f"// system/fvSolution\n"
+            f"solvers {{ p {{ solver PCG; preconditioner DIC; tolerance {residual}; relTol 0.01; }}\n"
+            f"  U {{ solver smoothSolver; smoother symGaussSeidel; tolerance {residual}; relTol 0.01; }} }}\n"
+            f"relaxationFactors {{ U {relaxation}; }}\n"
+        )
+        self._cfg_dict_preview.setPlainText(preview)
+        self._set_status("字典预览已刷新")
+
+    def _export_sim_dicts(self) -> None:
+        if self._current_project is None:
+            self._set_status("请先新建或打开项目")
+            return
+        case_dir = self._current_project.case_dir
+        for d in ("system", "0"):
+            (case_dir / d).mkdir(parents=True, exist_ok=True)
+
+        solver = self._cfg_solver_combo.currentData()
+        end_time = self._cfg_end_time.text().strip()
+        delta_t = self._cfg_delta_t.text().strip()
+        write_interval = self._cfg_write_interval.value()
+        init_u = self._cfg_init_velocity.text().strip()
+        init_p = self._cfg_init_pressure.text().strip()
+        residual = self._cfg_residual.text().strip()
+        relaxation = self._cfg_relaxation.text().strip()
+
+        control_dict = (
+            f"application     {solver};\n"
+            f"startFrom       startTime;\n"
+            f"startTime       0;\n"
+            f"stopAt          endTime;\n"
+            f"endTime         {end_time};\n"
+            f"deltaT          {delta_t};\n"
+            f"writeControl    timeStep;\n"
+            f"writeInterval   {write_interval};\n"
+        )
+        (case_dir / "system" / "controlDict").write_text(control_dict, encoding="utf-8")
+
+        u_field = (
+            f"dimensions      [0 1 -1 0 0 0 0];\n"
+            f"internalField   uniform {init_u};\n"
+            f"boundaryField\n{{\n"
+            f"{self._build_boundary_block('U')}\n"
+            f"}}\n"
+        )
+        (case_dir / "0" / "U").write_text(u_field, encoding="utf-8")
+
+        p_field = (
+            f"dimensions      [0 2 -2 0 0 0 0];\n"
+            f"internalField   uniform {init_p};\n"
+            f"boundaryField\n{{\n"
+            f"{self._build_boundary_block('p')}\n"
+            f"}}\n"
+        )
+        (case_dir / "0" / "p").write_text(p_field, encoding="utf-8")
+
+        fv_solution = (
+            f"solvers {{\n  p {{ solver PCG; preconditioner DIC; tolerance {residual}; relTol 0.01; }}\n"
+            f"  U {{ solver smoothSolver; smoother symGaussSeidel; tolerance {residual}; relTol 0.01; }}\n}}\n"
+            f"relaxationFactors {{ U {relaxation}; }}\n"
+        )
+        (case_dir / "system" / "fvSolution").write_text(fv_solution, encoding="utf-8")
+
+        self._set_status(f"字典已导出到 {case_dir}")
+        self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_RUN)
 
     def _make_menu_button(self, title, actions):
         button = QPushButton(title)
