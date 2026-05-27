@@ -801,7 +801,6 @@ class GeometryLogicMixin:
                 name=name, boundary_type=btype,
                 cell_ids=set(self._boundary_pending_cells)))
         self._boundary_pending_cells.clear()
-        self._rebuild_boundary_table()
         self._redraw_mesh_grid_vtk()
         self._set_status(f"已将 {len(self._boundary_groups[-1].cell_ids)} 个面片应用到 {name}({btype})。")
 
@@ -815,29 +814,13 @@ class GeometryLogicMixin:
         if row < 0 or row >= len(self._boundary_groups):
             return
         self._boundary_groups.pop(row)
-        self._rebuild_boundary_table()
         self._redraw_mesh_grid_vtk()
 
     def _clear_all_boundary_groups(self) -> None:
         self._boundary_groups.clear()
         self._boundary_pending_cells.clear()
-        self._rebuild_boundary_table()
         self._redraw_mesh_grid_vtk()
         self._set_status("所有边界定义已清空。")
-
-    def _rebuild_boundary_table(self) -> None:
-        table = self._boundary_table
-        table.setRowCount(0)
-        for i, group in enumerate(self._boundary_groups):
-            table.insertRow(i)
-            table.setItem(i, 0, QTableWidgetItem(group.name))
-            table.setItem(i, 1, QTableWidgetItem(
-                BOUNDARY_TYPE_LABELS.get(group.boundary_type, group.boundary_type)))
-            table.setItem(i, 2, QTableWidgetItem(str(len(group.cell_ids))))
-            del_btn = QPushButton("删除")
-            del_btn.clicked.connect(
-                lambda _checked=False, r=i: self._delete_boundary_group(r))
-            table.setCellWidget(i, 3, del_btn)
 
     def _extract_boundary_polydata(self, source_polydata, cell_ids: set[int]):
         if not cell_ids:

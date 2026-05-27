@@ -105,13 +105,12 @@ class WindowTitleBar(QFrame):
 class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, SettingsPhysicsLogicMixin, ProjectProcessLogicMixin, DrawGeometryLogicMixin, QMainWindow):
     TAB_PROJECT_HOME = 0
     TAB_DRAW_GEOMETRY = 1
-    TAB_SOLVER_PREPARE = 3
-    TAB_SOLVER_SELECT = 4
-    TAB_PARAMETERS = 5
-    TAB_SOLVER_RUN = 6
-    TAB_ENVIRONMENT = 7
-    TAB_SETTINGS = 8
-    TAB_RESULTS = 9
+    TAB_MESH_GENERATION = 2
+    TAB_SIMULATION_CONFIG = 3
+    TAB_SOLVER_RUN = 4
+    TAB_ENVIRONMENT = 5
+    TAB_SETTINGS = 6
+    TAB_RESULTS = 7
     RESULT_FIELDS = [
         "U",
         "mag(U)",
@@ -240,7 +239,6 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         case_menu.addAction("打开当前 Case 目录", self._show_current_case_path)
 
         solver_menu = menu_bar.addMenu("求解器")
-        solver_menu.addAction("运行最小仿真", self._run_minimal_simulation)
         solver_menu.addAction("停止当前任务", self._stop_current_process)
 
         tools_menu = menu_bar.addMenu("工具")
@@ -312,9 +310,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._workspace_tabs.addTab(self._build_project_home_tab(), "项目主页")
         self._workspace_tabs.addTab(self._build_draw_geometry_tab(), "绘制几何")
         self._workspace_tabs.addTab(self._build_mesh_generation_tab(), "网格生成")
-        self._workspace_tabs.addTab(self._build_physics_prepare_tab(), "求解器准备")
-        self._workspace_tabs.addTab(self._build_solver_select_tab(), "求解器选择")
-        self._workspace_tabs.addTab(self._build_parameter_tab(), "仿真参数")
+        self._workspace_tabs.addTab(self._build_simulation_config_tab(), "仿真参数配置")
         self._workspace_tabs.addTab(self._build_solver_run_tab(), "求解运行")
         self._workspace_tabs.addTab(self._build_environment_tab(), "环境检查")
         self._workspace_tabs.addTab(self._build_settings_tab(), "设置")
@@ -479,123 +475,15 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         return wrapper
 
 
-    def _build_solver_select_tab(self) -> QWidget:
+    def _build_simulation_config_tab(self) -> QWidget:
         wrapper = QWidget()
         layout = QVBoxLayout(wrapper)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-
-        title = QLabel("求解器选择")
-        title.setStyleSheet("font-size: 22px; font-weight: 600;")
-        description = QLabel("选择当前 Case 要使用的 OpenFOAM 求解器。本阶段先支持 icoFoam、simpleFoam、pisoFoam。")
-        description.setWordWrap(True)
-
-        form = QFormLayout()
-        self._solver_name_combo = QComboBox()
-        self._solver_name_combo.addItem("icoFoam - 入门不可压瞬态流", "icoFoam")
-        self._solver_name_combo.addItem("simpleFoam - 稳态不可压流/风洞绕流", "simpleFoam")
-        self._solver_name_combo.addItem("pisoFoam - 瞬态不可压流", "pisoFoam")
-        self._turbulence_model_combo = QComboBox()
-        self._turbulence_model_combo.addItem("laminar - 层流/入门默认", "laminar")
-        self._turbulence_model_combo.addItem("RAS kEpsilon - 湍流模型占位", "RAS kEpsilon")
-        self._numeric_scheme_combo = QComboBox()
-        self._numeric_scheme_combo.addItem("stable - 稳定优先 upwind", "stable")
-        self._numeric_scheme_combo.addItem("balanced - 平衡 linearUpwind", "balanced")
-        self._numeric_scheme_combo.addItem("accurate - 精度优先 linear", "accurate")
-        self._fv_solution_preset_combo = QComboBox()
-        self._fv_solution_preset_combo.addItem("default - 默认收敛设置", "default")
-        self._fv_solution_preset_combo.addItem("strict - 更严格残差", "strict")
-        self._fv_solution_preset_combo.addItem("fast - 更快但较粗", "fast")
-        form.addRow("求解器", self._solver_name_combo)
-        form.addRow("湍流模型", self._turbulence_model_combo)
-        form.addRow("数值格式 fvSchemes", self._numeric_scheme_combo)
-        form.addRow("求解设置 fvSolution", self._fv_solution_preset_combo)
-
-        button_row = QHBoxLayout()
-        load_button = QPushButton("加载当前 Case 求解器")
-        save_button = QPushButton("保存求解器配置")
-        load_button.clicked.connect(lambda _checked=False: self._load_case_parameters())
-        save_button.clicked.connect(lambda _checked=False: self._save_case_parameters())
-        button_row.addWidget(load_button)
-        button_row.addWidget(save_button)
-        button_row.addStretch(1)
-
-        self._solver_select_status_label = QLabel("请先新建或打开项目。")
-        self._solver_select_status_label.setWordWrap(True)
-        help_text = QTextEdit()
-        help_text.setReadOnly(True)
-        help_text.setMaximumHeight(190)
-        help_text.setPlainText(
-            "求解器怎么选：\n"
-            "- icoFoam：先跑通最小不可压瞬态流，适合学习和验证流程。\n"
-            "- simpleFoam：稳态不可压流，后续做车/圆柱/风洞绕流更常用。\n"
-            "- pisoFoam：瞬态不可压流，适合观察流动随时间变化。\n\n"
-            "注意：当前页面先负责保存配置和生成核心字典，真正切换不同求解器的完整运行流水线后续继续增强。"
-        )
-
-        layout.addWidget(title)
-        layout.addWidget(description)
-        layout.addLayout(form)
-        layout.addLayout(button_row)
-        layout.addWidget(self._solver_select_status_label)
-        layout.addWidget(help_text)
+        label = QLabel("仿真参数配置功能开发中...")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet("font-size: 18px; color: #9da5b4;")
         layout.addStretch(1)
-        self._set_solver_inputs_enabled(False)
-        return wrapper
-
-    def _build_parameter_tab(self) -> QWidget:
-        wrapper = QWidget()
-        layout = QVBoxLayout(wrapper)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-
-        title = QLabel("仿真参数")
-        title.setStyleSheet("font-size: 22px; font-weight: 600;")
-        description = QLabel("只配置当前 Case 的 system/controlDict 时间控制参数。")
-        description.setWordWrap(True)
-
-        form = QFormLayout()
-        self._end_time_input = QLineEdit()
-        self._delta_t_input = QLineEdit()
-        self._write_interval_input = QSpinBox()
-        self._write_interval_input.setRange(1, 1000000)
-        form.addRow("仿真总时间 endTime", self._end_time_input)
-        form.addRow("时间步长 deltaT", self._delta_t_input)
-        form.addRow("写出间隔 writeInterval", self._write_interval_input)
-
-        button_row = QHBoxLayout()
-        load_button = QPushButton("加载当前项目参数")
-        save_button = QPushButton("保存参数到 Case")
-        default_button = QPushButton("恢复默认参数")
-        load_button.clicked.connect(lambda _checked=False: self._load_case_parameters())
-        save_button.clicked.connect(lambda _checked=False: self._save_control_dict_parameters())
-        default_button.clicked.connect(lambda _checked=False: self._restore_default_parameters())
-        button_row.addWidget(load_button)
-        button_row.addWidget(save_button)
-        button_row.addWidget(default_button)
-        button_row.addStretch(1)
-
-        self._parameter_status_label = QLabel("请先新建或打开项目。")
-        self._parameter_status_label.setWordWrap(True)
-        help_text = QTextEdit()
-        help_text.setReadOnly(True)
-        help_text.setMaximumHeight(150)
-        help_text.setPlainText(
-            "参数说明：\n"
-            "- endTime：仿真总时间，越大运行越久。\n"
-            "- deltaT：每一步的时间步长，越小越稳定但更慢。\n"
-            "- writeInterval：每隔多少步写一次结果。\n\n"
-            "注意：0/U、0/p、patch 边界和流体物性请到“求解器准备”页面配置。"
-        )
-
-        layout.addWidget(title)
-        layout.addWidget(description)
-        layout.addLayout(form)
-        layout.addLayout(button_row)
-        layout.addWidget(self._parameter_status_label)
-        layout.addWidget(help_text)
+        layout.addWidget(label)
         layout.addStretch(1)
-        self._set_parameter_inputs_enabled(False)
         return wrapper
 
     def _make_menu_button(self, title, actions):
@@ -786,148 +674,15 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         form.addRow("Z", z)
         return gb
 
-    def _build_physics_prepare_tab(self) -> QWidget:
-        wrapper = QWidget()
-        layout = QVBoxLayout(wrapper)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-
-        title = QLabel("求解器准备")
-        title.setStyleSheet("font-size: 22px; font-weight: 600;")
-        description = QLabel(
-            "这个页面负责启动仿真前的求解器输入准备：0/U、0/p、physicalProperties，"
-            "以及按当前绘制几何自动衔接 snappyHexMeshDict。"
-        )
-        description.setWordWrap(True)
-
-        action_row = QHBoxLayout()
-        refresh_button = QPushButton("刷新求解器准备状态")
-        prepare_button = QPushButton("补齐边界和物性")
-        refresh_button.clicked.connect(lambda _checked=False: self._refresh_physics_prepare_panel())
-        prepare_button.clicked.connect(lambda _checked=False: self._prepare_physics_files())
-        for button in (refresh_button, prepare_button):
-            action_row.addWidget(button)
-        action_row.addStretch(1)
-
-        self._physics_prepare_status = QTextEdit()
-        self._physics_prepare_status.setReadOnly(True)
-        self._physics_prepare_status.setMinimumHeight(150)
-        self._physics_prepare_status.setPlainText("请先新建或打开项目。")
-
-        material_form = QFormLayout()
-        self._material_combo = QComboBox()
-        self._material_combo.addItem("空气 air", "air")
-        self._material_combo.addItem("水 water", "water")
-        self._material_combo.addItem("机油 oil", "oil")
-        self._material_combo.addItem("自定义流体 custom", "custom")
-        self._material_combo.currentIndexChanged.connect(lambda _index: self._apply_material_preset())
-        self._density_input = QLineEdit()
-        self._viscosity_input = QLineEdit()
-        self._dynamic_viscosity_input = QLineEdit()
-        material_row = QHBoxLayout()
-        calc_mu_button = QPushButton("按 rho × nu 计算 mu")
-        calc_mu_button.clicked.connect(lambda _checked=False: self._calculate_dynamic_viscosity())
-        material_row.addWidget(self._material_combo)
-        material_row.addWidget(calc_mu_button)
-        material_row.addStretch(1)
-        material_form.addRow("流体类型", material_row)
-        material_form.addRow("流体密度 rho", self._density_input)
-        material_form.addRow("运动粘度 nu", self._viscosity_input)
-        material_form.addRow("动力粘度 mu", self._dynamic_viscosity_input)
-
-        self._boundary_table = QTableWidget(0, 6)
-        self._boundary_table.setHorizontalHeaderLabels(["Patch", "角色", "U 类型", "U 值", "p 类型", "p 值"])
-        self._boundary_table.horizontalHeader().setStretchLastSection(True)
-        self._boundary_table.setMinimumHeight(220)
-
-        self._physics_prepare_flow = QTextEdit()
-        self._physics_prepare_flow.setReadOnly(True)
-        self._physics_prepare_flow.setMaximumHeight(160)
-        self._physics_prepare_flow.setPlainText(
-            "本页负责：\n"
-            "- 0/U：速度初始场和入口/壁面边界条件。\n"
-            "- 0/p：压力初始场和出口/壁面边界条件。\n"
-            "- constant/physicalProperties：密度、粘度等流体物性。\n\n"
-            "推荐流程：绘制几何后到本页补齐边界和物性，然后进入求解器选择、仿真参数和求解运行。"
-        )
-
-        layout.addWidget(title)
-        layout.addWidget(description)
-        layout.addLayout(action_row)
-        layout.addWidget(self._physics_prepare_status)
-        layout.addWidget(QLabel("流体物性文件"))
-        layout.addLayout(material_form)
-        layout.addWidget(QLabel("Patch 边界条件表"))
-        layout.addWidget(self._boundary_table)
-        layout.addWidget(self._physics_prepare_flow)
-        layout.addStretch(1)
-        return wrapper
-
     def _build_solver_run_tab(self) -> QWidget:
         wrapper = QWidget()
         layout = QVBoxLayout(wrapper)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-
-        title = QLabel("求解运行")
-        title.setStyleSheet("font-size: 22px; font-weight: 600;")
-        description = QLabel("绘制几何 + 计算域 + 求解器 + 参数都配置好后，一键启动仿真。")
-        description.setWordWrap(True)
-
-        self._solver_status_label = QLabel("状态：空闲")
-        self._solver_project_label = QLabel("当前项目：未选择")
-        self._solver_case_path_label = QLabel("Case 路径：未选择")
-        self._solver_command_label = QLabel("执行命令：blockMesh && icoFoam")
-
-        action_row = QHBoxLayout()
-        start_btn = QPushButton("一键启动仿真")
-
-        start_btn.clicked.connect(lambda _checked=False: self._run_simulation_pipeline())
-        stop_button = QPushButton("停止")
-        stop_button.clicked.connect(lambda _checked=False: self._stop_current_process())
-        refresh_button = QPushButton("刷新")
-        refresh_button.clicked.connect(lambda _checked=False: self._refresh_solver_run_panel())
-        action_row.addWidget(start_btn)
-        action_row.addWidget(stop_button)
-        action_row.addWidget(refresh_button)
-        action_row.addStretch(1)
-
-        self._solver_parameter_summary = QTextEdit()
-        self._solver_parameter_summary.setReadOnly(True)
-        self._solver_parameter_summary.setMaximumHeight(160)
-        self._solver_parameter_summary.setPlainText("参数摘要：请先新建或打开项目。")
-
-        self._solver_metric_summary = QTextEdit()
-        self._solver_metric_summary.setReadOnly(True)
-        self._solver_metric_summary.setMaximumHeight(150)
-        self._solver_metric_summary.setPlainText("关键指标摘要：尚未运行。")
-
-        self._solver_hint_text = QTextEdit()
-        self._solver_hint_text.setReadOnly(True)
-        self._solver_hint_text.setPlainText(
-            "运行说明：\n"
-            "1. 先在“参数配置”页确认参数。\n"
-            "2. 点击“运行最小仿真”。\n"
-            "3. 程序会先保存参数，再执行 blockMesh 和 icoFoam。\n"
-            "4. 底部“日志”显示 OpenFOAM 实时输出。\n"
-            "5. 底部“问题”显示失败原因。"
-        )
-        self._solver_diagnostic_text = QTextEdit()
-        self._solver_diagnostic_text.setReadOnly(True)
-        self._solver_diagnostic_text.setMaximumHeight(170)
-        self._solver_diagnostic_text.setPlainText("最近诊断：暂无诊断。")
-
-        layout.addWidget(title)
-        layout.addWidget(description)
-        layout.addWidget(self._solver_status_label)
-        layout.addWidget(self._solver_project_label)
-        layout.addWidget(self._solver_case_path_label)
-        layout.addWidget(self._solver_command_label)
-        layout.addLayout(action_row)
-        layout.addWidget(self._solver_parameter_summary)
-        layout.addWidget(self._solver_metric_summary)
-        layout.addWidget(self._solver_diagnostic_text)
-        layout.addWidget(self._solver_hint_text, 1)
+        label = QLabel('求解运行功能开发中...')
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet('font-size: 18px; color: #9da5b4;')
+        layout.addStretch(1)
+        layout.addWidget(label)
+        layout.addStretch(1)
         return wrapper
 
     def _build_environment_tab(self) -> QWidget:
@@ -1130,26 +885,3 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._workspace_tabs.setCurrentIndex(self.TAB_DRAW_GEOMETRY)
         self._set_status("已打开绘制几何页。")
 
-    def _set_parameter_inputs_enabled(self, enabled: bool) -> None:
-        if not hasattr(self, "_end_time_input"):
-            return
-        self._end_time_input.setEnabled(enabled)
-        self._delta_t_input.setEnabled(enabled)
-        self._write_interval_input.setEnabled(enabled)
-        self._set_physics_prepare_inputs_enabled(enabled)
-
-    def _set_physics_prepare_inputs_enabled(self, enabled: bool) -> None:
-        if not hasattr(self, "_material_combo"):
-            return
-        self._material_combo.setEnabled(enabled)
-        self._density_input.setEnabled(enabled)
-        self._viscosity_input.setEnabled(enabled)
-        self._dynamic_viscosity_input.setEnabled(enabled)
-
-    def _set_solver_inputs_enabled(self, enabled: bool) -> None:
-        if not hasattr(self, "_solver_name_combo"):
-            return
-        self._solver_name_combo.setEnabled(enabled)
-        self._turbulence_model_combo.setEnabled(enabled)
-        self._numeric_scheme_combo.setEnabled(enabled)
-        self._fv_solution_preset_combo.setEnabled(enabled)
