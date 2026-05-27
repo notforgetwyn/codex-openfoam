@@ -12,7 +12,7 @@ from vtkmodules.vtkCommonDataModel import vtkPolyData
 from vtkmodules.vtkCommonMath import vtkRungeKutta45
 from vtkmodules.vtkFiltersFlowPaths import vtkStreamTracer
 
-from foamdesk.ui.visualization_widgets import NativeVtkViewerDialog, VtkViewerDialog
+from foamdesk.ui.visualization_widgets import NativeVtkViewerDialog
 
 
 class ResultsLogicMixin:
@@ -428,20 +428,6 @@ class ResultsLogicMixin:
             return output, None
         return self._ensure_point_field(output, cell_vector, "cell")
 
-    def _vector_magnitude_range(self, vector_array) -> tuple[float, float]:
-        vectors = vtk_to_numpy(vector_array)
-        if vectors.size == 0:
-            return (0.0, 1.0)
-        if vectors.ndim == 1:
-            values = np.abs(vectors.astype(float))
-        else:
-            values = np.linalg.norm(vectors[:, : min(vectors.shape[1], 3)], axis=1)
-        minimum = float(values.min())
-        maximum = float(values.max())
-        if maximum <= minimum:
-            return minimum - 1.0, maximum + 1.0
-        return minimum, maximum
-
     def _configure_result_animation_source(self) -> None:
         if not hasattr(self, "_result_time_combo"):
             return
@@ -642,13 +628,6 @@ class ResultsLogicMixin:
         speed_array.SetName("U_mag")
         streamline_output.GetPointData().AddArray(speed_array)
         streamline_output.GetPointData().SetActiveScalars("U_mag")
-
-    def _ensure_vtk_viewer(self) -> None:
-        if self._vtk_viewer is None:
-            self._vtk_viewer = VtkViewerDialog(self)
-        self._vtk_viewer.show()
-        self._vtk_viewer.raise_()
-        self._vtk_viewer.activateWindow()
 
     def _ensure_native_vtk_viewer(self) -> None:
         if self._native_vtk_viewer is None:
