@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QFontComboBox,
     QFrame,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -452,9 +453,69 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         g2_layout.addWidget(right_widget, 1)
         scroll_layout.addWidget(g2)
 
-        # Groups 3–5 — placeholders
-        for title in ("基础计算域网格（背景网格）",
-                      "模型贴体网格加密", "网格质量约束"):
+        # Group 3 — background mesh / blockMeshDict
+        g3 = QGroupBox("基础计算域网格（背景网格）")
+        g3_layout = QVBoxLayout(g3)
+        size_label = QLabel("计算域尺寸（坐标范围）")
+        size_label.setStyleSheet("font-weight: 600; color: #cccccc;")
+        g3_layout.addWidget(size_label)
+        bounds_grid = QGridLayout()
+        bounds_grid.setSpacing(6)
+        axes = [
+            ("X 最小", "X 最大"),
+            ("Y 最小", "Y 最大"),
+            ("Z 最小", "Z 最大"),
+        ]
+        self._domain_bounds_inputs: dict[str, QDoubleSpinBox] = {}
+        for row, (min_label, max_label) in enumerate(axes):
+            for col, (label_text, key) in enumerate(
+                [(min_label, f"{'XYZ'[row].lower()}_min"),
+                 (max_label, f"{'XYZ'[row].lower()}_max")]):
+                lbl = QLabel(label_text)
+                spin = QDoubleSpinBox()
+                spin.setRange(-1e6, 1e6)
+                spin.setDecimals(4)
+                spin.setMinimumWidth(100)
+                spin.valueChanged.connect(self._on_domain_manual_override)
+                bounds_grid.addWidget(lbl, row, col * 2)
+                bounds_grid.addWidget(spin, row, col * 2 + 1)
+                self._domain_bounds_inputs[key] = spin
+        g3_layout.addLayout(bounds_grid)
+
+        resolution_label = QLabel("网格分辨率")
+        resolution_label.setStyleSheet("font-weight: 600; color: #cccccc; margin-top: 8px;")
+        g3_layout.addWidget(resolution_label)
+        res_row = QHBoxLayout()
+        self._domain_cells_inputs: dict[str, QSpinBox] = {}
+        for axis in ("X", "Y", "Z"):
+            lbl = QLabel(f"{axis}方向")
+            spin = QSpinBox()
+            spin.setRange(1, 9999)
+            spin.setValue(20)
+            spin.setToolTip(f"{axis}方向网格数量")
+            res_row.addWidget(lbl)
+            res_row.addWidget(spin)
+            self._domain_cells_inputs[axis] = spin
+        res_row.addStretch(1)
+        g3_layout.addLayout(res_row)
+
+        opt_row = QHBoxLayout()
+        self._domain_orthogonal_check = QCheckBox("正交网格")
+        opt_row.addWidget(self._domain_orthogonal_check)
+        opt_row.addWidget(QLabel("网格单位:"))
+        self._domain_unit_combo = QComboBox()
+        self._domain_unit_combo.addItem("米 (m)", "m")
+        self._domain_unit_combo.addItem("毫米 (mm)", "mm")
+        opt_row.addWidget(self._domain_unit_combo)
+        auto_btn = QPushButton("从几何自动计算")
+        auto_btn.clicked.connect(self._auto_fill_domain_bounds)
+        opt_row.addWidget(auto_btn)
+        opt_row.addStretch(1)
+        g3_layout.addLayout(opt_row)
+        scroll_layout.addWidget(g3)
+
+        # Groups 4–5 — placeholders
+        for title in ("模型贴体网格加密", "网格质量约束"):
             ph = QGroupBox(title)
             ph_layout = QVBoxLayout(ph)
             ph_label = QLabel("页面正在开发中")

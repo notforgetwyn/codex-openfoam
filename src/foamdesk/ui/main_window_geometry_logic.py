@@ -593,6 +593,7 @@ class GeometryLogicMixin:
         self._boundary_groups: list[BoundaryFaceGroup] = []
         self._boundary_pending_cells: set[int] = set()
         self._boundary_pick_active: bool = False
+        self._domain_bounds_manual: bool = False
 
     def _import_geometry_file(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
@@ -614,6 +615,7 @@ class GeometryLogicMixin:
             asset = MeshImportAsset(name=name, source_path=source_path, polydata=polydata)
             self._mesh_imports.append(asset)
         self._rebuild_mesh_import_combo()
+        self._auto_fill_domain_bounds()
         self._redraw_mesh_grid_vtk()
 
     def _rebuild_mesh_import_combo(self) -> None:
@@ -730,6 +732,24 @@ class GeometryLogicMixin:
                 canvas.add_polydata(
                     asset.polydata, color=asset.color, opacity=opacity,
                 )
+        # ── draw domain bounding box ──
+        if self._mesh_imports:
+            bounds = self._get_domain_bounds()
+            if bounds:
+                px = np.array([bounds["x_min"], bounds["x_max"]])
+                py = np.array([bounds["y_min"], bounds["y_max"]])
+                pz = np.array([bounds["z_min"], bounds["z_max"]])
+                corners = np.array(np.meshgrid(px, py, pz, indexing="ij")).T.reshape(-1, 3)
+                edges = [
+                    (0, 1), (0, 2), (0, 4), (1, 3), (1, 5),
+                    (2, 3), (2, 6), (3, 7), (4, 5), (4, 6), (5, 7), (6, 7),
+                ]
+                for a, b in edges:
+                    canvas.add_polyline(
+                        np.array([corners[a], corners[b]]),
+                        color=(0.2, 0.8, 0.4), width=2.0, opacity=0.7,
+                    )
+
         if saved is not None:
             camera.SetPosition(*saved[0])
             camera.SetFocalPoint(*saved[1])
@@ -869,3 +889,71 @@ class GeometryLogicMixin:
             return result
         except Exception:
             return None
+
+    # ── domain mesh / Group 3 logic ─────────────────────────
+
+    def _domain_geom_bbox(self) -> list[float] | None:
+        if not self._mesh_imports:
+            return None
+        bbox = [float("inf"), float("-inf"),
+                float("inf"), float("-inf"),
+                float("inf"), float("-inf")]
+        for asset in self._mesh_imports:
+            bounds = asset.polydata.GetBounds()
+            if not all(np.isfinite(bounds)):
+                continue
+            for i in range(3):
+                bbox[i * 2] = min(bbox[i * 2], bounds[i * 2])
+                bbox[i * 2 + 1] = max(bbox[i * 2 + 1], bounds[i * 2 + 1])
+        if not all(np.isfinite(bbox)):
+            return None
+        return bbox
+
+    def _auto_fill_domain_bounds(self) -> None:
+        if self._domain_bounds_manual:
+            return
+        bbox = self._domain_geom_bbox()
+        if bbox is None:
+            return
+        padding = max((bbox[1] - bbox[0]) * 0.1,
+                     (bbox[3] - bbox[2]) * 0.1,
+                     (bbox[5] - bbox[4]) * 0.1, 0.1)
+        keys = ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max")
+        for i, key in enumerate(keys):
+            spin = self._domain_bounds_inputs[key]
+            spin.blockSignals(True)
+            if i % 2 == 0:
+                spin.setValue(bbox[i] - padding)
+            else:
+                spin.setValue(bbox[i] + padding)
+            spin.blockSignals(False)
+        self._domain_bounds_manual = False
+        self._redraw_mesh_grid_vtk()
+        self._set_status("计算域范围已从几何包围盒自动计算（含 10% 扩展边距）。")
+
+    def _on_domain_manual_override(self) -> None:
+        self._domain_bounds_manual = True
+        self._redraw_mesh_grid_vtk()
+
+    def _get_domain_bounds(self) -> dict | None:
+        if not hasattr(self, "_domain_bounds_inputs"):
+            return None
+        try:
+            return {key: inp.value() for key, inp in self._domain_bounds_inputs.items()}
+        except Exception:
+            return None
+
+    def _get_domain_mesh_params(self) -> dict:
+        return {
+            "x_min": self._domain_bounds_inputs["x_min"].value(),
+            "x_max": self._domain_bounds_inputs["x_max"].value(),
+            "y_min": self._domain_bounds_inputs["y_min"].value(),
+            "y_max": self._domain_bounds_inputs["y_max"].value(),
+            "z_min": self._domain_bounds_inputs["z_min"].value(),
+            "z_max": self._domain_bounds_inputs["z_max"].value(),
+            "cells_x": self._domain_cells_inputs["X"].value(),
+            "cells_y": self._domain_cells_inputs["Y"].value(),
+            "cells_z": self._domain_cells_inputs["Z"].value(),
+            "orthogonal": self._domain_orthogonal_check.isChecked(),
+            "unit": self._domain_unit_combo.currentData(),
+        }
