@@ -1242,13 +1242,10 @@ class GeometryLogicMixin:
                     idx += 1
                     continue
                 if line.startswith("FoamFile"):
-                    brace = 0
-                    while idx < len(lines):
-                        l = lines[idx]
-                        brace += l.count("{") - l.count("}")
+                    idx += 1
+                    while idx < len(lines) and "}" not in lines[idx]:
                         idx += 1
-                        if brace == 0:
-                            break
+                    idx += 1
                     continue
                 return idx
             return idx
@@ -1281,32 +1278,26 @@ class GeometryLogicMixin:
             if not line:
                 continue
             # handle OpenFOAM formats: "4(0 1 5 4)" or "4 (0 1 5 4)"
-            line = line.strip("()")
-            parts = line.split()
-            if not parts:
-                continue
-            count = 0
-            for part in parts:
-                # first token that is a standalone digit is the count
-                if part.isdigit():
-                    count = int(part)
-                    break
-                # or the first token has count before '(' like "4(0"
-                cleaned = part.lstrip("(")
-                if cleaned.isdigit():
-                    count = int(cleaned)
-                    break
-            if count == 0:
-                continue
-            # collect remaining point IDs (skip the count token)
-            values_part = line.split("(", 1)
-            if len(values_part) > 1:
-                id_str = values_part[1].rstrip(")")
+            # split by '(' to separate count from vertex list
+            if "(" in line:
+                count_str, rest = line.split("(", 1)
+                count_str = count_str.strip()
+                if count_str.isdigit():
+                    count = int(count_str)
+                else:
+                    continue
+                id_str = rest.rstrip(")")
+                ids = [int(x) for x in id_str.split() if x]
             else:
-                id_str = " ".join(parts[1:])
-            ids = [int(x) for x in id_str.split() if x]
+                parts = line.split()
+                if not parts:
+                    continue
+                count = int(parts[0])
+                ids = [int(x) for x in parts[1:]]
+            if count <= 0:
+                continue
             if len(ids) != count:
-                count = len(ids)  # use actual count
+                count = len(ids)
             polygon = vtk.vtkPolygon()
             polygon.GetPointIds().SetNumberOfIds(count)
             for j in range(count):
