@@ -594,6 +594,7 @@ class GeometryLogicMixin:
         self._boundary_pending_cells: set[int] = set()
         self._boundary_pick_active: bool = False
         self._domain_bounds_manual: bool = False
+        self._last_checkmesh_output: str = ""
 
     def _import_geometry_file(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
@@ -617,6 +618,7 @@ class GeometryLogicMixin:
         self._rebuild_mesh_import_combo()
         self._auto_fill_domain_bounds()
         self._redraw_mesh_grid_vtk()
+        self._save_mesh_workflow_state()
 
     def _rebuild_mesh_import_combo(self) -> None:
         combo = self._mesh_import_combo
@@ -630,6 +632,14 @@ class GeometryLogicMixin:
         else:
             self._mesh_import_selected_index = -1
         combo.blockSignals(False)
+        # also sync local refinement part list
+        if hasattr(self, "_snappy_local_part_combo"):
+            parts = self._snappy_local_part_combo
+            parts.blockSignals(True)
+            parts.clear()
+            for asset in self._mesh_imports:
+                parts.addItem(asset.name)
+            parts.blockSignals(False)
 
     def _on_mesh_import_selection_changed(self, _index: int) -> None:
         data = self._mesh_import_combo.currentData()
@@ -736,13 +746,17 @@ class GeometryLogicMixin:
         if self._mesh_imports:
             bounds = self._get_domain_bounds()
             if bounds:
-                px = np.array([bounds["x_min"], bounds["x_max"]])
-                py = np.array([bounds["y_min"], bounds["y_max"]])
-                pz = np.array([bounds["z_min"], bounds["z_max"]])
-                corners = np.array(np.meshgrid(px, py, pz, indexing="ij")).T.reshape(-1, 3)
+                x0, x1 = bounds["x_min"], bounds["x_max"]
+                y0, y1 = bounds["y_min"], bounds["y_max"]
+                z0, z1 = bounds["z_min"], bounds["z_max"]
+                corners = np.array([
+                    [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
+                    [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1],
+                ])
                 edges = [
-                    (0, 1), (0, 2), (0, 4), (1, 3), (1, 5),
-                    (2, 3), (2, 6), (3, 7), (4, 5), (4, 6), (5, 7), (6, 7),
+                    (0, 1), (1, 2), (2, 3), (3, 0),
+                    (4, 5), (5, 6), (6, 7), (7, 4),
+                    (0, 4), (1, 5), (2, 6), (3, 7),
                 ]
                 for a, b in edges:
                     canvas.add_polyline(
@@ -836,6 +850,22 @@ class GeometryLogicMixin:
         self._boundary_groups.pop(row)
         self._redraw_mesh_grid_vtk()
 
+    def _rebuild_boundary_table(self) -> None:
+        if not hasattr(self, "_boundary_table"):
+            return
+        table = self._boundary_table
+        table.setRowCount(0)
+        for i, group in enumerate(self._boundary_groups):
+            table.insertRow(i)
+            table.setItem(i, 0, QTableWidgetItem(group.name))
+            table.setItem(i, 1, QTableWidgetItem(
+                BOUNDARY_TYPE_LABELS.get(group.boundary_type, group.boundary_type)))
+            table.setItem(i, 2, QTableWidgetItem(str(len(group.cell_ids))))
+            del_btn = QPushButton("删除")
+            del_btn.clicked.connect(
+                lambda _checked=False, r=i: self._delete_boundary_group(r))
+            table.setCellWidget(i, 3, del_btn)
+
     def _clear_all_boundary_groups(self) -> None:
         self._boundary_groups.clear()
         self._boundary_pending_cells.clear()
@@ -911,7 +941,10 @@ class GeometryLogicMixin:
                 spin.setValue(bbox[i] + padding)
             spin.blockSignals(False)
         self._domain_bounds_manual = False
-        self._redraw_mesh_grid_vtk()
+        if hasattr(self, "_mesh_grid_vtk"):
+            self._redraw_mesh_grid_vtk()
+        if payload.get("mesh_generated") and hasattr(self, "_mesh_grid_vtk"):
+            self._on_preview_mesh()
         self._set_status("计算域范围已从几何包围盒自动计算（含 10% 扩展边距）。")
 
     def _on_domain_manual_override(self) -> None:
@@ -940,3 +973,513 @@ class GeometryLogicMixin:
             "orthogonal": self._domain_orthogonal_check.isChecked(),
             "unit": self._domain_unit_combo.currentData(),
         }
+
+    def _get_snappy_params(self) -> dict:
+        return {
+            "level": self._snappy_level_combo.currentData(),
+            "n_layers": self._snappy_n_layers.value(),
+            "first_layer_height": self._snappy_first_layer.value(),
+            "expand_ratio": self._snappy_expand_ratio.value(),
+            "local_enabled": self._snappy_local_enabled.isChecked(),
+            "local_part": self._snappy_local_part_combo.currentText(),
+            "local_level": self._snappy_local_level_combo.currentData(),
+            "keep_outline": self._snappy_keep_outline.isChecked(),
+        }
+
+    def _get_quality_params(self) -> dict:
+        return {
+            "max_skew": self._quality_max_skew.value(),
+            "min_volume": self._quality_min_volume.value(),
+            "delete_negative": self._quality_del_negative.isChecked(),
+            "smooth": self._quality_smooth.isChecked(),
+        }
+
+    # ── Group 6 button bar handlers ─────────────────────────
+
+    def _on_generate_and_execute(self) -> None:
+        if not self._mesh_imports:
+            self._show_error("请先在组1中导入几何。")
+            return
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return
+        domain = self._get_domain_mesh_params()
+        if domain["unit"] == "mm":
+            convert = 0.001
+        else:
+            convert = 1.0
+        case_dir = self._current_project.case_dir
+        system_dir = case_dir / "system"
+        system_dir.mkdir(parents=True, exist_ok=True)
+        # ── write blockMeshDict ──
+        x0, x1 = domain["x_min"], domain["x_max"]
+        y0, y1 = domain["y_min"], domain["y_max"]
+        z0, z1 = domain["z_min"], domain["z_max"]
+        nx, ny, nz = domain["cells_x"], domain["cells_y"], domain["cells_z"]
+        bm = (
+            "FoamFile { version 2.0; format ascii; class dictionary; object blockMeshDict; }\n"
+            f"convertToMeters {convert};\n\n"
+            "vertices\n(\n"
+            f"    ({x0} {y0} {z0})\n"
+            f"    ({x1} {y0} {z0})\n"
+            f"    ({x1} {y1} {z0})\n"
+            f"    ({x0} {y1} {z0})\n"
+            f"    ({x0} {y0} {z1})\n"
+            f"    ({x1} {y0} {z1})\n"
+            f"    ({x1} {y1} {z1})\n"
+            f"    ({x0} {y1} {z1})\n"
+            ");\n\n"
+            f"blocks\n(\n    hex (0 1 2 3 4 5 6 7) ({nx} {ny} {nz})"
+            " simpleGrading (1 1 1)\n);\n\n"
+            "edges\n(\n);\n\n"
+            "boundary\n(\n"
+            "    inlet  { type patch; faces ((0 4 7 3)); }\n"
+            "    outlet { type patch; faces ((1 2 6 5)); }\n"
+            "    walls  { type wall;  faces ((0 1 2 3) (4 5 6 7) (0 1 5 4) (3 2 6 7)); }\n"
+            ");\n"
+        )
+        (system_dir / "blockMeshDict").write_text(bm, encoding="utf-8")
+        # ── write snappyHexMeshDict ──
+        snappy = self._get_snappy_params()
+        tri_dir = case_dir / "constant" / "triSurface"
+        tri_dir.mkdir(parents=True, exist_ok=True)
+        for asset in self._mesh_imports:
+            if not asset.source_path.exists():
+                continue
+            dest = tri_dir / asset.source_path.name
+            if not dest.exists():
+                import shutil
+                shutil.copy2(asset.source_path, dest)
+        stl_names = [a.source_path.name for a in self._mesh_imports]
+        shm = (
+            "FoamFile { version 2.0; format ascii; class dictionary; object snappyHexMeshDict; }\n"
+            "castellatedMesh true;\n"
+            "snap            true;\n"
+            "addLayers       true;\n"
+            "mergeTolerance 1e-6;\n\n"
+            "geometry\n{\n"
+        )
+        for name in stl_names:
+            shm += f'    {Path(name).stem}\n'
+            shm += "    {\n"
+            shm += "        type triSurface;\n"
+            shm += f'        file "{name}";\n'
+            shm += "    }\n"
+        shm += "};\n\n"
+        shm += (
+            "castellatedMeshControls\n{\n"
+            "    maxLocalCells 100000;\n"
+            "    maxGlobalCells 2000000;\n"
+            "    minRefinementCells 0;\n"
+            "    maxLoadUnbalance 0.10;\n"
+            "    nCellsBetweenLevels 1;\n"
+            "    features\n    (\n    );\n"
+            "    refinementSurfaces\n    {\n"
+        )
+        for name in stl_names:
+            shm += f'        {Path(name).stem}\n'
+            shm += "        {\n"
+            shm += f"            level ({snappy['level']} {snappy['level']});\n"
+            shm += "        }\n"
+        shm += "    }\n"
+        shm += (
+            "    resolveFeatureAngle 30;\n"
+            "    locationInMesh (0.001 0.001 0.001);\n"
+            "    allowFreeStandingZoneFaces true;\n"
+            "}\n\n"
+            "snapControls\n{\n"
+            "    nSmoothPatch 3;\n"
+            "    tolerance 2.0;\n"
+            "    nSolveIter 30;\n"
+            "    nRelaxIter 5;\n"
+            "    nFeatureSnapIter 10;\n"
+            "    implicitFeatureSnap false;\n"
+            "    explicitFeatureSnap true;\n"
+            "    multiRegionFeatureSnap false;\n"
+            "}\n\n"
+        )
+        if snappy['n_layers'] > 0:
+            shm += (
+                "addLayersControls\n{\n"
+                "    relativeSizes true;\n"
+                "    layers\n    {\n"
+            )
+            for name in stl_names:
+                shm += f'        {Path(name).stem}\n'
+                shm += "        {\n"
+                shm += f"            nSurfaceLayers {snappy['n_layers']};\n"
+                shm += "        }\n"
+            shm += "    }\n"
+            shm += f"    expansionRatio {snappy['expand_ratio']};\n"
+            shm += f"    finalLayerThickness {snappy['first_layer_height']};\n"
+            shm += "    minThickness 0.001;\n"
+            shm += "    nGrow 0;\n"
+            shm += "    featureAngle 60;\n"
+            shm += "    slipFeatureAngle 30;\n"
+            shm += "    nRelaxIter 3;\n"
+            shm += "    nSmoothSurfaceNormals 1;\n"
+            shm += "    nSmoothNormals 3;\n"
+            shm += "    nSmoothThickness 10;\n"
+            shm += "    maxFaceThicknessRatio 0.5;\n"
+            shm += "    maxThicknessToMedialRatio 0.3;\n"
+            shm += "    minMedianAxisAngle 90;\n"
+            shm += "    nBufferCellsNoExtrude 0;\n"
+            shm += "    nLayerIter 50;\n"
+            shm += "}\n\n"
+        shm += (
+            "meshQualityControls\n{\n"
+            f"    maxNonOrtho {int(90 - self._quality_max_skew.value() * 40)};\n"
+            "    maxBoundarySkewness 20;\n"
+            "    maxInternalSkewness 4;\n"
+            "    maxConcave 80;\n"
+            "    minFlatness 0.5;\n"
+            "    minVol 1e-13;\n"
+            "    minTetQuality 1e-30;\n"
+            "    minArea -1;\n"
+            "    minTwist 0.02;\n"
+            "    minDeterminant 0.001;\n"
+            "    minFaceWeight 0.02;\n"
+            "    minVolRatio 0.01;\n"
+            "    minTriangleTwist -1;\n"
+            "    nSmoothScale 4;\n"
+            "    errorReduction 0.75;\n"
+            "}\n\n"
+            "writeFlags\n(\n"
+            "    scalarLevels\n"
+            "    layerSets\n"
+            "    layerFields\n"
+            ");\n"
+        )
+        (system_dir / "snappyHexMeshDict").write_text(shm, encoding="utf-8")
+        self._append_log("已生成 blockMeshDict 和 snappyHexMeshDict。")
+        # execute mesh pipeline via existing infrastructure
+        self._run_mesh_pipeline_command()
+        self._set_status("网格字典已生成，正在执行 blockMesh → snappyHexMesh → checkMesh...")
+
+    def _run_mesh_pipeline_command(self) -> None:
+        env_script = self._context.settings_service.load().openfoam_env_script or ""
+        case_dir = self._current_project.case_dir
+        if env_script:
+            cmd = (
+                f'source "{env_script}" && '
+                f"cd {shlex.quote(str(case_dir))} && "
+                "blockMesh && snappyHexMesh && checkMesh"
+            )
+        else:
+            cmd = (
+                f"cd {shlex.quote(str(case_dir))} && "
+                "blockMesh && snappyHexMesh && checkMesh"
+            )
+        self._active_process_kind = "meshPipeline"
+        self._foam_process = QProcess(self)
+        self._foam_process.setProgram("bash")
+        self._foam_process.setArguments(["-lc", cmd])
+        self._foam_process.readyReadStandardOutput.connect(self._read_process_stdout)
+        self._foam_process.readyReadStandardError.connect(self._read_process_stderr)
+        self._foam_process.finished.connect(
+            lambda ec, es: self._on_mesh_pipeline_finished(ec, es))
+        self._foam_process.start()
+        self._append_log(f"执行网格流水线：blockMesh -> snappyHexMesh -> checkMesh")
+        self._append_log(f"Case: {case_dir}")
+
+    def _on_mesh_pipeline_finished(self, exit_code: int, _es) -> None:
+        try:
+            self._last_checkmesh_output = self._current_process_output
+        except Exception:
+            return
+        if exit_code == 0:
+            self._save_mesh_workflow_state()
+            self._set_status('网格流水线完成。可点击 [预览网格] 查看网格。')
+            self._append_log("网格流水线完成。")
+            self._on_preview_mesh()
+        else:
+            self._set_status(f"网格流水线失败，退出码 {exit_code}。请查看日志。")
+            self._append_log(f"网格流水线失败，退出码 {exit_code}")
+
+    def _on_preview_mesh(self) -> None:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
+            return
+        mesh_dir = self._current_project.case_dir / "constant" / "polyMesh"
+        if not (mesh_dir / "points").exists():
+            self._show_error('未找到网格文件。请先点击 [生成字典并执行] 生成网格。')
+            return
+        try:
+            pd = self._read_openfoam_polymesh(mesh_dir)
+        except Exception as e:
+            self._show_error(f"读取网格失败：{e}")
+            return
+        canvas = self._mesh_grid_vtk
+        canvas.clear()
+        mesh_actor = canvas.add_polydata(
+            pd, color=(0.75, 0.78, 0.82), opacity=1.0,
+            edge_color=(0.03, 0.08, 0.15), line_width=0.5,
+        )
+        mesh_actor.GetProperty().SetRepresentationToWireframe()
+        canvas.finish()
+        self._set_status("网格预览已加载。")
+
+    def _read_openfoam_polymesh(self, mesh_dir: Path):
+        points_path = mesh_dir / "points"
+        faces_path = mesh_dir / "faces"
+        vtk_points = vtk.vtkPoints()
+
+        def _skip_header(lines, idx):
+            in_comment = False
+            while idx < len(lines):
+                line = lines[idx].strip()
+                if in_comment:
+                    if "*/" in line:
+                        in_comment = False
+                    idx += 1
+                    continue
+                if not line or line.startswith("//"):
+                    idx += 1
+                    continue
+                if line.startswith("/*"):
+                    if "*/" not in line:
+                        in_comment = True
+                    idx += 1
+                    continue
+                if line.startswith("FoamFile"):
+                    brace = 0
+                    while idx < len(lines):
+                        l = lines[idx]
+                        brace += l.count("{") - l.count("}")
+                        idx += 1
+                        if brace == 0:
+                            break
+                    continue
+                return idx
+            return idx
+
+        with open(points_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        line_idx = _skip_header(lines, 0)
+        n_points = int(lines[line_idx].strip())
+        line_idx += 1
+        if lines[line_idx].strip() == "(":
+            line_idx += 1
+        for _ in range(n_points):
+            parts = lines[line_idx].strip().strip("()").split()
+            line_idx += 1
+            if not parts:
+                continue
+            x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
+            vtk_points.InsertNextPoint(x, y, z)
+        with open(faces_path, "r", encoding="utf-8") as f:
+            flines = f.readlines()
+        f_idx = _skip_header(flines, 0)
+        n_faces = int(flines[f_idx].strip())
+        f_idx += 1
+        if flines[f_idx].strip() == "(":
+            f_idx += 1
+        cells = vtk.vtkCellArray()
+        for _ in range(n_faces):
+            line = flines[f_idx].strip()
+            f_idx += 1
+            if not line:
+                continue
+            # handle OpenFOAM formats: "4(0 1 5 4)" or "4 (0 1 5 4)"
+            line = line.strip("()")
+            parts = line.split()
+            if not parts:
+                continue
+            count = 0
+            for part in parts:
+                # first token that is a standalone digit is the count
+                if part.isdigit():
+                    count = int(part)
+                    break
+                # or the first token has count before '(' like "4(0"
+                cleaned = part.lstrip("(")
+                if cleaned.isdigit():
+                    count = int(cleaned)
+                    break
+            if count == 0:
+                continue
+            # collect remaining point IDs (skip the count token)
+            values_part = line.split("(", 1)
+            if len(values_part) > 1:
+                id_str = values_part[1].rstrip(")")
+            else:
+                id_str = " ".join(parts[1:])
+            ids = [int(x) for x in id_str.split() if x]
+            if len(ids) != count:
+                count = len(ids)  # use actual count
+            polygon = vtk.vtkPolygon()
+            polygon.GetPointIds().SetNumberOfIds(count)
+            for j in range(count):
+                polygon.GetPointIds().SetId(j, ids[j])
+            cells.InsertNextCell(polygon)
+        pd = vtk.vtkPolyData()
+        pd.SetPoints(vtk_points)
+        pd.SetPolys(cells)
+        return pd
+
+    def _on_check_quality(self) -> None:
+        if not hasattr(self, "_last_checkmesh_output") or not self._last_checkmesh_output:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "检查网格质量", '尚未运行网格流水线，或流水线输出为空。\n请先点击 [生成字典并执行]。')
+            return
+        self._show_error(f"checkMesh 输出：\n\n{self._last_checkmesh_output[-2000:]}")
+
+    def _on_export_boundary_stl(self) -> None:
+        if not self._boundary_groups:
+            self._show_error("请先在组2中定义边界面并应用到选中面。")
+            return
+        if self._mesh_import_selected_index < 0:
+            self._show_error("请先在组1中选中一个几何。")
+            return
+        import shutil
+        case_dir = self._current_project.case_dir if self._current_project else None
+        if case_dir is None:
+            self._show_error("请先新建或打开项目。")
+            return
+        tri_dir = case_dir / "constant" / "triSurface"
+        tri_dir.mkdir(parents=True, exist_ok=True)
+        asset = self._mesh_imports[self._mesh_import_selected_index]
+        for g in self._boundary_groups:
+            pd = self._extract_boundary_polydata(asset.polydata, g.cell_ids)
+            if pd is None or pd.GetNumberOfCells() == 0:
+                continue
+            stl_path = tri_dir / f"{g.name}.stl"
+            writer = vtk.vtkSTLWriter()
+            writer.SetFileName(str(stl_path))
+            writer.SetInputData(pd)
+            writer.Write()
+            self._append_log(f"已导出：{stl_path} ({g.boundary_type})")
+        self._set_status(f"已按边界拆分导出 {len(self._boundary_groups)} 个 STL 到 constant/triSurface/。")
+
+    def _on_reset_all_params(self) -> None:
+        self._boundary_groups.clear()
+        self._boundary_pending_cells.clear()
+        self._domain_bounds_manual = False
+        self._last_checkmesh_output = ""
+        self._rebuild_mesh_import_combo()
+        self._rebuild_boundary_table()
+        self._redraw_mesh_grid_vtk()
+        self._set_status("所有网格参数已重置。")
+
+    # ── state persistence ──────────────────────────────────
+
+    def _mesh_workflow_state_path(self) -> Path | None:
+        if self._current_project is None:
+            return None
+        return self._current_project.case_dir / "system" / "mesh_workflow.json"
+
+    def _save_mesh_workflow_state(self) -> None:
+        sp = self._mesh_workflow_state_path()
+        if sp is None:
+            return
+        payload = {
+            "imports": [
+                {"name": a.name, "source_path": str(a.source_path),
+                 "visible": a.visible, "translucent": a.translucent}
+                for a in self._mesh_imports
+            ],
+            "boundary_groups": [
+                {"name": g.name, "boundary_type": g.boundary_type,
+                 "cell_ids": sorted(g.cell_ids)}
+                for g in self._boundary_groups
+            ],
+            "domain": self._get_domain_mesh_params() if self._mesh_imports else {},
+            "snappy": self._get_snappy_params() if hasattr(self, "_snappy_level_combo") else {},
+            "quality": self._get_quality_params() if hasattr(self, "_quality_max_skew") else {},
+            "mesh_generated": (
+                self._current_project is not None and
+                (self._current_project.case_dir / "constant" / "polyMesh" / "points").exists()
+            ),
+        }
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _load_mesh_workflow_state(self) -> None:
+        sp = self._mesh_workflow_state_path()
+        if sp is None or not sp.exists():
+            return
+        try:
+            payload = json.loads(sp.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        # restore imports
+        for item in payload.get("imports", []):
+            source_path = Path(item["source_path"])
+            if not source_path.exists():
+                continue
+            reader = vtkSTLReader()
+            reader.SetFileName(str(source_path))
+            reader.Update()
+            polydata = reader.GetOutput()
+            if polydata is None or polydata.GetNumberOfPoints() == 0:
+                continue
+            asset = MeshImportAsset(
+                name=item.get("name", source_path.stem),
+                source_path=source_path, polydata=polydata,
+                visible=item.get("visible", True),
+                translucent=item.get("translucent", False),
+            )
+            self._mesh_imports.append(asset)
+        if hasattr(self, "_mesh_import_combo"):
+            self._rebuild_mesh_import_combo()
+        # restore boundaries
+        self._boundary_groups.clear()
+        for g in payload.get("boundary_groups", []):
+            self._boundary_groups.append(BoundaryFaceGroup(
+                name=g["name"], boundary_type=g["boundary_type"],
+                cell_ids=set(g.get("cell_ids", [])),
+            ))
+        if hasattr(self, "_boundary_table"):
+            self._rebuild_boundary_table()
+        # restore domain
+        domain = payload.get("domain", {})
+        if domain and hasattr(self, "_domain_bounds_inputs"):
+            keys = ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max")
+            for key in keys:
+                if key in domain:
+                    self._domain_bounds_inputs[key].blockSignals(True)
+                    self._domain_bounds_inputs[key].setValue(domain[key])
+                    self._domain_bounds_inputs[key].blockSignals(False)
+            for axis, key in [("X", "cells_x"), ("Y", "cells_y"), ("Z", "cells_z")]:
+                if key in domain:
+                    self._domain_cells_inputs[axis].setValue(domain[key])
+            if "orthogonal" in domain:
+                self._domain_orthogonal_check.setChecked(domain["orthogonal"])
+            if "unit" in domain:
+                idx = self._domain_unit_combo.findData(domain["unit"])
+                if idx >= 0:
+                    self._domain_unit_combo.setCurrentIndex(idx)
+        # restore snappy
+        snappy = payload.get("snappy", {})
+        if snappy and hasattr(self, "_snappy_level_combo"):
+            for key, combo in [("level", self._snappy_level_combo)]:
+                if key in snappy:
+                    idx = combo.findData(snappy[key])
+                    if idx >= 0:
+                        combo.setCurrentIndex(idx)
+            for key, spin in [("n_layers", self._snappy_n_layers),
+                            ("first_layer_height", self._snappy_first_layer),
+                            ("expand_ratio", self._snappy_expand_ratio)]:
+                if key in snappy:
+                    spin.setValue(snappy[key])
+            if "local_enabled" in snappy:
+                self._snappy_local_enabled.setChecked(snappy["local_enabled"])
+            if "local_level" in snappy:
+                idx = self._snappy_local_level_combo.findData(snappy["local_level"])
+                if idx >= 0:
+                    self._snappy_local_level_combo.setCurrentIndex(idx)
+            if "keep_outline" in snappy:
+                self._snappy_keep_outline.setChecked(snappy["keep_outline"])
+        # restore quality
+        quality = payload.get("quality", {})
+        if quality and hasattr(self, "_quality_max_skew"):
+            for key, spin in [("max_skew", self._quality_max_skew),
+                            ("min_volume", self._quality_min_volume)]:
+                if key in quality:
+                    spin.setValue(quality[key])
+            if "delete_negative" in quality:
+                self._quality_del_negative.setChecked(quality["delete_negative"])
+            if "smooth" in quality:
+                self._quality_smooth.setChecked(quality["smooth"])
+        self._domain_bounds_manual = False
+        self._redraw_mesh_grid_vtk()
