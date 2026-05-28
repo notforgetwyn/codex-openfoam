@@ -197,6 +197,8 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._save_modeling_state()
+        self._save_sim_config_state()
+        self._save_solver_run_state()
         self._save_mesh_workflow_state()
         if self._foam_process and self._foam_process.state() != QProcess.ProcessState.NotRunning:
             self._foam_process.kill()
@@ -726,7 +728,13 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         # === boundary conditions group ===
         bc_grp = QGroupBox("边界条件")
         bc_layout = QVBoxLayout(bc_grp)
-        bc_top = QHBoxLayout()
+        bc_hdr = QHBoxLayout()
+        bc_hdr.addStretch(1)
+        refresh_bc_btn = QPushButton("刷新边界")
+        refresh_bc_btn.setFixedHeight(26)
+        refresh_bc_btn.clicked.connect(self._load_boundaries_into_table)
+        bc_hdr.addWidget(refresh_bc_btn)
+        bc_layout.addLayout(bc_hdr)
         self._cfg_boundary_table = QTableWidget(0, 4)
         self._cfg_boundary_table.setHorizontalHeaderLabels(["边界名", "类型", "速度 U", "压力 p"])
         self._cfg_boundary_table.horizontalHeader().setStretchLastSection(True)
@@ -840,18 +848,48 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             names = self._context.project_service._extract_boundary_names(bmd)
         if not names:
             names = ("inlet", "outlet", "fixedWalls")
+        # read existing boundary values from 0/U and 0/p
+        u_boundaries = self._read_boundary_field_values("0/U")
+        p_boundaries = self._read_boundary_field_values("0/p")
         for i, name in enumerate(names):
             self._cfg_boundary_table.insertRow(i)
             self._cfg_boundary_table.setItem(i, 0, QTableWidgetItem(name))
             role = "入口" if "inlet" in name.lower() else "出口" if "outlet" in name.lower() else "壁面" if "wall" in name.lower() else "对称"
             self._cfg_boundary_table.setItem(i, 1, QTableWidgetItem(role))
-            u_val = "(10 0 0)" if role == "入口" else "noSlip" if role == "壁面" else "zeroGradient"
-            p_val = "0" if role == "出口" else "zeroGradient"
+            u_val = u_boundaries.get(name, "(10 0 0)" if role == "入口" else "noSlip" if role == "壁面" else "zeroGradient")
+            p_val = p_boundaries.get(name, "0" if role == "出口" else "zeroGradient")
             self._cfg_boundary_table.setItem(i, 2, QTableWidgetItem(u_val))
             self._cfg_boundary_table.setItem(i, 3, QTableWidgetItem(p_val))
         if self._cfg_boundary_table.rowCount() > 0:
             self._cfg_boundary_table.selectRow(0)
             self._on_boundary_row_selected(0)
+
+    def _read_boundary_field_values(self, field_file: str) -> dict[str, str]:
+        case_dir = self._current_project.case_dir
+        fp = case_dir / field_file
+        if not fp.exists():
+            return {}
+        import re
+        content = fp.read_text(encoding="utf-8")
+        result = {}
+        # find boundaryField section, then parse each patch block
+        bf_m = re.search(r"boundaryField\s*\{(.*)\}\s*(//|\Z)", content, re.DOTALL)
+        if not bf_m:
+            return result
+        bf_body = bf_m.group(1)
+        # each patch: \n\s+name\n\s+{ body }
+        for m in re.finditer(r"(\S+)\s*\n\s*\{([^}]+)\}", bf_body):
+            name = m.group(1).strip()
+            body = m.group(2)
+            # extract value
+            vm = re.search(r"value\s+uniform\s+(\([^)]+\)|\S+)", body)
+            if vm:
+                result[name] = vm.group(1).strip()
+            else:
+                tm = re.search(r"type\s+(\S+);", body)
+                if tm:
+                    result[name] = tm.group(1).strip()
+        return result
 
     def _read_mesh_patch_names(self) -> list[str]:
         boundary_file = self._current_project.case_dir / "constant" / "polyMesh" / "boundary"
@@ -864,7 +902,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             name = m.group(1).strip()
             if name and not name.startswith("{") and not name.startswith("}"):
                 patches.append(name)
-        return [p for p in patches if not p.startswith("//") and p not in ("(", ")")]
+        return [p for p in patches if not p.startswith("//") and p not in ("(", ")") and not p.isdigit()]
 
     def _on_boundary_row_selected(self, row: int) -> None:
         if row < 0 or row >= self._cfg_boundary_table.rowCount():
@@ -996,6 +1034,9 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
                 f"}}\n"
             )
 
+        u_fmt = init_u.strip()
+        if not u_fmt.startswith("(") and " " in u_fmt:
+            u_fmt = f"({u_fmt})"
         preview = (
             f"// system/controlDict\n"
             f"application     {solver};\n"
@@ -1008,7 +1049,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             f"writeInterval   {write_interval};\n\n"
             f"// 0/U\n"
             f"dimensions      [0 1 -1 0 0 0 0];\n"
-            f"internalField   uniform {init_u};\n"
+            f"internalField   uniform {u_fmt};\n"
             f"boundaryField\n{{\n"
             f"{self._build_boundary_block('U')}\n"
             f"}}\n\n"
@@ -1133,10 +1174,13 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         )
         (case_dir / "system" / "controlDict").write_text(control_dict, encoding="utf-8")
 
+        u_fmt = init_u.strip()
+        if not u_fmt.startswith("(") and " " in u_fmt:
+            u_fmt = f"({u_fmt})"
         u_field = (
             self._foam_header("volVectorField", "U") +
             f"dimensions      [0 1 -1 0 0 0 0];\n"
-            f"internalField   uniform {init_u};\n"
+            f"internalField   uniform {u_fmt};\n"
             f"boundaryField\n{{\n"
             f"{self._build_boundary_block('U')}\n"
             f"}}\n"
@@ -1487,50 +1531,85 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             json.dump(data, f, ensure_ascii=False, indent=2)
 
     def _load_sim_config_state(self) -> None:
-        import json
-        from pathlib import Path
-        path = self._sim_config_path()
-        if not Path(path).exists():
+        import re
+        if self._current_project is None:
             return
-        try:
-            data = json.loads(Path(path).read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return
-        self._cfg_solver_combo.setCurrentIndex(
-            max(self._cfg_solver_combo.findData(data.get("solver", "simpleFoam")), 0))
-        self._cfg_end_time.setText(data.get("end_time", "1.0"))
-        self._cfg_delta_t.setText(data.get("delta_t", "0.001"))
-        self._cfg_write_interval.setValue(data.get("write_interval", 100))
-        self._cfg_init_velocity.setText(data.get("init_velocity", "(0 0 0)"))
-        self._cfg_init_pressure.setText(data.get("init_pressure", "0"))
-        self._cfg_material_combo.setCurrentIndex(
-            max(self._cfg_material_combo.findData(data.get("material", "air")), 0))
-        self._cfg_density.setText(data.get("density", "1.225"))
-        self._cfg_nu.setText(data.get("nu", "1.48e-5"))
-        self._cfg_mu.setText(data.get("mu", "1.812e-5"))
-        self._cfg_turb_model.setCurrentIndex(
-            max(self._cfg_turb_model.findData(data.get("turb_model", "laminar")), 0))
-        self._cfg_turb_intensity.setText(data.get("turb_intensity", "0.05"))
-        self._cfg_turb_length.setText(data.get("turb_length", "0.1"))
-        self._cfg_residual.setText(data.get("residual", "1e-6"))
-        self._cfg_max_iters.setValue(data.get("max_iters", 1000))
-        self._cfg_relaxation.setText(data.get("relaxation", "0.7"))
-        self._cfg_fv_schemes.setCurrentIndex(
-            max(self._cfg_fv_schemes.findData(data.get("fv_schemes", "stable")), 0))
-        self._cfg_fv_solution.setCurrentIndex(
-            max(self._cfg_fv_solution.findData(data.get("fv_solution", "default")), 0))
-        boundaries = data.get("boundaries", [])
-        for r, bc in enumerate(boundaries):
-            if r < self._cfg_boundary_table.rowCount():
-                saved_name = bc.get("name", "")
-                current_name = self._cfg_boundary_table.item(r, 0).text()
-                if saved_name and saved_name == current_name:
-                    if bc.get("role"):
-                        self._cfg_boundary_table.item(r, 1).setText(bc["role"])
-                    if bc.get("u_value"):
-                        self._cfg_boundary_table.item(r, 2).setText(bc["u_value"])
-                    if bc.get("p_value"):
-                        self._cfg_boundary_table.item(r, 3).setText(bc["p_value"])
+        case_dir = self._current_project.case_dir
+        cd = case_dir / "system" / "controlDict"
+        if cd.exists():
+            try:
+                content = cd.read_text(encoding="utf-8")
+                for key, widget, pattern in [
+                    ("solver", self._cfg_solver_combo, r"application\s+(\S+);"),
+                    ("end_time", self._cfg_end_time, r"endTime\s+([0-9.e+\-]+);"),
+                    ("delta_t", self._cfg_delta_t, r"deltaT\s+([0-9.e+\-]+);"),
+                    ("write_interval", None, r"writeInterval\s+(\d+);"),
+                ]:
+                    m = re.search(pattern, content)
+                    if m:
+                        if key == "solver":
+                            idx = self._cfg_solver_combo.findData(m.group(1))
+                            if idx >= 0: self._cfg_solver_combo.setCurrentIndex(idx)
+                        elif key == "write_interval":
+                            self._cfg_write_interval.setValue(int(m.group(1)))
+                        elif widget:
+                            widget.setText(m.group(1))
+            except Exception: pass
+        fs = case_dir / "system" / "fvSchemes"
+        if fs.exists():
+            try:
+                content = fs.read_text(encoding="utf-8")
+                key = "balanced" if "linearUpwind" in content else ("accurate" if "backward" in content else "stable")
+                idx = self._cfg_fv_schemes.findData(key)
+                if idx >= 0: self._cfg_fv_schemes.setCurrentIndex(idx)
+            except Exception: pass
+        fv = case_dir / "system" / "fvSolution"
+        if fv.exists():
+            try:
+                content = fv.read_text(encoding="utf-8")
+                m = re.search(r"tolerance\s+([0-9.e+\-]+);", content)
+                if m: self._cfg_residual.setText(m.group(1))
+                m = re.search(r"relaxationFactors\s*\{\s*U\s+([0-9.e+\-]+);", content)
+                if m: self._cfg_relaxation.setText(m.group(1))
+                if "relTol          0" in content:
+                    idx = self._cfg_fv_solution.findData("strict")
+                    if idx >= 0: self._cfg_fv_solution.setCurrentIndex(idx)
+            except Exception: pass
+        pp = case_dir / "constant" / "physicalProperties"
+        if pp.exists():
+            try:
+                content = pp.read_text(encoding="utf-8")
+                m = re.search(r"nu\s+.*?([0-9.e+\-]+);", content)
+                if m: self._cfg_nu.setText(m.group(1))
+                m = re.search(r"rho\s+.*?([0-9.e+\-]+);", content)
+                if m:
+                    self._cfg_density.setText(m.group(1))
+                    try:
+                        self._cfg_mu.setText(f"{float(m.group(1))*float(self._cfg_nu.text()):.6g}")
+                    except ValueError: pass
+            except Exception: pass
+        mt = case_dir / "constant" / "momentumTransport"
+        if mt.exists():
+            try:
+                content = mt.read_text(encoding="utf-8")
+                if "simulationType  laminar" in content: self._cfg_turb_model.setCurrentIndex(0)
+                elif "kEpsilon" in content:
+                    idx = self._cfg_turb_model.findData("kEpsilon")
+                    if idx >= 0: self._cfg_turb_model.setCurrentIndex(idx)
+                elif "kOmegaSST" in content:
+                    idx = self._cfg_turb_model.findData("kOmegaSST")
+                    if idx >= 0: self._cfg_turb_model.setCurrentIndex(idx)
+            except Exception: pass
+        for fn, widget, pattern in [
+            ("0/U", self._cfg_init_velocity, r"internalField\s+uniform\s+\(([^)]+)\)"),
+            ("0/p", self._cfg_init_pressure, r"internalField\s+uniform\s+([0-9.e+\-]+)"),
+        ]:
+            fp = case_dir / fn
+            if fp.exists():
+                try:
+                    m = re.search(pattern, fp.read_text(encoding="utf-8"))
+                    if m: widget.setText(m.group(1).strip())
+                except Exception: pass
 
     def _on_material_preset_changed(self) -> None:
         presets = {
@@ -1562,6 +1641,51 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             self._cfg_turb_intensity.setEnabled(True)
             self._cfg_turb_length.setEnabled(True)
 
+    def _load_solver_run_state(self) -> None:
+        import json
+        from pathlib import Path
+        path = Path(__file__).parent.parent.parent.parent / "config" / "solver_run_state.json"
+        saved = {}
+        if path.exists():
+            try:
+                saved = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
+        if self._current_project is None:
+            if saved.get("log"):
+                self._cfg_run_log.setHtml(saved["log"])
+            return
+        cd = self._current_project.case_dir / "system" / "controlDict"
+        has_mesh = (self._current_project.case_dir / "constant" / "polyMesh").exists()
+        has_dicts = cd.exists()
+        if has_mesh and has_dicts:
+            self._cfg_status_label.setText(saved.get("status_text", "状态：就绪"))
+            self._cfg_status_label.setStyleSheet("font-weight: 600; color: #89d185;")
+            self._cfg_run_log.setPlaceholderText("网格和字典已就绪，点击 [启动计算] 开始仿真。")
+            self._cfg_start_btn.setEnabled(True)
+        elif has_dicts:
+            self._cfg_status_label.setText("状态：缺少网格")
+            self._cfg_status_label.setStyleSheet("font-weight: 600; color: #d7ba7d;")
+            self._cfg_run_log.setPlaceholderText("字典已就绪，请先在网格生成页运行 blockMesh。")
+        else:
+            self._cfg_status_label.setText("状态：空闲")
+            self._cfg_status_label.setStyleSheet("font-weight: 600;")
+            self._cfg_run_log.setPlaceholderText("请先在仿真参数配置页导出字典。")
+        if saved.get("log"):
+            self._cfg_run_log.setHtml(saved["log"])
+
+    def _save_solver_run_state(self) -> None:
+        import json
+        from pathlib import Path
+        path = Path(__file__).parent.parent.parent.parent / "config" / "solver_run_state.json"
+        data = {
+            "status_text": self._cfg_status_label.text(),
+            "log": self._cfg_run_log.toHtml() if hasattr(self, "_cfg_run_log") else "",
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
     def _start_simulation(self) -> None:
         if self._current_project is None:
             self._set_status("请先新建或打开项目")
@@ -1587,12 +1711,10 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         solver = m.group(1) if m else "simpleFoam"
         end_m = re.search(r"endTime\s+([0-9.e+\-]+);", content)
         dt_m = re.search(r"deltaT\s+([0-9.e+\-]+);", content)
-        wi_m = re.search(r"writeInterval\s+(\d+);", content)
         try:
             end_time_val = float(end_m.group(1)) if end_m else 1.0
             dt_val = float(dt_m.group(1)) if dt_m else 0.001
-            write_interval = int(wi_m.group(1)) if wi_m else 100
-            self._sim_total_steps = int(end_time_val / dt_val / write_interval) + 1
+            self._sim_total_steps = int(end_time_val / dt_val)
         except (ValueError, ZeroDivisionError):
             self._sim_total_steps = 0
         self._sim_current_step = 0
@@ -1620,7 +1742,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._cfg_run_log.append(f"Case: {case_dir}")
         self._cfg_run_log.append(f"Solver: {solver}")
         self._cfg_run_log.append("")
-        self._residual_data: dict[str, list[float]] = {"Ux": [], "Uy": [], "p": [], "iter": []}
+        self._residual_data: dict[str, list[float]] = {"Ux": [], "Uy": [], "Uz": [], "p": [], "iter": []}
 
         self._foam_process = QProcess(self)
         self._foam_process.setProgram("bash")
@@ -1658,19 +1780,14 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
                     self._cfg_progress.setValue(min(self._sim_current_step, self._sim_total_steps))
                     self._cfg_progress.setFormat(f"%v / %m")
                     self._cfg_progress.setTextVisible(True)
-            # OpenFOAM-dev solver output: "smoothSolver:  Solving for Ux, Initial residual = ..., Final residual = ..."
-            m = re.search(r"Solving for (U[xy]|p|U|k|omega).*Initial residual = ([0-9.e+\-]+).*Final residual = ([0-9.e+\-]+)", line)
+            # incompressibleFluid: "DICPCG:  Solving for p, Initial residual = X, Final residual = Y, No Iterations Z"
+            m = re.search(r"Solving for (\S+).*Initial residual = ([0-9.e+\-]+)", line)
             if m:
-                field = m.group(1)
-                if field == "p":
-                    key = "p"
-                elif field.startswith("U"):
-                    key = "Ux" if field == "Ux" else "Uy"
-                else:
-                    continue
-                self._residual_data[key].append(float(m.group(2)))
-                if not self._residual_data["iter"] or len(self._residual_data.get("iter",[])) < len(self._residual_data[key]):
-                    self._residual_data["iter"].append(len(self._residual_data[key]))
+                field = m.group(1).rstrip(",")
+                initial = float(m.group(2))
+                if field in ("p", "Ux", "Uy", "Uz"):
+                    self._residual_data[field].append(initial)
+                    self._residual_data["iter"].append(len(self._residual_data["p"]))
         self._redraw_residuals()
 
     def _redraw_residuals(self) -> None:
@@ -1679,7 +1796,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._cfg_residual_axes.tick_params(colors="#cccccc", labelsize=9)
         for spine in self._cfg_residual_axes.spines.values():
             spine.set_color("#2d2d30")
-        colors = {"Ux": "#569cd6", "Uy": "#6a9955", "p": "#ce9178"}
+        colors = {"Ux": "#569cd6", "Uy": "#6a9955", "Uz": "#dcdcaa", "p": "#ce9178"}
         for key, color in colors.items():
             data = self._residual_data.get(key, [])
             if data:
@@ -1688,8 +1805,9 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
                     self._cfg_residual_axes.plot(iters, data, color=color, linewidth=1.5, label=key)
         self._cfg_residual_axes.set_yscale("log")
         self._cfg_residual_axes.grid(True, alpha=0.2, color="#2d2d30")
-        self._cfg_residual_axes.legend(loc="upper right", fontsize=8,
-            facecolor="#1e1e1e", edgecolor="#2d2d30", labelcolor="#cccccc")
+        if any(data for data in self._residual_data.values() if isinstance(data, list) and data):
+            self._cfg_residual_axes.legend(loc="upper right", fontsize=8,
+                facecolor="#1e1e1e", edgecolor="#2d2d30", labelcolor="#cccccc")
         self._cfg_residual_canvas.draw()
 
     def _on_sim_finished(self, exit_code: int, _exit_status) -> None:

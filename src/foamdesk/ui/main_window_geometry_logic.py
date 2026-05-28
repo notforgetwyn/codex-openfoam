@@ -1050,7 +1050,7 @@ class GeometryLogicMixin:
             if not dest.exists():
                 import shutil
                 shutil.copy2(asset.source_path, dest)
-        stl_names = [a.source_path.name for a in self._mesh_imports]
+        stl_names = list(dict.fromkeys(a.source_path.name for a in self._mesh_imports))
         shm = (
             "FoamFile { version 2.0; format ascii; class dictionary; object snappyHexMeshDict; }\n"
             "castellatedMesh true;\n"
@@ -1080,14 +1080,16 @@ class GeometryLogicMixin:
             shm += f'        {Path(name).stem}\n'
             shm += "        {\n"
             shm += f"            level ({snappy['level']} {snappy['level']});\n"
-            shm += "            patchInfo\n            {\n                type wall;\n            }\n"
             shm += "        }\n"
         shm += "    }\n"
+        lx = x1 - (x1 - x0) * 0.05
+        ly = (y0 + y1) / 2.0
+        lz = (z0 + z1) / 2.0
         shm += (
-            "    resolveFeatureAngle 30;\n"
-            "    locationInMesh (0.001 0.001 0.001);\n"
-            "    allowFreeStandingZoneFaces true;\n"
-            "}\n\n"
+            f"    resolveFeatureAngle 30;\n"
+            f"    locationInMesh ({lx:.6g} {ly:.6g} {lz:.6g});\n"
+            f"    allowFreeStandingZoneFaces true;\n"
+            f"}}\n\n"
             "snapControls\n{\n"
             "    nSmoothPatch 3;\n"
             "    tolerance 2.0;\n"
