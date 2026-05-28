@@ -56,7 +56,6 @@ class ProjectProcessLogicMixin:
         self._refresh_project_tree()
         self._workspace_tabs.setCurrentIndex(self.TAB_PROJECT_HOME)
         self._case_label.setText(f"当前 Case: {project.name}/{project.case_name}")
-        self._refresh_results_panel()
         self._refresh_geometry_panel()
         self._refresh_project_home_summary()
         self._load_boundaries_into_table()
@@ -177,20 +176,6 @@ class ProjectProcessLogicMixin:
             self._solver_metric_summary.setPlainText("关键指标摘要：尚未运行。")
         if hasattr(self, "_solver_diagnostic_text"):
             self._solver_diagnostic_text.setPlainText("最近诊断：\n暂无诊断。")
-        if hasattr(self, "_residual_figure"):
-            self._residual_figure.clear()
-            axes = self._residual_figure.add_subplot(111)
-            axes.set_title("Residual Curve")
-            axes.text(
-                0.5,
-                0.5,
-                "Current case has no residual data.",
-                ha="center",
-                va="center",
-                transform=axes.transAxes,
-            )
-            axes.set_axis_off()
-            self._residual_canvas.draw()
 
     def _create_case(self) -> None:
         if self._current_project is None:
@@ -295,11 +280,6 @@ class ProjectProcessLogicMixin:
             "说明：打开项目只读取已有文件，不会自动重新求解；只有点击“运行”才会重新执行 OpenFOAM。",
         ]
         self._task_text.setPlainText("\n".join(lines))
-        if residuals_csv.exists():
-            try:
-                self._plot_residual_curve()
-            except (OSError, ValueError):
-                pass
 
     def _refresh_project_tree(self) -> None:
         if not hasattr(self, "_project_tree"):
@@ -418,14 +398,12 @@ class ProjectProcessLogicMixin:
             output = bytes(self._foam_process.readAllStandardOutput()).decode(errors="replace")
             self._current_process_output += output
             self._append_log(output)
-            self._refresh_solver_metrics_panel()
 
     def _read_process_stderr(self) -> None:
         if self._foam_process:
             output = bytes(self._foam_process.readAllStandardError()).decode(errors="replace")
             self._current_process_output += output
             self._append_log(output)
-            self._refresh_solver_metrics_panel()
 
     def _on_process_finished(self, exit_code: int, _exit_status) -> None:
         process_kind = self._active_process_kind
@@ -433,11 +411,7 @@ class ProjectProcessLogicMixin:
         if exit_code == 0 and process_kind == "simulationPipeline":
             self._task_text.setPlainText("任务状态：一键仿真流水线完成")
             self._last_diagnostic_summary = "一键仿真流水线正常完成，没有失败诊断。"
-            if self._export_solver_metrics():
-                self._plot_residual_curve()
             self._refresh_geometry_panel()
-    
-            self._refresh_results_panel()
             self._set_status("一键仿真流水线完成。")
         elif exit_code == 0 and process_kind == "preprocess":
             summary = self._format_check_mesh_summary(self._current_process_output)
@@ -445,30 +419,21 @@ class ProjectProcessLogicMixin:
             self._last_diagnostic_summary = "一键前处理完成。\n\n" + summary
             self._problem_text.setPlainText(self._last_diagnostic_summary)
             self._refresh_geometry_panel()
-    
-            self._refresh_results_panel()
             self._set_status("一键前处理完成。")
         elif exit_code == 0 and process_kind == "checkMesh":
             summary = self._format_check_mesh_summary(self._current_process_output)
             self._task_text.setPlainText("任务状态：checkMesh 完成")
             self._last_diagnostic_summary = summary
             self._problem_text.setPlainText(summary)
-    
-            self._refresh_results_panel()
             self._set_status("checkMesh 完成。")
         elif exit_code == 0 and process_kind == "snappyHexMesh":
             self._task_text.setPlainText("任务状态：snappyHexMesh 完成")
             self._last_diagnostic_summary = "snappyHexMesh 正常完成，没有失败诊断。"
             self._refresh_geometry_panel()
-    
-            self._refresh_results_panel()
             self._set_status("snappyHexMesh 完成。")
         elif exit_code == 0:
             self._task_text.setPlainText("任务状态：最小仿真完成")
             self._last_diagnostic_summary = "本次任务正常完成，没有失败诊断。"
-            if self._export_solver_metrics():
-                self._plot_residual_curve()
-            self._refresh_results_panel()
             self._set_status("最小仿真完成。")
         else:
             self._update_diagnostics(exit_code)

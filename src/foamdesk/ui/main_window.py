@@ -1737,29 +1737,6 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         description = QLabel("当前页面按“结果场选择 + 显示方式选择”组织后处理入口。先接入表面云图、切片、等值线、等值面和流线。")
         description.setWordWrap(True)
 
-        result_data_button = self._make_menu_button(
-            "结果数据",
-            [
-                ("刷新结果索引", self._refresh_results_panel),
-                ("导出求解指标", self._export_solver_metrics),
-                ("绘制残差曲线", self._plot_residual_curve),
-                ("导出 Markdown 报告", self._export_markdown_report),
-            ],
-        )
-        action_row = QHBoxLayout()
-        action_row.addWidget(result_data_button)
-        action_row.addStretch(1)
-        action_bar = QWidget()
-        action_bar.setLayout(action_row)
-        action_scroll = QScrollArea()
-        action_scroll.setWidget(action_bar)
-        action_scroll.setWidgetResizable(True)
-        action_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        action_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        action_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        action_scroll.setMaximumHeight(58)
-        action_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-
         field_group = QFrame()
         field_group.setObjectName("sectionFrame")
         field_layout = QVBoxLayout(field_group)
@@ -1838,21 +1815,12 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._results_text.setReadOnly(True)
         self._results_text.setPlainText("请先新建或打开项目，然后运行最小仿真。")
         self._results_text.setMaximumHeight(160)
-        self._residual_figure = Figure(figsize=(6, 3), tight_layout=True)
-        self._residual_canvas = FigureCanvas(self._residual_figure)
-        self._residual_canvas.setMaximumHeight(220)
-        self._vtk_hint_label = QLabel("三维结果仍在独立窗口中打开，避免 WSL 下 VTK 原生控件覆盖 Qt 主页面。")
-        self._vtk_hint_label.setWordWrap(True)
-        self._vtk_hint_label.setObjectName("sectionHint")
 
         layout.addWidget(title)
         layout.addWidget(description)
-        layout.addWidget(action_scroll)
         layout.addWidget(field_group)
         layout.addWidget(display_group)
         layout.addWidget(self._results_text, 1)
-        layout.addWidget(self._residual_canvas, 2)
-        layout.addWidget(self._vtk_hint_label)
         return wrapper
 
     def _build_settings_tab(self) -> QWidget:
