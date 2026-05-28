@@ -1080,6 +1080,7 @@ class GeometryLogicMixin:
             shm += f'        {Path(name).stem}\n'
             shm += "        {\n"
             shm += f"            level ({snappy['level']} {snappy['level']});\n"
+            shm += "            patchInfo\n            {\n                type wall;\n            }\n"
             shm += "        }\n"
         shm += "    }\n"
         shm += (
@@ -1151,10 +1152,10 @@ class GeometryLogicMixin:
             ");\n"
         )
         (system_dir / "snappyHexMeshDict").write_text(shm, encoding="utf-8")
-        self._append_log("已生成 blockMeshDict 和 snappyHexMeshDict。")
+        self._append_log("已生成 blockMeshDict 和 snappyHexMeshDict，启动网格流水线。")
         # execute mesh pipeline via existing infrastructure
         self._run_mesh_pipeline_command()
-        self._set_status("网格字典已生成，正在执行 blockMesh → snappyHexMesh → checkMesh...")
+        self._set_status("网格文件已生成，正在执行 blockMesh → snappyHexMesh → checkMesh...")
 
     def _run_mesh_pipeline_command(self) -> None:
         env_script = self._context.settings_service.load().openfoam_env_script or ""

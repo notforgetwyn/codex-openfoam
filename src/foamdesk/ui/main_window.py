@@ -412,7 +412,9 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         scroll_layout.addWidget(g1)
 
         # Group 2 — boundary face configuration
-        g2 = QGroupBox("边界面配置")
+        g2 = QGroupBox("高级 - 手动边界配置")
+        g2.setCheckable(True)
+        g2.setChecked(False)
         g2_layout = QHBoxLayout(g2)
         # left: pick controls
         left_widget = QWidget()
@@ -617,7 +619,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
 
         # Group 6 — action button bar
         btn_row = QHBoxLayout()
-        btn_gen = QPushButton("生成字典并执行")
+        btn_gen = QPushButton("生成网格")
         btn_gen.clicked.connect(self._on_generate_and_execute)
         btn_gen.setStyleSheet("font-weight: bold;")
         btn_preview = QPushButton("预览网格")
