@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shlex
+
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt
@@ -22,6 +24,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMenu,
+    QProgressBar,
     QMenuBar,
     QPushButton,
     QRadioButton,
@@ -675,20 +678,38 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._cfg_write_interval = QSpinBox()
         self._cfg_write_interval.setRange(1, 1000000)
         self._cfg_write_interval.setValue(100)
+        self._cfg_init_velocity = QLineEdit("(0 0 0)")
+        self._cfg_init_pressure = QLineEdit("0")
         solver_form.addRow("求解类型", self._cfg_solver_combo)
         solver_form.addRow("总计算时长 (s)", self._cfg_end_time)
         solver_form.addRow("时间步长 (s)", self._cfg_delta_t)
         solver_form.addRow("输出间隔 (步)", self._cfg_write_interval)
+        solver_form.addRow("初始速度 (m/s)", self._cfg_init_velocity)
+        solver_form.addRow("初始压力 (Pa)", self._cfg_init_pressure)
         left_col.addWidget(solver_grp)
 
-        # === global fields group ===
-        field_grp = QGroupBox("全局场参数")
-        field_form = QFormLayout(field_grp)
-        self._cfg_init_velocity = QLineEdit("(0 0 0)")
-        self._cfg_init_pressure = QLineEdit("0")
-        field_form.addRow("初始速度 (m/s)", self._cfg_init_velocity)
-        field_form.addRow("初始压力 (Pa)", self._cfg_init_pressure)
-        left_col.addWidget(field_grp)
+        # === fluid properties group ===
+        fluid_grp = QGroupBox("流体物性")
+        fluid_form = QFormLayout(fluid_grp)
+        self._cfg_material_combo = QComboBox()
+        self._cfg_material_combo.addItem("空气 air (rho=1.225, nu=1.48e-5)", "air")
+        self._cfg_material_combo.addItem("水 water (rho=1000, nu=1e-6)", "water")
+        self._cfg_material_combo.addItem("机油 oil (rho=880, nu=5e-5)", "oil")
+        self._cfg_material_combo.addItem("自定义 custom", "custom")
+        self._cfg_material_combo.currentIndexChanged.connect(self._on_material_preset_changed)
+        self._cfg_density = QLineEdit("1.225")
+        self._cfg_nu = QLineEdit("1.48e-5")
+        self._cfg_mu = QLineEdit("1.812e-5")
+        calc_mu_btn = QPushButton("计算 mu = rho * nu")
+        calc_mu_btn.clicked.connect(self._calc_mu)
+        mu_row = QHBoxLayout()
+        mu_row.addWidget(self._cfg_mu)
+        mu_row.addWidget(calc_mu_btn)
+        fluid_form.addRow("材料预设", self._cfg_material_combo)
+        fluid_form.addRow("密度 rho (kg/m3)", self._cfg_density)
+        fluid_form.addRow("运动粘度 nu (m2/s)", self._cfg_nu)
+        fluid_form.addRow("动力粘度 mu", mu_row)
+        left_col.addWidget(fluid_grp)
 
         # === boundary conditions group ===
         bc_grp = QGroupBox("边界条件")
@@ -725,6 +746,22 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         bc_form.addRow("压力 p", self._cfg_bc_p_value)
         bc_layout.addLayout(bc_form)
         right_col.addWidget(bc_grp)
+
+        # === turbulence model group ===
+        turb_grp = QGroupBox("湍流模型")
+        turb_form = QFormLayout(turb_grp)
+        self._cfg_turb_model = QComboBox()
+        self._cfg_turb_model.addItem("laminar - 层流", "laminar")
+        self._cfg_turb_model.addItem("kEpsilon - 标准 k-ε", "kEpsilon")
+        self._cfg_turb_model.addItem("kOmega - k-ω SST", "kOmegaSST")
+        self._cfg_turb_model.addItem("SpalartAllmaras - SA 模型", "SpalartAllmaras")
+        self._cfg_turb_model.currentIndexChanged.connect(self._on_turb_model_changed)
+        self._cfg_turb_intensity = QLineEdit("0.05")
+        self._cfg_turb_length = QLineEdit("0.1")
+        turb_form.addRow("湍流类型", self._cfg_turb_model)
+        turb_form.addRow("湍流强度", self._cfg_turb_intensity)
+        turb_form.addRow("混合长度 (m)", self._cfg_turb_length)
+        right_col.addWidget(turb_grp)
 
         # === solver control group ===
         ctrl_grp = QGroupBox("求解控制")
@@ -894,6 +931,37 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         fv_solution_key = self._cfg_fv_solution.currentData()
         fv_schemes_text = self._build_fv_schemes_text(fv_schemes_key)
         fv_solution_text = self._build_fv_solution_text(fv_solution_key, residual, relaxation)
+        rho = self._cfg_density.text().strip()
+        nu = self._cfg_nu.text().strip()
+        mu = self._cfg_mu.text().strip()
+        turb_model = self._cfg_turb_model.currentData()
+        turb_intensity = self._cfg_turb_intensity.text().strip()
+        turb_length = self._cfg_turb_length.text().strip()
+
+        transport_props = (
+            f"// constant/transportProperties\n"
+            f"transportModel  Newtonian;\n"
+            f"rho             rho [1 -3 0 0 0 0 0] {rho};\n"
+            f"nu              nu [0 2 -1 0 0 0 0] {nu};\n"
+            f"mu              mu [1 -1 -1 0 0 0 0] {mu};\n"
+        )
+
+        if turb_model == "laminar":
+            turb_props = (
+                f"// constant/turbulenceProperties\n"
+                f"simulationType  laminar;\n"
+            )
+        else:
+            ras_model = "kEpsilon" if turb_model == "kEpsilon" else "kOmegaSST" if turb_model == "kOmegaSST" else turb_model
+            turb_props = (
+                f"// constant/turbulenceProperties\n"
+                f"simulationType  RAS;\n"
+                f"RAS\n{{\n"
+                f"    RASModel        {ras_model};\n"
+                f"    turbulence      on;\n"
+                f"    printCoeffs     on;\n"
+                f"}}\n"
+            )
 
         preview = (
             f"// system/controlDict\n"
@@ -917,6 +985,8 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             f"boundaryField\n{{\n"
             f"{self._build_boundary_block('p')}\n"
             f"}}\n\n"
+            f"{transport_props}\n\n"
+            f"{turb_props}\n\n"
             f"// system/fvSchemes\n{fv_schemes_text}\n\n"
             f"// system/fvSolution\n{fv_solution_text}\n"
         )
@@ -982,6 +1052,10 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         relaxation = self._cfg_relaxation.text().strip()
         fv_schemes_key = self._cfg_fv_schemes.currentData()
         fv_solution_key = self._cfg_fv_solution.currentData()
+        rho = self._cfg_density.text().strip()
+        nu = self._cfg_nu.text().strip()
+        mu = self._cfg_mu.text().strip()
+        turb_model = self._cfg_turb_model.currentData()
 
         control_dict = (
             f"application     {solver};\n"
@@ -1012,6 +1086,29 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             f"}}\n"
         )
         (case_dir / "0" / "p").write_text(p_field, encoding="utf-8")
+
+        (case_dir / "constant").mkdir(parents=True, exist_ok=True)
+        transport = (
+            f"transportModel  Newtonian;\n"
+            f"rho             rho [1 -3 0 0 0 0 0] {rho};\n"
+            f"nu              nu [0 2 -1 0 0 0 0] {nu};\n"
+            f"mu              mu [1 -1 -1 0 0 0 0] {mu};\n"
+        )
+        (case_dir / "constant" / "transportProperties").write_text(transport, encoding="utf-8")
+
+        if turb_model == "laminar":
+            turb = "simulationType  laminar;\n"
+        else:
+            ras_model = "kEpsilon" if turb_model == "kEpsilon" else "kOmegaSST" if turb_model == "kOmegaSST" else turb_model
+            turb = (
+                f"simulationType  RAS;\n"
+                f"RAS\n{{\n"
+                f"    RASModel        {ras_model};\n"
+                f"    turbulence      on;\n"
+                f"    printCoeffs     on;\n"
+                f"}}\n"
+            )
+        (case_dir / "constant" / "turbulenceProperties").write_text(turb, encoding="utf-8")
 
         (case_dir / "system" / "fvSchemes").write_text(
             self._build_fv_schemes_text(fv_schemes_key), encoding="utf-8"
@@ -1213,14 +1310,291 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
 
     def _build_solver_run_tab(self) -> QWidget:
         wrapper = QWidget()
-        layout = QVBoxLayout(wrapper)
-        label = QLabel('求解运行功能开发中...')
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label.setStyleSheet('font-size: 18px; color: #9da5b4;')
-        layout.addStretch(1)
-        layout.addWidget(label)
-        layout.addStretch(1)
+        root = QVBoxLayout(wrapper)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(10)
+
+        title = QLabel("仿真运行监控")
+        title.setStyleSheet("font-size: 22px; font-weight: 600;")
+        root.addWidget(title)
+
+        control_row = QHBoxLayout()
+        self._cfg_start_btn = QPushButton("启动计算")
+        self._cfg_start_btn.setFixedHeight(34)
+        self._cfg_start_btn.setStyleSheet("background: #0e639c; color: #fff; font-weight: 600;")
+        self._cfg_start_btn.clicked.connect(self._start_simulation)
+        self._cfg_stop_btn = QPushButton("终止计算")
+        self._cfg_stop_btn.setFixedHeight(34)
+        self._cfg_stop_btn.setStyleSheet("color: #f48771;")
+        self._cfg_stop_btn.clicked.connect(self._stop_current_process)
+        self._cfg_stop_btn.setEnabled(False)
+        self._cfg_progress = QProgressBar()
+        self._cfg_progress.setRange(0, 0)
+        self._cfg_progress.setFixedWidth(200)
+        self._cfg_progress.setFixedHeight(20)
+        self._cfg_progress.setTextVisible(False)
+        self._cfg_progress.setVisible(False)
+        self._cfg_status_label = QLabel("状态：空闲")
+        self._cfg_status_label.setStyleSheet("font-weight: 600;")
+        control_row.addWidget(self._cfg_start_btn)
+        control_row.addWidget(self._cfg_stop_btn)
+        control_row.addSpacing(12)
+        control_row.addWidget(self._cfg_status_label)
+        control_row.addWidget(self._cfg_progress)
+        control_row.addStretch(1)
+        root.addLayout(control_row)
+
+        residual_label = QLabel("残差收敛曲线")
+        residual_label.setStyleSheet("font-weight: 600; margin-top: 8px;")
+        root.addWidget(residual_label)
+        self._cfg_residual_figure = Figure(figsize=(8, 2.5), facecolor="#1e1e1e")
+        self._cfg_residual_axes = self._cfg_residual_figure.add_subplot(111)
+        self._cfg_residual_axes.set_facecolor("#1e1e1e")
+        self._cfg_residual_axes.tick_params(colors="#cccccc", labelsize=9)
+        self._cfg_residual_axes.spines["bottom"].set_color("#2d2d30")
+        self._cfg_residual_axes.spines["top"].set_color("#2d2d30")
+        self._cfg_residual_axes.spines["left"].set_color("#2d2d30")
+        self._cfg_residual_axes.spines["right"].set_color("#2d2d30")
+        self._cfg_residual_axes.set_title("Residuals", color="#cccccc", fontsize=11)
+        self._cfg_residual_axes.set_xlabel("Iteration", color="#9d9d9d", fontsize=9)
+        self._cfg_residual_axes.set_ylabel("Residual", color="#9d9d9d", fontsize=9)
+        self._cfg_residual_axes.set_yscale("log")
+        self._cfg_residual_axes.grid(True, alpha=0.2, color="#2d2d30")
+        self._cfg_residual_canvas = FigureCanvas(self._cfg_residual_figure)
+        self._cfg_residual_canvas.setMinimumHeight(180)
+        root.addWidget(self._cfg_residual_canvas)
+
+        log_label = QLabel("实时日志输出")
+        log_label.setStyleSheet("font-weight: 600; margin-top: 4px;")
+        root.addWidget(log_label)
+        self._cfg_run_log = QTextEdit()
+        self._cfg_run_log.setReadOnly(True)
+        self._cfg_run_log.setStyleSheet("font-family: Consolas, monospace; font-size: 13px;")
+        self._cfg_run_log.setPlaceholderText("点击 [启动计算] 后，OpenFOAM 终端输出将实时显示在这里...")
+        root.addWidget(self._cfg_run_log, 1)
+
         return wrapper
+
+    def _sim_config_path(self) -> str:
+        from pathlib import Path
+        p = Path(__file__).parent.parent.parent.parent / "config" / "sim_config.json"
+        return str(p)
+
+    def _save_sim_config_state(self) -> None:
+        import json
+        data = {
+            "solver": self._cfg_solver_combo.currentData(),
+            "end_time": self._cfg_end_time.text(),
+            "delta_t": self._cfg_delta_t.text(),
+            "write_interval": self._cfg_write_interval.value(),
+            "init_velocity": self._cfg_init_velocity.text(),
+            "init_pressure": self._cfg_init_pressure.text(),
+            "material": self._cfg_material_combo.currentData(),
+            "density": self._cfg_density.text(),
+            "nu": self._cfg_nu.text(),
+            "mu": self._cfg_mu.text(),
+            "turb_model": self._cfg_turb_model.currentData(),
+            "turb_intensity": self._cfg_turb_intensity.text(),
+            "turb_length": self._cfg_turb_length.text(),
+            "residual": self._cfg_residual.text(),
+            "max_iters": self._cfg_max_iters.value(),
+            "relaxation": self._cfg_relaxation.text(),
+            "fv_schemes": self._cfg_fv_schemes.currentData(),
+            "fv_solution": self._cfg_fv_solution.currentData(),
+            "boundaries": self._read_boundary_rows(),
+        }
+        with open(self._sim_config_path(), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def _load_sim_config_state(self) -> None:
+        import json
+        from pathlib import Path
+        path = self._sim_config_path()
+        if not Path(path).exists():
+            return
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return
+        self._cfg_solver_combo.setCurrentIndex(
+            max(self._cfg_solver_combo.findData(data.get("solver", "simpleFoam")), 0))
+        self._cfg_end_time.setText(data.get("end_time", "1.0"))
+        self._cfg_delta_t.setText(data.get("delta_t", "0.001"))
+        self._cfg_write_interval.setValue(data.get("write_interval", 100))
+        self._cfg_init_velocity.setText(data.get("init_velocity", "(0 0 0)"))
+        self._cfg_init_pressure.setText(data.get("init_pressure", "0"))
+        self._cfg_material_combo.setCurrentIndex(
+            max(self._cfg_material_combo.findData(data.get("material", "air")), 0))
+        self._cfg_density.setText(data.get("density", "1.225"))
+        self._cfg_nu.setText(data.get("nu", "1.48e-5"))
+        self._cfg_mu.setText(data.get("mu", "1.812e-5"))
+        self._cfg_turb_model.setCurrentIndex(
+            max(self._cfg_turb_model.findData(data.get("turb_model", "laminar")), 0))
+        self._cfg_turb_intensity.setText(data.get("turb_intensity", "0.05"))
+        self._cfg_turb_length.setText(data.get("turb_length", "0.1"))
+        self._cfg_residual.setText(data.get("residual", "1e-6"))
+        self._cfg_max_iters.setValue(data.get("max_iters", 1000))
+        self._cfg_relaxation.setText(data.get("relaxation", "0.7"))
+        self._cfg_fv_schemes.setCurrentIndex(
+            max(self._cfg_fv_schemes.findData(data.get("fv_schemes", "stable")), 0))
+        self._cfg_fv_solution.setCurrentIndex(
+            max(self._cfg_fv_solution.findData(data.get("fv_solution", "default")), 0))
+        boundaries = data.get("boundaries", [])
+        for r, bc in enumerate(boundaries):
+            if r < self._cfg_boundary_table.rowCount():
+                if bc.get("name"):
+                    self._cfg_boundary_table.item(r, 0).setText(bc["name"])
+                if bc.get("role"):
+                    self._cfg_boundary_table.item(r, 1).setText(bc["role"])
+                if bc.get("u_value"):
+                    self._cfg_boundary_table.item(r, 2).setText(bc["u_value"])
+                if bc.get("p_value"):
+                    self._cfg_boundary_table.item(r, 3).setText(bc["p_value"])
+
+    def _on_material_preset_changed(self) -> None:
+        presets = {
+            "air": ("1.225", "1.48e-5", "1.812e-5"),
+            "water": ("1000", "1e-6", "0.001"),
+            "oil": ("880", "5e-5", "0.044"),
+        }
+        key = self._cfg_material_combo.currentData()
+        if key in presets:
+            rho, nu, mu = presets[key]
+            self._cfg_density.setText(rho)
+            self._cfg_nu.setText(nu)
+            self._cfg_mu.setText(mu)
+
+    def _calc_mu(self) -> None:
+        try:
+            rho = float(self._cfg_density.text().strip())
+            nu = float(self._cfg_nu.text().strip())
+            self._cfg_mu.setText(f"{rho * nu:.6g}")
+        except ValueError:
+            pass
+
+    def _on_turb_model_changed(self) -> None:
+        key = self._cfg_turb_model.currentData()
+        if key == "laminar":
+            self._cfg_turb_intensity.setEnabled(False)
+            self._cfg_turb_length.setEnabled(False)
+        else:
+            self._cfg_turb_intensity.setEnabled(True)
+            self._cfg_turb_length.setEnabled(True)
+
+    def _start_simulation(self) -> None:
+        if self._current_project is None:
+            self._set_status("请先新建或打开项目")
+            return
+        if self._foam_process and self._foam_process.state() != QProcess.ProcessState.NotRunning:
+            self._set_status("已有任务正在运行")
+            return
+        status = self._context.environment_detector.detect()
+        if not status.is_available or not status.env_script_path:
+            self._set_status(f"OpenFOAM 环境不可用：{status.detail}")
+            return
+        case_dir = self._current_project.case_dir
+        solver = self._cfg_solver_combo.currentData()
+        command = (
+            f"source {shlex.quote(status.env_script_path)} >/dev/null 2>&1 && "
+            f"cd {shlex.quote(str(case_dir))} && "
+            f"blockMesh && {shlex.quote(solver)}"
+        )
+        self._cfg_start_btn.setEnabled(False)
+        self._cfg_stop_btn.setEnabled(True)
+        self._cfg_status_label.setText("状态：计算中")
+        self._cfg_progress.setRange(0, 0)
+        self._cfg_progress.setVisible(True)
+        self._cfg_residual_axes.clear()
+        self._cfg_residual_axes.set_facecolor("#1e1e1e")
+        self._cfg_residual_axes.set_yscale("log")
+        self._cfg_residual_axes.grid(True, alpha=0.2, color="#2d2d30")
+        self._cfg_residual_canvas.draw()
+        self._cfg_run_log.clear()
+        self._cfg_run_log.append(f"<span style='color:#569cd6;'>=== 启动仿真 ===</span>")
+        self._cfg_run_log.append(f"Case: {case_dir}")
+        self._cfg_run_log.append(f"Solver: {solver}")
+        self._cfg_run_log.append("")
+        self._residual_data: dict[str, list[float]] = {"Ux": [], "Uy": [], "p": [], "iter": []}
+
+        self._foam_process = QProcess(self)
+        self._foam_process.setProgram("bash")
+        self._foam_process.setArguments(["-lc", command])
+        self._foam_process.readyReadStandardOutput.connect(self._on_sim_stdout)
+        self._foam_process.readyReadStandardError.connect(self._on_sim_stderr)
+        self._foam_process.finished.connect(self._on_sim_finished)
+        self._foam_process.start()
+        self._set_status("仿真已启动")
+
+    def _on_sim_stdout(self) -> None:
+        if self._foam_process:
+            text = bytes(self._foam_process.readAllStandardOutput()).decode(errors="replace")
+            self._cfg_run_log.append(text.rstrip())
+            self._cfg_run_log.verticalScrollBar().setValue(
+                self._cfg_run_log.verticalScrollBar().maximum()
+            )
+            self._parse_residual_lines(text)
+
+    def _on_sim_stderr(self) -> None:
+        if self._foam_process:
+            text = bytes(self._foam_process.readAllStandardError()).decode(errors="replace")
+            self._cfg_run_log.append(
+                f"<span style='color:#f48771;'>{text.rstrip()}</span>"
+            )
+
+    def _parse_residual_lines(self, text: str) -> None:
+        import re
+        for line in text.splitlines():
+            m = re.search(r"Solving for Ux.*Initial residual = ([0-9.e+\-]+).*Final residual = ([0-9.e+\-]+)", line)
+            if m:
+                self._residual_data["Ux"].append(float(m.group(1)))
+                self._residual_data["Uy"].append(float(m.group(2)))
+                continue
+            m = re.search(r"Solving for Uy.*Initial residual = ([0-9.e+\-]+).*Final residual = ([0-9.e+\-]+)", line)
+            if m:
+                self._residual_data["Ux"].append(self._residual_data["Ux"][-1] if self._residual_data["Ux"] else 0)
+                self._residual_data["Uy"].append(float(m.group(1)))
+                continue
+            m = re.search(r"Solving for p.*Initial residual = ([0-9.e+\-]+).*Final residual = ([0-9.e+\-]+)", line)
+            if m:
+                self._residual_data["p"].append(float(m.group(1)))
+                self._residual_data["iter"].append(len(self._residual_data["p"]) + 1)
+        self._redraw_residuals()
+
+    def _redraw_residuals(self) -> None:
+        self._cfg_residual_axes.clear()
+        self._cfg_residual_axes.set_facecolor("#1e1e1e")
+        self._cfg_residual_axes.tick_params(colors="#cccccc", labelsize=9)
+        for spine in self._cfg_residual_axes.spines.values():
+            spine.set_color("#2d2d30")
+        colors = {"Ux": "#569cd6", "Uy": "#6a9955", "p": "#ce9178"}
+        for key, color in colors.items():
+            data = self._residual_data.get(key, [])
+            if data:
+                iters = self._residual_data["iter"][:len(data)]
+                if iters:
+                    self._cfg_residual_axes.plot(iters, data, color=color, linewidth=1.5, label=key)
+        self._cfg_residual_axes.set_yscale("log")
+        self._cfg_residual_axes.grid(True, alpha=0.2, color="#2d2d30")
+        self._cfg_residual_axes.legend(loc="upper right", fontsize=8,
+            facecolor="#1e1e1e", edgecolor="#2d2d30", labelcolor="#cccccc")
+        self._cfg_residual_canvas.draw()
+
+    def _on_sim_finished(self, exit_code: int, _exit_status) -> None:
+        self._cfg_start_btn.setEnabled(True)
+        self._cfg_stop_btn.setEnabled(False)
+        if exit_code == 0:
+            self._cfg_status_label.setText("状态：完成")
+            self._cfg_status_label.setStyleSheet("font-weight: 600; color: #89d185;")
+            self._cfg_progress.setRange(0, 100)
+            self._cfg_progress.setValue(100)
+            self._cfg_progress.setVisible(True)
+            self._cfg_run_log.append("<span style='color:#89d185;'>=== 仿真完成 ===</span>")
+        else:
+            self._cfg_status_label.setText(f"状态：异常 (退出码 {exit_code})")
+            self._cfg_status_label.setStyleSheet("font-weight: 600; color: #f48771;")
+            self._cfg_progress.setVisible(False)
+            self._cfg_run_log.append(f"<span style='color:#f48771;'>=== 仿真异常 (退出码 {exit_code}) ===</span>")
+        self._set_status(f"仿真结束，退出码 {exit_code}")
 
     def _build_environment_tab(self) -> QWidget:
         wrapper = QWidget()
