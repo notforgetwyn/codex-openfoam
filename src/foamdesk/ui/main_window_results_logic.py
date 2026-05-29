@@ -32,8 +32,6 @@ class ResultsLogicMixin:
             return
 
         available = set(case_info.point_arrays) | set(case_info.cell_arrays)
-        if "U" in available:
-            available.add("mag(U)")
         current_field = self._result_field_combo.currentText().strip()
         self._result_field_combo.blockSignals(True)
         self._result_field_combo.clear()
@@ -169,7 +167,7 @@ class ResultsLogicMixin:
                 )
                 vol_data = mb.GetBlock(0) if mb.GetNumberOfBlocks() > 0 else mb
                 field_name = self._result_field_combo.currentText().strip()
-                source_field = "U" if field_name == "mag(U)" else field_name
+                source_field = field_name
                 arr = vol_data.GetPointData().GetArray(source_field)
                 if arr is None:
                     arr = vol_data.GetCellData().GetArray(source_field)
@@ -235,7 +233,7 @@ class ResultsLogicMixin:
                 )
                 volume_output = mb.GetBlock(0) if mb.GetNumberOfBlocks() > 0 else mb
                 field_name = self._result_field_combo.currentText().strip()
-                source_field = "U" if field_name == "mag(U)" else field_name
+                source_field = field_name
                 vol_field = volume_output.GetPointData().GetArray(source_field)
                 if vol_field is None:
                     vol_field = volume_output.GetCellData().GetArray(source_field)
@@ -315,7 +313,7 @@ class ResultsLogicMixin:
             time_value=time_value,
         )
         output = geometry.GetOutput()
-        source_field = "U" if field_name == "mag(U)" else field_name
+        source_field = field_name
         field_array = output.GetPointData().GetArray(source_field)
         storage = "point"
         if field_array is None:
@@ -323,9 +321,7 @@ class ResultsLogicMixin:
             storage = "cell"
         if field_array is None:
             raise RuntimeError(f"当前 Case 没有字段 {field_name}")
-        display_name = "mag(U)" if field_name == "mag(U)" else (
-            field_name if field_array.GetNumberOfComponents() == 1 else f"|{field_name}|"
-        )
+        display_name = field_name if field_array is not None and field_array.GetNumberOfComponents() == 1 else f"|{field_name}|"
         return output, field_array, display_name, selected_time, storage
 
     def _selected_result_time_value(self) -> float | None:

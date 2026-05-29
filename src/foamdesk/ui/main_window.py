@@ -118,12 +118,10 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
     TAB_RESULTS = 7
     RESULT_FIELDS = [
         "U",
-        "mag(U)",
         "p",
     ]
     RESULT_FIELD_UNITS = {
         "U": "m/s",
-        "mag(U)": "m/s",
         "p": "m2/s2 或 Pa",
     }
     RESULT_DISPLAY_MODES = [
@@ -138,12 +136,6 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             "Surface 表面云图",
             "Slice 切片",
             "Streamline 流线",
-            "Volume 体渲染",
-        ],
-        "mag(U)": [
-            "Surface 表面云图",
-            "Slice 切片",
-            "Iso-surface 等值面",
             "Volume 体渲染",
         ],
         "p": [
@@ -324,6 +316,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
 
     def _on_workspace_tab_changed(self, index: int) -> None:
         if index == self.TAB_RESULTS:
+            self._load_results_residual()
             self._refresh_result_field_panel(show_errors=False)
         elif index == self.TAB_SIMULATION_CONFIG:
             self._load_boundaries_into_table()
@@ -1495,9 +1488,10 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         return wrapper
 
     def _sim_config_path(self) -> str:
+        if hasattr(self, "_current_project") and self._current_project is not None:
+            return str(self._current_project.case_dir / "sim_config.json")
         from pathlib import Path
-        p = Path(__file__).parent.parent.parent.parent / "config" / "sim_config.json"
-        return str(p)
+        return str(Path(__file__).parent.parent.parent.parent / "config" / "sim_config.json")
 
     def _save_sim_config_state(self) -> None:
         import json
@@ -1639,7 +1633,9 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
     def _load_solver_run_state(self) -> None:
         import json
         from pathlib import Path
-        path = Path(__file__).parent.parent.parent.parent / "config" / "solver_run_state.json"
+        path = (self._current_project.case_dir / "solver_run_state.json"
+                if self._current_project is not None
+                else Path(__file__).parent.parent.parent.parent / "config" / "solver_run_state.json")
         saved = {}
         if path.exists():
             try:
@@ -1672,7 +1668,9 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
     def _save_solver_run_state(self) -> None:
         import json
         from pathlib import Path
-        path = Path(__file__).parent.parent.parent.parent / "config" / "solver_run_state.json"
+        path = (self._current_project.case_dir / "solver_run_state.json"
+                if self._current_project is not None
+                else Path(__file__).parent.parent.parent.parent / "config" / "solver_run_state.json")
         data = {
             "status_text": self._cfg_status_label.text(),
             "log": self._cfg_run_log.toHtml() if hasattr(self, "_cfg_run_log") else "",
@@ -1804,6 +1802,17 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             self._cfg_residual_axes.legend(loc="upper right", fontsize=8,
                 facecolor="#1e1e1e", edgecolor="#2d2d30", labelcolor="#cccccc")
         self._cfg_residual_canvas.draw()
+        self._save_residual_data()
+
+    def _save_residual_data(self) -> None:
+        if self._current_project is None:
+            return
+        import json
+        save = {k: v for k, v in self._residual_data.items() if v}
+        if not save:
+            return
+        (self._current_project.case_dir / "residual_data.json").write_text(
+            json.dumps(save), encoding="utf-8")
 
     def _on_sim_finished(self, exit_code: int, _exit_status) -> None:
         self._cfg_start_btn.setEnabled(True)
@@ -1821,6 +1830,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             self._cfg_progress.setVisible(False)
             self._cfg_run_log.append(f"<span style='color:#f48771;'>=== 仿真异常 (退出码 {exit_code}) ===</span>")
         self._set_status(f"仿真结束，退出码 {exit_code}")
+        self._save_residual_data()
 
     def _build_environment_tab(self) -> QWidget:
         wrapper = QWidget()
@@ -1849,6 +1859,19 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         title.setStyleSheet("font-size: 22px; font-weight: 600;")
         description = QLabel("选择结果场和显示方式，查看仿真后处理结果。")
         description.setWordWrap(True)
+
+        self._results_residual_figure = Figure(figsize=(8, 3.0), facecolor="#1e1e1e")
+        self._results_residual_axes = self._results_residual_figure.add_subplot(111)
+        self._results_residual_axes.set_facecolor("#1e1e1e")
+        self._results_residual_axes.tick_params(colors="#cccccc", labelsize=9)
+        for spine in self._results_residual_axes.spines.values():
+            spine.set_color("#2d2d30")
+        self._results_residual_canvas = FigureCanvas(self._results_residual_figure)
+        self._results_residual_canvas.setMaximumHeight(180)
+        self._load_results_residual()
+
+        residual_label = QLabel("残差曲线")
+        residual_label.setStyleSheet("font-weight: 600; margin-top: 4px;")
 
         field_group = QFrame()
         field_group.setObjectName("sectionFrame")
@@ -1908,10 +1931,42 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
 
         layout.addWidget(title)
         layout.addWidget(description)
+        layout.addWidget(residual_label)
+        layout.addWidget(self._results_residual_canvas)
         layout.addWidget(field_group)
         layout.addWidget(display_group)
         layout.addWidget(self._results_text, 1)
         return wrapper
+
+    def _load_results_residual(self) -> None:
+        import json
+        self._results_residual_axes.clear()
+        self._results_residual_axes.set_facecolor("#1e1e1e")
+        self._results_residual_axes.tick_params(colors="#cccccc", labelsize=9)
+        for spine in self._results_residual_axes.spines.values():
+            spine.set_color("#2d2d30")
+        if self._current_project is None:
+            self._results_residual_canvas.draw(); return
+        rp = self._current_project.case_dir / "residual_data.json"
+        if not rp.exists():
+            self._results_residual_canvas.draw(); return
+        try:
+            data = json.loads(rp.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return
+        colors = {"Ux": "#569cd6", "Uy": "#6a9955", "Uz": "#dcdcaa", "p": "#ce9178"}
+        iters = data.get("iter", [])
+        for key, color in colors.items():
+            vals = data.get(key, [])
+            if vals and iters:
+                i = iters[:len(vals)]
+                self._results_residual_axes.plot(i, vals, color=color, linewidth=1.5, label=key)
+        self._results_residual_axes.set_yscale("log")
+        self._results_residual_axes.grid(True, alpha=0.2, color="#2d2d30")
+        if any(data.get(k) for k in colors if k in data):
+            self._results_residual_axes.legend(loc="upper right", fontsize=8,
+                facecolor="#1e1e1e", edgecolor="#2d2d30", labelcolor="#cccccc")
+        self._results_residual_canvas.draw()
 
     def _build_settings_tab(self) -> QWidget:
         wrapper = QWidget()

@@ -80,20 +80,31 @@ class DrawGeometryLogicMixin:
     """Mixin providing all modeling logic methods for MainWindow."""
 
     def _init_modeling_state(self) -> None:
+        if hasattr(self, "_modeling_viewport") and self._modeling_viewport is not None:
+            for obj in self._modeling_objects:
+                self._modeling_viewport._renderer.RemoveActor(obj.actor)
         self._modeling_objects: list[GeometryObject] = []
         self._modeling_selected_index: int = -1
         self._modeling_counter: dict[str, int] = {}
         self._modeling_active_section: str = "stl"
         self._load_modeling_state()
+        if hasattr(self, "_modeling_viewport") and self._modeling_viewport is not None:
+            for obj in self._modeling_objects:
+                self._modeling_viewport._renderer.AddActor(obj.actor)
+                self._apply_transform(obj)
+            if hasattr(self, "_modeling_tree"):
+                self._rebuild_tree()
+            self._modeling_viewport.render()
 
     # ------------------------------------------------------------------
     # persistence
     # ------------------------------------------------------------------
 
     def _modeling_state_path(self) -> str:
+        if hasattr(self, "_current_project") and self._current_project is not None:
+            return str(self._current_project.case_dir / "modeling_state.json")
         from pathlib import Path
-        p = Path(__file__).parent.parent.parent.parent / "config" / "modeling_state.json"
-        return str(p)
+        return str(Path(__file__).parent.parent.parent.parent / "config" / "modeling_state.json")
 
     def _save_modeling_state(self) -> None:
         import json

@@ -59,8 +59,10 @@ class ProjectProcessLogicMixin:
         self._refresh_geometry_panel()
         self._refresh_project_home_summary()
         self._load_boundaries_into_table()
+        self._init_modeling_state()
         self._load_sim_config_state()
         self._load_solver_run_state()
+        self._init_mesh_import_state()
         self._load_mesh_workflow_state()
         self._restore_project_result_state()
         self._append_log(f"当前项目：{project.path}")
@@ -572,9 +574,18 @@ class ProjectProcessLogicMixin:
         if self._current_project is None:
             self._show_error("当前没有打开的项目。")
             return
-        self._workspace_tabs.setCurrentIndex(self.TAB_PROJECT_HOME)
-        self._append_log(f"当前 Case 目录：{self._current_project.case_dir}")
-        self._set_status("已输出当前 Case 目录。")
+        import subprocess, sys, os
+        case_dir = str(self._current_project.case_dir)
+        try:
+            if sys.platform == "win32":
+                os.startfile(case_dir)
+            elif sys.platform == "linux":
+                subprocess.Popen(["xdg-open", case_dir])
+            else:
+                subprocess.Popen(["open", case_dir])
+            self._set_status(f"已打开文件夹：{case_dir}")
+        except Exception as e:
+            self._show_error(f"无法打开文件夹：{e}")
 
     def _show_stage_summary(self) -> None:
         self._append_log(
