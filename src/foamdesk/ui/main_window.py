@@ -120,15 +120,11 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         "U",
         "mag(U)",
         "p",
-        "T",
-        "k",
     ]
     RESULT_FIELD_UNITS = {
         "U": "m/s",
         "mag(U)": "m/s",
         "p": "m2/s2 或 Pa",
-        "T": "K",
-        "k": "m2/s2",
     }
     RESULT_DISPLAY_MODES = [
         "Surface 表面云图",
@@ -150,18 +146,6 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             "Iso-surface 等值面",
         ],
         "p": [
-            "Surface 表面云图",
-            "Slice 切片",
-            "Contour 等值线",
-            "Iso-surface 等值面",
-        ],
-        "T": [
-            "Surface 表面云图",
-            "Slice 切片",
-            "Contour 等值线",
-            "Iso-surface 等值面",
-        ],
-        "k": [
             "Surface 表面云图",
             "Slice 切片",
             "Contour 等值线",
@@ -1866,14 +1850,6 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._result_field_combo = QComboBox()
         self._result_field_combo.addItems(self.RESULT_FIELDS)
         self._result_time_combo = QComboBox()
-        self._result_color_min_input = QDoubleSpinBox()
-        self._result_color_min_input.setRange(-1.0e12, 1.0e12)
-        self._result_color_min_input.setDecimals(6)
-        self._result_color_min_input.setValue(0.0)
-        self._result_color_max_input = QDoubleSpinBox()
-        self._result_color_max_input.setRange(-1.0e12, 1.0e12)
-        self._result_color_max_input.setDecimals(6)
-        self._result_color_max_input.setValue(1.0)
         self._result_unit_label = QLabel("单位：-")
         self._result_minmax_label = QLabel("最大/最小值：未刷新")
         refresh_fields_button = QPushButton("刷新字段/时间步")
@@ -1883,10 +1859,6 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         field_row.addWidget(self._result_field_combo, 2)
         field_row.addWidget(QLabel("时间步"))
         field_row.addWidget(self._result_time_combo, 2)
-        field_row.addWidget(QLabel("颜色最小"))
-        field_row.addWidget(self._result_color_min_input, 1)
-        field_row.addWidget(QLabel("颜色最大"))
-        field_row.addWidget(self._result_color_max_input, 1)
         field_row.addWidget(refresh_fields_button)
         field_layout.addWidget(field_title)
         field_layout.addLayout(field_row)

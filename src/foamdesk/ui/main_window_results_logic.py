@@ -96,8 +96,6 @@ class ResultsLogicMixin:
             return
         min_value = float(values.min())
         max_value = float(values.max())
-        self._result_color_min_input.setValue(min_value)
-        self._result_color_max_input.setValue(max_value if max_value != min_value else min_value + 1.0)
         self._result_minmax_label.setText(
             f"最大/最小值：{display_name} min={min_value:.6g}, max={max_value:.6g}（{storage} 字段）"
         )
@@ -332,12 +330,10 @@ class ResultsLogicMixin:
         values = self._scalar_values(field_array)
         if values.size == 0:
             return (0.0, 1.0)
-        fallback = (float(values.min()), float(values.max()))
-        minimum = float(self._result_color_min_input.value())
-        maximum = float(self._result_color_max_input.value())
-        if maximum <= minimum:
-            return fallback if fallback[1] > fallback[0] else (fallback[0] - 1.0, fallback[1] + 1.0)
-        return minimum, maximum
+        vmin, vmax = float(values.min()), float(values.max())
+        if vmax <= vmin:
+            return (vmin - 1.0, vmin + 1.0)
+        return (vmin, vmax)
 
     def _scalar_values(self, field_array) -> np.ndarray:
         values = vtk_to_numpy(field_array)
