@@ -144,27 +144,6 @@ class ResultsLogicMixin:
                 f"Surface 表面云图已加载到原生 VTK 3D 窗口：field={display_name}, time={selected_time}, faces={face_count}, range={color_range}"
             )
             return
-        if mode.startswith("Contour"):
-            try:
-                output, field_array = self._ensure_point_field(output, field_array, storage)
-            except RuntimeError as error:
-                self._show_error(str(error))
-                return
-            axis = self._result_slice_axis_combo.currentText().strip()
-            position = self._result_slice_position_input.value()
-            self._ensure_native_vtk_viewer()
-            resolved_axis, center = self._native_vtk_viewer.plot_contour(
-                output,
-                field_array,
-                color_range,
-                display_name,
-                None if axis == "自动" else axis,
-                position,
-            )
-            self._finish_result_visualization(
-                f"Contour 等值线已加载到原生 VTK 3D 窗口：field={display_name}, time={selected_time}, axis={resolved_axis}, center={center:.6g}, range={color_range}"
-            )
-            return
         if mode.startswith("Iso-surface"):
             try:
                 output, field_array = self._ensure_point_field(output, field_array, storage)
@@ -184,23 +163,33 @@ class ResultsLogicMixin:
             return
         if mode.startswith("Slice"):
             try:
-                output, field_array = self._ensure_point_field(output, field_array, storage)
-            except RuntimeError as error:
+                mb = self._context.openfoam_vtk_service.build_case_output(
+                    self._current_project,
+                    time_value=self._selected_result_time_value(),
+                )
+                vol_data = mb.GetBlock(0) if mb.GetNumberOfBlocks() > 0 else mb
+                field_name = self._result_field_combo.currentText().strip()
+                source_field = "U" if field_name == "mag(U)" else field_name
+                arr = vol_data.GetPointData().GetArray(source_field)
+                if arr is None:
+                    arr = vol_data.GetCellData().GetArray(source_field)
+                if arr is None:
+                    self._show_error(f"切片需要字段 {field_name}")
+                    return
+            except (OSError, RuntimeError, ValueError) as error:
                 self._show_error(str(error))
                 return
-            axis = self._result_slice_axis_combo.currentText().strip()
-            position = self._result_slice_position_input.value()
             self._ensure_native_vtk_viewer()
             resolved_axis, center = self._native_vtk_viewer.plot_slice(
-                output,
-                field_array,
+                vol_data,
+                arr,
                 color_range,
                 display_name,
-                None if axis == "自动" else axis,
-                position,
+                None,
+                0.5,
             )
             self._finish_result_visualization(
-                f"Slice 切片已加载到原生 VTK 3D 窗口：field={display_name}, time={selected_time}, axis={resolved_axis}, center={center:.6g}, range={color_range}"
+                f"Slice 切片已加载：field={display_name}, time={selected_time}, axis={resolved_axis}, center={center:.6g}, range={color_range}"
             )
             return
         if mode.startswith("Streamline"):
@@ -236,6 +225,30 @@ class ResultsLogicMixin:
             point_count = streamline_output.GetNumberOfPoints()
             self._finish_result_visualization(
                 f"Streamline 流线已加载到原生 VTK 3D 窗口：time={selected_time}, mainAxis={main_axis}, seeds={seed_count}, lines={line_count}, points={point_count}, speedRange={speed_range}"
+            )
+            return
+        if mode.startswith("Volume"):
+            try:
+                mb = self._context.openfoam_vtk_service.build_case_output(
+                    self._current_project,
+                    time_value=self._selected_result_time_value(),
+                )
+                volume_output = mb.GetBlock(0) if mb.GetNumberOfBlocks() > 0 else mb
+                field_name = self._result_field_combo.currentText().strip()
+                source_field = "U" if field_name == "mag(U)" else field_name
+                vol_field = volume_output.GetPointData().GetArray(source_field)
+                if vol_field is None:
+                    vol_field = volume_output.GetCellData().GetArray(source_field)
+                if vol_field is None:
+                    self._show_error(f"体渲染需要字段 {field_name}")
+                    return
+            except (OSError, RuntimeError, ValueError) as error:
+                self._show_error(str(error))
+                return
+            self._ensure_native_vtk_viewer()
+            self._native_vtk_viewer.plot_volume(volume_output, vol_field, color_range, display_name)
+            self._finish_result_visualization(
+                f"Volume 体渲染已加载：field={display_name}, time={selected_time}, range={color_range}"
             )
             return
 

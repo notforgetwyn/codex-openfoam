@@ -10,6 +10,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -381,6 +382,7 @@ class NativeVtkViewerDialog(QDialog):
         self._animation_frame_index = 0
         self._animation_interval_ms = 800
         self._geometry_assets = []
+        self._slice_data = None
         self._animation_timer = QTimer(self)
         self._animation_timer.timeout.connect(self._advance_animation_frame)
         layout = QVBoxLayout(self)
@@ -400,6 +402,24 @@ class NativeVtkViewerDialog(QDialog):
         close_button = QPushButton("关闭")
         close_button.clicked.connect(self.close)
         toolbar.addWidget(close_button)
+        # slice controls in toolbar (hidden by default, shown when Slice mode is active)
+        toolbar.addSpacing(8)
+        self._slice_lbl = QLabel("切片|")
+        self._slice_lbl.setVisible(False)
+        toolbar.addWidget(self._slice_lbl)
+        self._slice_axis_combo = QComboBox()
+        self._slice_axis_combo.addItems(["自动", "X", "Y", "Z"])
+        self._slice_axis_combo.currentTextChanged.connect(self._on_slice_ctrl_changed)
+        self._slice_axis_combo.setVisible(False)
+        toolbar.addWidget(self._slice_axis_combo)
+        self._slice_pos_spin = QDoubleSpinBox()
+        self._slice_pos_spin.setRange(0.0, 1.0)
+        self._slice_pos_spin.setSingleStep(0.05)
+        self._slice_pos_spin.setDecimals(2)
+        self._slice_pos_spin.setValue(0.5)
+        self._slice_pos_spin.valueChanged.connect(self._on_slice_ctrl_changed)
+        self._slice_pos_spin.setVisible(False)
+        toolbar.addWidget(self._slice_pos_spin)
         layout.addLayout(toolbar)
 
         self._vtk_widget = QVTKRenderWindowInteractor(self)
@@ -409,6 +429,16 @@ class NativeVtkViewerDialog(QDialog):
         self._renderer.SetBackground(1.0, 1.0, 1.0)
         self._vtk_widget.GetRenderWindow().AddRenderer(self._renderer)
         self._interactor = self._vtk_widget.GetRenderWindow().GetInteractor()
+
+    def _hide_slice_ctrls(self) -> None:
+        self._slice_lbl.setVisible(False)
+        self._slice_axis_combo.setVisible(False)
+        self._slice_pos_spin.setVisible(False)
+
+    def _show_slice_ctrls(self) -> None:
+        self._slice_lbl.setVisible(True)
+        self._slice_axis_combo.setVisible(True)
+        self._slice_pos_spin.setVisible(True)
 
     def set_geometry_assets(self, assets) -> None:
         self._geometry_assets = [
@@ -498,6 +528,17 @@ class NativeVtkViewerDialog(QDialog):
         self._add_scalar_bar(mapper.GetLookupTable(), label)
         self._finish_scene(poly_data)
 
+    def _on_slice_ctrl_changed(self) -> None:
+        if self._slice_data is None:
+            return
+        data = self._slice_data
+        axis_name = self._slice_axis_combo.currentText().strip()
+        pos = self._slice_pos_spin.value()
+        self.plot_slice(
+            data["poly_data"], data["field_array"], data["scalar_range"],
+            data["label"], None if axis_name == "自动" else axis_name, pos,
+        )
+
     def plot_slice(
         self,
         poly_data,
@@ -507,6 +548,20 @@ class NativeVtkViewerDialog(QDialog):
         axis_name: str | None,
         normalized_position: float,
     ) -> tuple[str, float]:
+        self._slice_data = {
+            "poly_data": poly_data, "field_array": field_array,
+            "scalar_range": scalar_range, "label": label,
+        }
+        self._show_slice_ctrls()
+        # update controls without triggering re-render
+        self._slice_axis_combo.blockSignals(True)
+        self._slice_pos_spin.blockSignals(True)
+        if axis_name:
+            idx = self._slice_axis_combo.findText(axis_name)
+            if idx >= 0: self._slice_axis_combo.setCurrentIndex(idx)
+        self._slice_pos_spin.setValue(normalized_position)
+        self._slice_axis_combo.blockSignals(False)
+        self._slice_pos_spin.blockSignals(False)
         self._reset_scene(f"Slice 切片：{label}")
         array_name = self._scalar_array_name(poly_data, field_array, label)
         axis, center = self._axis_and_center(poly_data, axis_name, normalized_position)
@@ -520,7 +575,7 @@ class NativeVtkViewerDialog(QDialog):
         plane.SetOrigin(*origin)
         plane.SetNormal(*normal)
         cutter = vtk.vtkCutter()
-        cutter.SetInputData(poly_data)
+        cutter.SetInputDataObject(poly_data)
         cutter.SetCutFunction(plane)
         cutter.Update()
         mapper = vtk.vtkPolyDataMapper()
@@ -533,52 +588,6 @@ class NativeVtkViewerDialog(QDialog):
         actor.SetMapper(mapper)
         actor.GetProperty().SetInterpolationToPhong()
         actor.GetProperty().SetOpacity(0.98)
-        self._renderer.AddActor(actor)
-        self._add_outline(poly_data)
-        self._add_flow_labels(poly_data)
-        self._add_scalar_bar(mapper.GetLookupTable(), label)
-        self._finish_scene(poly_data)
-        return "XYZ"[axis], center
-
-    def plot_contour(
-        self,
-        poly_data,
-        field_array,
-        scalar_range: tuple[float, float],
-        label: str,
-        axis_name: str | None,
-        normalized_position: float,
-    ) -> tuple[str, float]:
-        self._reset_scene(f"Contour 等值线：{label}")
-        array_name = self._scalar_array_name(poly_data, field_array, label)
-        axis, center = self._axis_and_center(poly_data, axis_name, normalized_position)
-        bounds = poly_data.GetBounds()
-        plane = vtk.vtkPlane()
-        origin = [(bounds[0] + bounds[1]) * 0.5, (bounds[2] + bounds[3]) * 0.5, (bounds[4] + bounds[5]) * 0.5]
-        origin[axis] = center
-        normal = [0.0, 0.0, 0.0]
-        normal[axis] = 1.0
-        plane.SetOrigin(*origin)
-        plane.SetNormal(*normal)
-        cutter = vtk.vtkCutter()
-        cutter.SetInputData(poly_data)
-        cutter.SetCutFunction(plane)
-        contour = vtk.vtkContourFilter()
-        contour.SetInputConnection(cutter.GetOutputPort())
-        contour.SetInputArrayToProcess(0, 0, 0, vtk.vtkDataObject.FIELD_ASSOCIATION_POINTS, array_name)
-        value_min, value_max = scalar_range
-        if value_max <= value_min:
-            value_max = value_min + 1.0
-        contour.GenerateValues(22, value_min, value_max)
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputConnection(contour.GetOutputPort())
-        mapper.SetScalarModeToUsePointFieldData()
-        mapper.SelectColorArray(array_name)
-        mapper.SetScalarRange(value_min, value_max)
-        mapper.SetLookupTable(self._lookup_table((value_min, value_max)))
-        actor = vtk.vtkActor()
-        actor.SetMapper(mapper)
-        actor.GetProperty().SetLineWidth(2.0)
         self._renderer.AddActor(actor)
         self._add_outline(poly_data)
         self._add_flow_labels(poly_data)
@@ -616,6 +625,28 @@ class NativeVtkViewerDialog(QDialog):
         self._add_scalar_bar(mapper.GetLookupTable(), label)
         self._finish_scene(poly_data)
 
+    def plot_volume(self, poly_data, field_array, scalar_range: tuple[float, float], label: str) -> None:
+        self._reset_scene(f"Volume 体渲染：{label}")
+        array_name = self._scalar_array_name(poly_data, field_array, label)
+        vmin, vmax = scalar_range
+        if vmax <= vmin:
+            vmax = vmin + 1.0
+        lut = self._lookup_table(scalar_range)
+        mapper = vtk.vtkDataSetMapper()
+        mapper.SetInputDataObject(poly_data)
+        mapper.SetScalarModeToUsePointFieldData()
+        mapper.SelectColorArray(array_name)
+        mapper.SetScalarRange(vmin, vmax)
+        mapper.SetLookupTable(lut)
+        mapper.SetResolveCoincidentTopologyToPolygonOffset()
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetOpacity(0.6)
+        actor.GetProperty().SetInterpolationToPhong()
+        self._renderer.AddActor(actor)
+        self._add_scalar_bar(lut, label)
+        self._finish_scene(poly_data)
+
     def plot_streamlines(self, source_poly_data, streamline_poly_data, speed_range: tuple[float, float]) -> None:
         self._reset_scene("Streamline 流线：由 U 生成，按 |U| 着色")
         speed_array_name = self._streamline_speed_array_name(streamline_poly_data)
@@ -623,7 +654,7 @@ class NativeVtkViewerDialog(QDialog):
         if value_max <= value_min:
             value_max = value_min + 1.0
         lookup_table = self._lookup_table((value_min, value_max))
-        self._configure_streamline_particle_animation(streamline_poly_data, source_poly_data)
+        self._configure_streamline_particle_animation(streamline_poly_data, source_poly_data, lookup_table)
         self._add_outline(source_poly_data)
         self._add_flow_labels(source_poly_data)
         self._add_scalar_bar(lookup_table, "|U| (m/s)")
@@ -634,6 +665,10 @@ class NativeVtkViewerDialog(QDialog):
         self._renderer.RemoveAllViewProps()
         self._renderer.SetBackground(1.0, 1.0, 1.0)
         self._add_geometry_assets()
+        # Only hide slice controls if switching to non-slice mode
+        if not status.startswith("Slice"):
+            self._hide_slice_ctrls()
+            self._slice_data = None
 
     def _finish_scene(self, poly_data, zoom: float = 1.25) -> None:
         bounds = poly_data.GetBounds() if poly_data is not None else None
@@ -820,14 +855,19 @@ class NativeVtkViewerDialog(QDialog):
         self,
         streamline_poly_data,
         source_poly_data,
+        lookup_table=None,
     ) -> None:
         paths = self._streamline_path_records(streamline_poly_data)
         if not paths:
             self.set_animation_source(0, None)
             return
         particle_points = vtk.vtkPoints()
+        particle_speeds = vtk.vtkFloatArray()
+        particle_speeds.SetName("speed")
         particle_poly_data = vtk.vtkPolyData()
         particle_poly_data.SetPoints(particle_points)
+        particle_poly_data.GetPointData().AddArray(particle_speeds)
+        particle_poly_data.GetPointData().SetActiveScalars("speed")
         sphere = vtk.vtkSphereSource()
         sphere.SetRadius(max(self._streamline_tube_radius(source_poly_data) * 7.2, self._bounds_length(source_poly_data) * 0.003))
         sphere.SetThetaResolution(14)
@@ -835,9 +875,13 @@ class NativeVtkViewerDialog(QDialog):
         glyph = vtk.vtkGlyph3DMapper()
         glyph.SetInputData(particle_poly_data)
         glyph.SetSourceConnection(sphere.GetOutputPort())
+        glyph.SetScalarModeToUsePointFieldData()
+        glyph.SelectColorArray("speed")
+        if lookup_table is not None:
+            glyph.SetLookupTable(lookup_table)
+            glyph.SetScalarRange(lookup_table.GetRange())
         actor = vtk.vtkActor()
         actor.SetMapper(glyph)
-        actor.GetProperty().SetColor(0.04, 0.18, 1.0)
         actor.GetProperty().SetAmbient(0.35)
         actor.GetProperty().SetDiffuse(0.75)
         actor.GetProperty().SetInterpolationToPhong()
@@ -859,6 +903,7 @@ class NativeVtkViewerDialog(QDialog):
             if frame_index == 0:
                 reset_particles()
             particle_points.Reset()
+            particle_speeds.Reset()
             active_count = 0
             for path, particle in zip(paths, particles, strict=False):
                 if not particle["active"]:
@@ -868,6 +913,7 @@ class NativeVtkViewerDialog(QDialog):
                     particle["active"] = False
                     continue
                 particle_points.InsertNextPoint(float(point[0]), float(point[1]), float(point[2]))
+                particle_speeds.InsertNextValue(float(speed))
                 active_count += 1
                 particle["distance"] = float(particle["distance"]) + speed * time_step
                 if float(particle["distance"]) >= float(path["total_length"]):
@@ -880,7 +926,9 @@ class NativeVtkViewerDialog(QDialog):
                         particle["active"] = False
                         continue
                     particle_points.InsertNextPoint(float(point[0]), float(point[1]), float(point[2]))
+                    particle_speeds.InsertNextValue(float(speed))
             particle_points.Modified()
+            particle_speeds.Modified()
             particle_poly_data.Modified()
             self._render_window()
 

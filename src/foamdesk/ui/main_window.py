@@ -129,27 +129,28 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
     RESULT_DISPLAY_MODES = [
         "Surface 表面云图",
         "Slice 切片",
-        "Contour 等值线",
         "Iso-surface 等值面",
         "Streamline 流线",
+        "Volume 体渲染",
     ]
     RESULT_FIELD_DISPLAY_MODES = {
         "U": [
             "Surface 表面云图",
             "Slice 切片",
             "Streamline 流线",
+            "Volume 体渲染",
         ],
         "mag(U)": [
             "Surface 表面云图",
             "Slice 切片",
-            "Contour 等值线",
             "Iso-surface 等值面",
+            "Volume 体渲染",
         ],
         "p": [
             "Surface 表面云图",
             "Slice 切片",
-            "Contour 等值线",
             "Iso-surface 等值面",
+            "Volume 体渲染",
         ],
     }
 
@@ -317,8 +318,18 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._workspace_tabs.addTab(self._build_environment_tab(), "环境检查")
         self._workspace_tabs.addTab(self._build_settings_tab(), "设置")
         self._workspace_tabs.addTab(self._build_results_tab(), "结果")
+        self._workspace_tabs.currentChanged.connect(self._on_workspace_tab_changed)
         layout.addWidget(self._workspace_tabs)
         return container
+
+    def _on_workspace_tab_changed(self, index: int) -> None:
+        if index == self.TAB_RESULTS:
+            self._refresh_result_field_panel(show_errors=False)
+        elif index == self.TAB_SIMULATION_CONFIG:
+            self._load_boundaries_into_table()
+            self._load_sim_config_state()
+        elif index == self.TAB_SOLVER_RUN:
+            self._load_solver_run_state()
 
     def _build_bottom_panel(self) -> QWidget:
         self._bottom_tabs = QTabWidget()
@@ -1836,7 +1847,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
 
         title = QLabel("结果")
         title.setStyleSheet("font-size: 22px; font-weight: 600;")
-        description = QLabel("当前页面按“结果场选择 + 显示方式选择”组织后处理入口。先接入表面云图、切片、等值线、等值面和流线。")
+        description = QLabel("选择结果场和显示方式，查看仿真后处理结果。")
         description.setWordWrap(True)
 
         field_group = QFrame()
@@ -1875,24 +1886,13 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         display_row = QHBoxLayout()
         self._result_display_combo = QComboBox()
         self._result_display_combo.addItems(self.RESULT_DISPLAY_MODES)
-        self._result_slice_axis_combo = QComboBox()
-        self._result_slice_axis_combo.addItems(["自动", "X", "Y", "Z"])
-        self._result_slice_position_input = QDoubleSpinBox()
-        self._result_slice_position_input.setRange(0.0, 1.0)
-        self._result_slice_position_input.setSingleStep(0.05)
-        self._result_slice_position_input.setDecimals(2)
-        self._result_slice_position_input.setValue(0.5)
         load_display_button = QPushButton("加载显示")
         load_display_button.clicked.connect(lambda _checked=False: self._load_selected_result_display())
         display_row.addWidget(QLabel("显示方式"))
         display_row.addWidget(self._result_display_combo, 2)
-        display_row.addWidget(QLabel("切面方向"))
-        display_row.addWidget(self._result_slice_axis_combo)
-        display_row.addWidget(QLabel("切面位置"))
-        display_row.addWidget(self._result_slice_position_input)
         display_row.addWidget(load_display_button)
         display_hint = QLabel(
-            "已接入：Surface、Slice、Contour、Iso-surface、Streamline。"
+            "已接入：Surface、Slice、Iso-surface、Streamline、Volume。"
         )
         display_hint.setWordWrap(True)
         display_hint.setObjectName("sectionHint")
