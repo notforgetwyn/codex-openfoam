@@ -46,10 +46,7 @@ from foamdesk.app.bootstrap import ApplicationContext
 from foamdesk.domain.models import SimulationParameters, SimulationProject
 from foamdesk.ui.theme import THEMES
 from foamdesk.ui.visualization_widgets import NativeVtkPreviewWidget, NativeVtkViewerDialog, VtkViewerDialog
-from foamdesk.ui.main_window_geometry_logic import (
-    BOUNDARY_TYPE_LABELS,
-    GeometryLogicMixin,
-)
+from foamdesk.ui.main_window_geometry_logic import GeometryLogicMixin
 from foamdesk.ui.main_window_results_logic import ResultsLogicMixin
 from foamdesk.ui.main_window_parameters_logic import ParametersLogicMixin
 from foamdesk.ui.main_window_project_logic import ProjectProcessLogicMixin
@@ -315,14 +312,19 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         return container
 
     def _on_workspace_tab_changed(self, index: int) -> None:
-        if index == self.TAB_RESULTS:
-            self._load_results_residual()
-            self._refresh_result_field_panel(show_errors=False)
+        if index == self.TAB_DRAW_GEOMETRY:
+            self._init_modeling_state()
+        elif index == self.TAB_MESH_GENERATION:
+            self._init_mesh_import_state()
+            self._load_mesh_workflow_state()
         elif index == self.TAB_SIMULATION_CONFIG:
             self._load_boundaries_into_table()
             self._load_sim_config_state()
         elif index == self.TAB_SOLVER_RUN:
             self._load_solver_run_state()
+        elif index == self.TAB_RESULTS:
+            self._load_results_residual()
+            self._refresh_result_field_panel(show_errors=False)
 
     def _build_bottom_panel(self) -> QWidget:
         self._bottom_tabs = QTabWidget()
@@ -365,7 +367,6 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         vtk_layout.setContentsMargins(0, 0, 0, 0)
         self._mesh_grid_vtk = NativeVtkPreviewWidget(wrapper, background=(0.12, 0.12, 0.12))
         vtk_layout.addWidget(self._mesh_grid_vtk)
-        self._setup_boundary_picker()
 
         # ── top: scrollable parameter panel ──
         scroll = QScrollArea()
@@ -401,60 +402,20 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         g1_layout.addWidget(clear_btn)
         scroll_layout.addWidget(g1)
 
-        # Group 2 — boundary face configuration
-        g2 = QGroupBox("高级 - 手动边界配置")
-        g2.setCheckable(True)
-        g2.setChecked(False)
-        g2_layout = QHBoxLayout(g2)
-        # left: pick controls
-        left_widget = QWidget()
-        left = QVBoxLayout(left_widget)
-        left.setContentsMargins(0, 0, 0, 0)
-        pick_mode_group = QButtonGroup(self)
-        self._boundary_pick_point_rb = QRadioButton("点选面")
-        self._boundary_pick_point_rb.setChecked(True)
-        pick_mode_group.addButton(self._boundary_pick_point_rb)
-        left.addWidget(self._boundary_pick_point_rb)
-        self._boundary_pick_btn = QPushButton("拾取面")
-        self._boundary_pick_btn.clicked.connect(self._toggle_boundary_pick)
-        left.addWidget(self._boundary_pick_btn)
-        cancel_pick_btn = QPushButton("取消选中")
-        cancel_pick_btn.clicked.connect(
-            lambda: self._boundary_pending_cells.clear() or self._redraw_mesh_grid_vtk())
-        left.addWidget(cancel_pick_btn)
-        clear_all_btn = QPushButton("清空所有边界")
-        clear_all_btn.clicked.connect(self._clear_all_boundary_groups)
-        left.addWidget(clear_all_btn)
-        left.addStretch(1)
-        g2_layout.addWidget(left_widget)
-        # right: boundary properties + table
-        right_widget = QWidget()
-        right = QVBoxLayout(right_widget)
-        right.setContentsMargins(0, 0, 0, 0)
-        prop_row = QHBoxLayout()
-        self._boundary_type_combo = QComboBox()
-        for key, label in BOUNDARY_TYPE_LABELS.items():
-            self._boundary_type_combo.addItem(label, key)
-        self._boundary_type_combo.currentIndexChanged.connect(
-            self._on_boundary_type_changed)
-        self._boundary_name_input = QLineEdit()
-        self._boundary_name_input.setPlaceholderText("边界名称（默认同类型）")
-        apply_btn = QPushButton("应用到选中面")
-        apply_btn.clicked.connect(self._apply_boundary_to_selected)
-        prop_row.addWidget(QLabel("类型:"))
-        prop_row.addWidget(self._boundary_type_combo)
-        prop_row.addWidget(QLabel("名称:"))
-        prop_row.addWidget(self._boundary_name_input, 1)
-        prop_row.addWidget(apply_btn)
-        right.addLayout(prop_row)
-        self._boundary_table = QTableWidget(0, 4)
-        self._boundary_table.setHorizontalHeaderLabels(
-            ["边界名称", "边界类型", "面片数量", "操作"])
-        self._boundary_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch)
-        right.addWidget(self._boundary_table)
-        g2_layout.addWidget(right_widget, 1)
+        # Group 2 — domain face boundary configuration
+        g2 = QGroupBox("计算域边界配置（每行对应计算域的一个面）")
+        g2_layout = QVBoxLayout(g2)
+        self._domain_face_table = QTableWidget(6, 3)
+        self._domain_face_table.setHorizontalHeaderLabels(["面", "边界类型", "边界名称"])
+        self._domain_face_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self._domain_face_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._domain_face_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self._domain_face_table.verticalHeader().setVisible(False)
+        self._domain_face_table.verticalHeader().setDefaultSectionSize(36)
+        self._domain_face_table.setMinimumHeight(260)
+        g2_layout.addWidget(self._domain_face_table)
         scroll_layout.addWidget(g2)
+        self._init_domain_face_table()
 
         # Group 3 — background mesh / blockMeshDict
         g3 = QGroupBox("基础计算域网格（背景网格）")
@@ -616,11 +577,9 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         btn_preview.clicked.connect(self._on_preview_mesh)
         btn_check = QPushButton("检查网格质量")
         btn_check.clicked.connect(self._on_check_quality)
-        btn_export_stl = QPushButton("导出STL(按边界拆分)")
-        btn_export_stl.clicked.connect(self._on_export_boundary_stl)
         btn_reset = QPushButton("重置所有参数")
         btn_reset.clicked.connect(self._on_reset_all_params)
-        for btn in (btn_gen, btn_preview, btn_check, btn_export_stl, btn_reset):
+        for btn in (btn_gen, btn_preview, btn_check, btn_reset):
             btn.setMinimumHeight(32)
             btn_row.addWidget(btn)
         btn_row.addStretch(1)
@@ -1824,6 +1783,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             self._cfg_progress.setValue(100)
             self._cfg_progress.setVisible(True)
             self._cfg_run_log.append("<span style='color:#89d185;'>=== 仿真完成 ===</span>")
+            self._run_foam_to_vtk()
         else:
             self._cfg_status_label.setText(f"状态：异常 (退出码 {exit_code})")
             self._cfg_status_label.setStyleSheet("font-weight: 600; color: #f48771;")
@@ -1831,6 +1791,65 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             self._cfg_run_log.append(f"<span style='color:#f48771;'>=== 仿真异常 (退出码 {exit_code}) ===</span>")
         self._set_status(f"仿真结束，退出码 {exit_code}")
         self._save_residual_data()
+
+    def _run_foam_to_vtk(self) -> None:
+        """Run foamToVTK -latestTime to export VTK files into case/VTK/."""
+        if self._current_project is None:
+            return
+        status = self._context.environment_detector.detect()
+        env_script = status.env_script_path or ""
+        case_dir = self._current_project.case_dir
+        if env_script:
+            cmd = (
+                f'source {shlex.quote(env_script)} >/dev/null 2>&1 && '
+                f'cd {shlex.quote(str(case_dir))} && '
+                f'foamToVTK -latestTime'
+            )
+        else:
+            cmd = (
+                f'cd {shlex.quote(str(case_dir))} && '
+                f'foamToVTK -latestTime'
+            )
+        self._vtk_export_process = QProcess(self)
+        self._vtk_export_process.setProgram("bash")
+        self._vtk_export_process.setArguments(["-lc", cmd])
+        self._vtk_export_process.readyReadStandardOutput.connect(self._read_vtk_export_stdout)
+        self._vtk_export_process.finished.connect(self._on_vtk_export_finished)
+        self._vtk_export_process.start()
+        self._cfg_run_log.append("<span style='color:#569cd6;'>正在生成 VTK 文件...</span>")
+        self._append_log("正在执行 foamToVTK -latestTime ...")
+        self._set_status("正在生成 VTK 文件...")
+
+    def _read_vtk_export_stdout(self) -> None:
+        if self._vtk_export_process is None:
+            return
+        data = self._vtk_export_process.readAllStandardOutput()
+        text = bytes(data).decode("utf-8", errors="replace")
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped:
+                self._cfg_run_log.append(stripped)
+                self._append_log(stripped)
+
+    def _on_vtk_export_finished(self, exit_code: int) -> None:
+        if self._current_project is None:
+            return
+        vtk_dir = self._current_project.case_dir / "VTK"
+        if exit_code == 0 and vtk_dir.exists():
+            msg = f"VTK 文件已生成：{vtk_dir}"
+            self._cfg_run_log.append(f"<span style='color:#89d185;'>{msg}</span>")
+            self._append_log(msg)
+            vol_files = list((vtk_dir / 'volumes').glob('*.vtu')) if (vtk_dir / 'volumes').exists() else []
+            surf_files = list((vtk_dir / 'surfaces').glob('*.vtp')) if (vtk_dir / 'surfaces').exists() else []
+            self._append_log(f"  volumes: {[f.name for f in vol_files]}")
+            self._append_log(f"  surfaces: {[f.name for f in surf_files]}")
+            self._set_status("VTK 文件生成完成。")
+        else:
+            self._cfg_run_log.append(
+                f"<span style='color:#f48771;'>VTK 导出失败 (exit={exit_code})</span>"
+            )
+            self._append_log(f"foamToVTK 失败，退出码 {exit_code}")
+            self._set_status(f"VTK 导出失败 (exit={exit_code})")
 
     def _build_environment_tab(self) -> QWidget:
         wrapper = QWidget()

@@ -1,171 +1,224 @@
-我直接给你**可直接开发、可直接画图、可直接写进毕设**的 **Qt UI 界面完整设计方案 + 布局结构 + 控件清单**，完全按照你说的**阶段1 + 阶段2**做成**两个标签页（QTabWidget）**。
+下面分完整可运行代码、分步解读、数据处理、流线绘制、渲染出图，基于 vtk 库，适配你用 foamToVTK -latestTime 导出的 .vtu + .vtp 文件。
+前置准备
+已执行 foamToVTK -latestTime，得到 VTK/volumes/xxx.vtu、VTK/surfaces/inlet.vtp
+安装依赖：pip install vtk numpy
+一、整体流程
+读取全域体网格 + 速度场（.vtu）
+读取入口面种子源（.vtp）
+配置流线追踪器，基于速度场积分生成迹线 / 流线
+数据映射（按速度大小上色）
+渲染窗口显示结果
+二、完整代码（稳态流线 / 迹线）
+python
+import vtk
 
-你可以直接复制到论文里、直接给前端开发、直接用 Qt Designer 拖出来。
+# ===================== 1. 配置文件路径（改成你自己的路径） =====================
+# 体网格+流场文件（volumes 下的 .vtu）
+vtu_file = "./VTK/volumes/volume_1000.vtu"
+# 入口面种子文件（surfaces 下的 inlet.vtp）
+inlet_vtp = "./VTK/surfaces/inlet.vtp"
 
----
+# ===================== 2. 读取 VTU 体网格与流场数据 =====================
+# 2.1 新建 VTU 读取器
+vtu_reader = vtk.vtkXMLUnstructuredGridReader()
+vtu_reader.SetFileName(vtu_file)
+vtu_reader.Update()  # 执行读取
 
-# 一、整体主窗口结构
-```
-主窗口（QMainWindow）
-  ↳ 中央控件：QTabWidget
-      ↳ 标签页1：【仿真参数配置】
-      ↳ 标签页2：【仿真运行监控】
-```
+# 拿到完整网格对象（包含网格拓扑 + U、p、VelocityMagnitude 等场量）
+grid_data = vtu_reader.GetOutput()
 
-**风格统一：上下分区**
-- 上半部分：操作/配置区
-- 下半部分：预览/日志/图表区
+# 可选：打印信息，确认数据是否读取成功
+print("网格单元数：", grid_data.GetNumberOfCells())
+print("网格顶点数：", grid_data.GetNumberOfPoints())
+# 查看当前包含的场变量名
+point_arrays = grid_data.GetPointData()
+print("顶点场变量列表：")
+for i in range(point_arrays.GetNumberOfArrays()):
+    print(f"  {point_arrays.GetArrayName(i)}")
 
----
+# ===================== 3. 读取入口面（流线种子发射源 VTP） =====================
+seed_reader = vtk.vtkXMLPolyDataReader()
+seed_reader.SetFileName(inlet_vtp)
+seed_reader.Update()
+seed_geometry = seed_reader.GetOutput()
 
-# 二、标签页1：仿真参数配置（完整 UI）
-## 布局
-```
-【仿真参数配置】
-├─ 上半部分：参数配置区（QGroupBox 分组）
-│   ├─ 求解器基础组
-│   │   下拉框：求解类型（simpleFoam / pimpleFoam）
-│   │   输入框：总计算时长
-│   │   输入框：时间步长
-│   │   输入框：结果输出间隔
-│   │
-│   ├─ 全局场参数组
-│   │   输入框：初始全场速度
-│   │   输入框：初始压力
-│   │
-│   ├─ 边界条件组（核心）
-│   │   表格：QTableWidget → 显示所有边界（inlet/outlet/wall...）
-│   │   右侧面板：选中边界后动态显示配置项
-│   │          速度入口：流速大小、方向（x/y/z）
-│   │          压力出口：参考压力
-│   │          固壁：无滑移 单选框
-│   │
-│   └─ 求解控制组
-│       输入框：残差收敛阈值
-│       输入框：最大迭代步数
-│       输入框：松弛因子
-│
-└─ 下半部分：字典预览与导出区
-    文本框：QTextEdit → 实时生成 controlDict / U / p 内容
-    按钮：导出全部仿真字典（一键生成文件）
-```
+# ===================== 4. 流线追踪核心：StreamTracer =====================
+stream_tracer = vtk.vtkStreamTracer()
 
-## 界面文字描述（可直接写论文）
-> 本页面采用上下分区布局，上部为多组参数配置面板，包括求解器基础设置、全局场参数、边界条件配置、求解控制参数。
-> 边界条件模块以表格展示已导入边界列表，用户选中边界后可动态配置速度、压力、壁面无滑移等条件。
-> 下部为字典文件实时预览区，可直观查看配置生成的 OpenFOAM 字典文本，并支持一键导出所有字典文件，替代手动编辑操作。
+# 4.1 接入全域网格数据
+stream_tracer.SetInputData(grid_data)
 
----
+# 4.2 指定速度矢量场 U（流线计算的核心）
+# 关联点数据里的 "U" 矢量
+stream_tracer.SetInputArrayToProcess(
+    0,
+    0,
+    0,
+    vtk.vtkDataObject.FIELD_ASSOCIATION_POINTS,
+    "U"  # 变量名固定为 U，和 OpenFOAM 导出一致
+)
 
-# 三、标签页2：仿真运行监控（完整 UI）
-## 布局
-```
-【仿真运行监控】
-├─ 上半部分：进程控制 + 状态区
-│   按钮：启动计算
-│   按钮：暂停计算
-│   按钮：终止计算
-│   进度条：计算进度
-│   状态标签：计算中 / 已收敛 / 异常
-│
-├─ 中间部分：残差曲线监控区
-│   QCustomPlot 图表
-│   绘制：Ux、Uy、p、k、ω 等残差曲线
-│   横轴：迭代步
-│   纵轴：残差值
-│
-└─ 下半部分：实时日志输出区
-    QTextEdit（只读、自动滚动、彩色日志）
-    实时显示 OpenFOAM 终端输出
-```
+# 4.3 设置种子源（从入口面发射流线）
+stream_tracer.SetSourceData(seed_geometry)
 
-## 界面文字描述（可直接写论文）
-> 本页面实现 OpenFOAM 计算进程的一体化监控，无需切换终端。
-> 上部提供计算启动、暂停、终止控制按钮，并显示计算进度与运行状态。
-> 中间采用实时残差曲线图展示求解收敛过程。
-> 下部日志区域实时捕获并显示终端输出，实现后台运行、可视化监控、异常提示一体化功能。
+# 4.4 流线计算参数
+stream_tracer.SetMaximumPropagation(800)    # 流线最大延伸长度
+stream_tracer.SetIntegrationStepUnit(vtk.vtkStreamTracer.LENGTH_UNIT)
+stream_tracer.SetInitialIntegrationStep(0.05)# 积分步长，越小精度越高
+stream_tracer.SetIntegrationDirectionToForward()  # 沿流动向前追踪
 
----
+# 执行流线积分计算
+stream_tracer.Update()
+stream_lines = stream_tracer.GetOutput()
 
-# 四、技术要点（可直接写进毕设）
-1. **Qt 调用外部进程**
-   使用 `QProcess` 启动 `simpleFoam / pimpleFoam`，后台运行不阻塞界面。
-2. **实时捕获标准输出**
-   连接 `readyReadStandardOutput()` 信号，实时读取日志并显示。
-3. **残差数据解析**
-   从日志中提取 `Ux`、`Uy`、`p` 残差，送入 `QCustomPlot` 绘制动态曲线。
-4. **字典文件自动生成**
-   根据界面参数拼接 OpenFOAM 字典格式字符串，写入 `system/`、`0/` 目录。
+print("生成流线总数：", stream_lines.GetNumberOfLines())
 
----
+# ===================== 5. 映射颜色：按速度大小 VelocityMagnitude 上色 =====================
+mapper = vtk.vtkPolyDataMapper()
+mapper.SetInputData(stream_lines)
 
-# 五、你最想要的：**可直接展示的 UI 结构图（文字版）**
-## 标签页1
-```
-+-----------------------------------------------------------+
-| 【仿真参数配置】                                           |
-|                                                           |
-|  [求解器基础]    [全局场参数]    [边界条件]    [求解控制]  |
-|  求解类型：[]     初始速度：__    边界列表表格     残差：__|
-|  总时长：__      初始压力：__    速度/压力/壁面配置        |
-|  时间步：__                           方向(x/y/z)         |
-|  输出间隔：__                                              |
-|                                                           |
-| --------------------------------------------------------- |
-| 【字典预览】                                              |
-| 实时生成 controlDict、U、p 文本内容...                    |
-|                                                           |
-|  [ 导出全部仿真字典 ]                                      |
-+-----------------------------------------------------------+
-```
+# 使用顶点标量场：VelocityMagnitude（速度幅值）着色
+mapper.SetScalarModeToUsePointFieldData()
+mapper.SelectColorArray("VelocityMagnitude")
+mapper.SetScalarRange(
+    stream_lines.GetPointData().GetArray("VelocityMagnitude").GetRange()
+)
 
-## 标签页2
-```
-+-----------------------------------------------------------+
-| 【仿真运行监控】                                          |
-|                                                           |
-|  [启动计算] [暂停] [终止]    进度：██████░░░░░   状态：计算中 |
-|                                                           |
-| --------------------------------------------------------- |
-| 残差收敛曲线                                              |
-|  (QCustomPlot 实时绘图)                                   |
-|  1.0 |                                                     |
-|      |  \  Ux                                              |
-|  0.5 |   \  p                                              |
-|      |    \                                                 |
-|  0.0 +-----┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈→ 迭代步数              |
-|                                                           |
-| --------------------------------------------------------- |
-| 实时日志输出                                              |
-| /*---------------------------------------------------------------------------|
-|  PIMPLE: Solving for Ux                                    |
-|  PIMPLE: Solving for Uy                                    |
-|  PIMPLE: Solving for p                                     |
-|  Time = 0.5                                               |
-|  ...                                                       |
-+-----------------------------------------------------------+
-```
-二、页面 1：仿真参数配置
-页面流程（用户操作步骤）
-打开页面 → 默认加载基础参数
-选择求解器（simpleFoam /pimpleFoam）
-填写计算时间、时间步、输出间隔
-设置初始速度、初始压力
-在边界表格选择边界
-配置对应边界条件（速度入口 / 压力出口 / 壁面）
-配置求解控制（残差、迭代、松弛因子）
-实时预览生成的字典文件内容
-点击【导出字典】生成 OpenFOAM 配置文件
-自动跳转到第二个标签页
+# ===================== 6. 渲染管线：窗口显示 =====================
+# 流线图元
+actor = vtk.vtkActor()
+actor.SetMapper(mapper)
+actor.GetProperty().SetLineWidth(2)   # 线条粗细
+actor.GetProperty().SetOpacity(1.0)  # 透明度
 
-三、页面 2：仿真运行监控
-页面流程（用户操作步骤）
-进入页面 → 初始状态：未运行
-点击【启动计算】
-后台调用 OpenFOAM 求解器
-进度条开始推进
-残差图表实时绘制 Ux、Uy、p 曲线
-日志区实时输出终端信息
-运行中可暂停 / 终止
-收敛后自动提示 “计算完成”
-可查看最终日志与曲线
+# 渲染器、窗口、交互器
+renderer = vtk.vtkRenderer()
+render_win = vtk.vtkRenderWindow()
+render_win.AddRenderer(renderer)
+interactor = vtk.vtkRenderWindowInteractor()
+interactor.SetRenderWindow(render_win)
+
+# 添加图元、背景色
+renderer.AddActor(actor)
+renderer.SetBackground(0.2, 0.2, 0.3)
+
+# 启动渲染
+render_win.Render()
+interactor.Initialize()
+interactor.Start()
+三、逐段解读：读入后做了哪些关键处理
+1. 读取 .vtu 之后
+vtkXMLUnstructuredGridReader 解析 XML 格式网格文件
+得到 vtkUnstructuredGrid 对象，内部整合两类数据：
+几何拓扑：点坐标、面、体单元、网格连接关系（对应 OpenFOAM polyMesh）
+场数据：顶点上的 U(速度矢量)、p(压力)、VelocityMagnitude(速度标量) 等
+代码里打印数量、变量名，是为了校验读取是否正常。
+2. 读取 .vtp 之后
+读取入口面 inlet.vtp，得到面几何，作为流线种子源
+含义：所有流线从这个面上的点开始发射，对应你仿真的流体入口。
+3. 流线核心计算（最重要）
+vtkStreamTracer 是 VTK 专门做流线 / 迹线的过滤器，内部逻辑：
+从种子点出发，读取当前位置 速度矢量 U
+按设定步长，沿速度方向积分，计算下一个空间位置
+反复迭代，直到达到最大长度 / 流出计算域
+把所有点位串联成线条，输出流线几何
+稳态工况：只用单时间步 U → 得到流线 (Streamline)
+瞬态工况：读取多时间步序列 → 得到迹线 (Pathline)
+4. 颜色映射处理
+选择 VelocityMagnitude（速度大小）作为着色变量
+自动取全场最大 / 最小值作为色标范围，实现「蓝→红」速度渐变效果。
+5. 渲染
+组装 Mapper → Actor → Renderer → RenderWindow 标准 VTK 渲染管线，最终可视化展示。
+
+结合 OpenFOAM 算例 + VTK（含 Python VTK / VTK 原生），分文件清单、完整操作步骤、代码示例，一步步实现流线 / 迹线绘制。
+一、先明确：VTK 读取的核心文件
+基于你现有的 OpenFOAM 算例，VTK 本身不直接读 OpenFOAM 原生格式，分两种方案：
+方案 1（推荐）：OpenFOAM 先转 VTU/VTP（VTK 标准格式）
+1. 源文件（OpenFOAM 原始数据）
+网格：constant/polyMesh/ 整套文件（points/faces/owner/neighbour/boundary）
+流场数据：目标时间步（如 1000/）下的 U（速度矢量）、可选 p（压力）
+2. 转换后 VTK 目标文件（最终给 VTK 读取）
+体网格 + 场量：.vtu（非结构化网格，主流）
+边界面网格：.vtp
+序列文件：.pvd（多时间步，瞬态用）
+画流线必备：网格文件 + 速度场 U；上色额外读取标量场（速度幅值、压力）。
+二、第一步：OpenFOAM 输出 VTK 格式文件
+在算例目录执行，二选一：
+方式 A：命令行批量转（稳态 / 瞬态通用）
+1. 稳态仿真（只取最后一个时间步）
+bash
+# 将当前算例结果转为 VTU
+foamToVTK -latestTime
+执行后会在算例根目录生成 VTK/ 文件夹：
+VTK/volumes/：体网格 + U/p 场量（核心）
+VTK/surfaces/：各边界面网格（inlet/outlet/wall）
+
+三、第二步：VTK 绘制流线（迹线）两种实操
+
+场景 2：Python + VTK 编程实现（自主开发 / 后处理脚本）
+环境准备
+bash
+pip install vtk numpy
+完整代码：读取 VTU + 生成流线
+功能：读取 OpenFOAM 转出的 VTU 网格、以入口面为种子、沿速度场生成流线并可视化
+python
+import vtk
+
+# ===================== 1. 读取 VTU 网格与场数据 =====================
+# 替换为你自己的 VTU 文件路径
+vtu_path = "./VTK/volumes/volume_1000.vtu"
+
+# 读取器
+reader = vtk.vtkXMLUnstructuredGridReader()
+reader.SetFileName(vtu_path)
+reader.Update()
+grid = reader.GetOutput()
+
+# ===================== 2. 配置流线追踪器 (VTK StreamTracer) =====================
+streamer = vtk.vtkStreamTracer()
+streamer.SetInputData(grid)
+# 指定速度矢量场名称（OpenFOAM转出后矢量名为 U）
+streamer.SetInputArrayToProcess(
+    0, 0, 0, vtk.vtkDataObject.FIELD_ASSOCIATION_POINTS, "U"
+)
+
+# 流线基础参数
+streamer.SetMaximumPropagation(500)    # 最大追踪长度
+streamer.SetIntegrationStepUnit(2)
+streamer.SetInitialIntegrationStep(0.1)
+streamer.SetIntegrationDirectionToForward()
+
+# ===================== 3. 设置种子点：从入口面发射 =====================
+# 方式：读取边界面 vtp 作为种子源 (inlet.vtp)
+seed_reader = vtk.vtkXMLPolyDataReader()
+seed_reader.SetFileName("./VTK/surfaces/inlet.vtp")
+seed_reader.Update()
+seed_source = seed_reader.GetOutput()
+
+streamer.SetSourceData(seed_source)
+streamer.Update()
+
+# ===================== 4. 渲染管线：显示流线 =====================
+# 流线几何
+stream_mapper = vtk.vtkPolyDataMapper()
+stream_mapper.SetInputConnection(streamer.GetOutputPort())
+# 按速度幅值着色
+stream_mapper.SetScalarModeToUsePointFieldData()
+stream_mapper.SelectColorArray("VelocityMagnitude")
+
+stream_actor = vtk.vtkActor()
+stream_actor.SetMapper(stream_mapper)
+stream_actor.GetProperty().SetLineWidth(2)
+
+# 渲染窗口
+renderer = vtk.vtkRenderer()
+render_win = vtk.vtkRenderWindow()
+render_win.AddRenderer(renderer)
+interactor = vtk.vtkRenderWindowInteractor()
+interactor.SetRenderWindow(render_win)
+
+renderer.AddActor(stream_actor)
+renderer.SetBackground(0.1, 0.1, 0.2)
+
+render_win.Render()
+interactor.Start()

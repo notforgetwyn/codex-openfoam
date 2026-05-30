@@ -7,16 +7,8 @@ from pathlib import Path
 
 import numpy as np
 import vtk
-from PySide6.QtCore import QProcess
-from PySide6.QtWidgets import (
-    QDialog,
-    QFileDialog,
-    QHBoxLayout,
-    QLabel,
-    QPushButton,
-    QTableWidgetItem,
-    QVBoxLayout,
-)
+from PySide6.QtCore import QProcess, Qt
+from PySide6.QtWidgets import QComboBox, QFileDialog, QLineEdit, QMessageBox, QTableWidgetItem
 from vtkmodules.util.numpy_support import vtk_to_numpy
 from vtkmodules.vtkIOGeometry import vtkSTLReader
 
@@ -36,28 +28,16 @@ class MeshImportAsset:
     color: tuple[float, float, float] = (0.58, 0.62, 0.66)
 
 
-@dataclass
-class BoundaryFaceGroup:
-    name: str
-    boundary_type: str
-    cell_ids: set[int]
+BOUNDARY_TYPE_OPTIONS = ["patch", "wall", "symmetry", "empty", "cyclic"]
 
-
-BOUNDARY_COLORS = {
-    "inlet": (1.0, 0.18, 0.18),
-    "outlet": (0.18, 0.35, 1.0),
-    "wall": (0.52, 0.52, 0.52),
-    "symmetry": (0.16, 0.78, 0.35),
-    "patch": (1.0, 0.85, 0.15),
-}
-
-BOUNDARY_TYPE_LABELS = {
-    "inlet": "速度入口 inlet",
-    "outlet": "压力出口 outlet",
-    "wall": "固壁 wall",
-    "symmetry": "对称面 symmetry",
-    "patch": "计算域外边界 patch",
-}
+DOMAIN_FACE_DEFAULTS = [
+    {"label": "X-min", "face": "0 4 7 3", "name": "inlet",   "type": "patch"},
+    {"label": "X-max", "face": "1 2 6 5", "name": "outlet",  "type": "patch"},
+    {"label": "Y-min", "face": "0 1 2 3", "name": "walls",   "type": "wall"},
+    {"label": "Y-max", "face": "4 5 6 7", "name": "walls",   "type": "wall"},
+    {"label": "Z-min", "face": "0 1 5 4", "name": "walls",   "type": "wall"},
+    {"label": "Z-max", "face": "3 2 6 7", "name": "walls",   "type": "wall"},
+]
 
 
 class GeometryLogicMixin:
@@ -590,11 +570,9 @@ class GeometryLogicMixin:
     def _init_mesh_import_state(self) -> None:
         self._mesh_imports: list[MeshImportAsset] = []
         self._mesh_import_selected_index: int = -1
-        self._boundary_groups: list[BoundaryFaceGroup] = []
-        self._boundary_pending_cells: set[int] = set()
-        self._boundary_pick_active: bool = False
         self._domain_bounds_manual: bool = False
         self._last_checkmesh_output: str = ""
+        self._highlighted_domain_face: int = -1
 
     def _import_geometry_file(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
@@ -669,16 +647,56 @@ class GeometryLogicMixin:
         self._redraw_mesh_grid_vtk()
 
     def _clear_mesh_imports(self) -> None:
-        if self._mesh_import_selected_index < 0:
+        if self._current_project is None:
+            self._show_error("请先新建或打开项目。")
             return
-        self._mesh_imports.pop(self._mesh_import_selected_index)
+        if not self._mesh_imports:
+            self._mesh_grid_vtk.clear()
+            return
+        confirm = QMessageBox.question(
+            self,
+            "清空几何",
+            "确定要清空当前 Case 的导入几何吗？\n\n"
+            "这会删除 constant/triSurface 下的 STL 文件，并清除几何导入记录。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        case_dir = self._current_project.case_dir
+        tri_surface_dir = case_dir / "constant" / "triSurface"
+        removed_count = 0
+        if tri_surface_dir.exists():
+            for path in tri_surface_dir.glob("*.stl"):
+                try:
+                    path.unlink()
+                    removed_count += 1
+                except OSError as error:
+                    self._show_error(f"删除几何失败：{path.name}\n{error}")
+                    return
+            for metadata_name in ("geometry_manifest.json", "snappy_config.json"):
+                metadata_path = tri_surface_dir / metadata_name
+                if metadata_path.exists():
+                    try:
+                        metadata_path.unlink()
+                    except OSError as error:
+                        self._show_error(f"删除几何记录失败：{metadata_name}\n{error}")
+                        return
+
+        snappy_dict = case_dir / "system" / "snappyHexMeshDict"
+        if snappy_dict.exists():
+            try:
+                snappy_dict.unlink()
+            except OSError:
+                pass
+
+        self._mesh_imports.clear()
         self._mesh_import_selected_index = -1
         self._rebuild_mesh_import_combo()
-        if self._mesh_imports:
-            self._mesh_grid_vtk.clear()
-            self._redraw_mesh_grid_vtk()
-        else:
-            self._mesh_grid_vtk.clear()
+        self._mesh_grid_vtk.clear()
+        self._append_log(f"已清空导入几何：删除 {removed_count} 个 STL 文件。")
+        self._set_status("导入几何已清空。")
 
     def _redraw_mesh_grid_vtk(self) -> None:
         canvas = self._mesh_grid_vtk
@@ -698,46 +716,10 @@ class GeometryLogicMixin:
                 continue
             opacity = 0.35 if asset.translucent else 0.92
             if i == self._mesh_import_selected_index:
-                # ── selected geometry: show boundary regions ──
-                has_boundary_data = bool(
-                    self._boundary_groups or self._boundary_pending_cells)
-                if not has_boundary_data:
-                    # no boundaries yet → draw whole polydata
-                    canvas.add_polydata(
-                        asset.polydata, color=(0.25, 0.74, 1.0), opacity=opacity,
-                        edge_color=(0.96, 0.53, 0.12), line_width=1.0,
-                    )
-                else:
-                    all_boundary_cells: set[int] = set()
-                    for group in self._boundary_groups:
-                        boundary_pd = self._extract_boundary_polydata(
-                            asset.polydata, group.cell_ids)
-                        if boundary_pd is not None and boundary_pd.GetNumberOfCells() > 0:
-                            color = BOUNDARY_COLORS.get(
-                                group.boundary_type, (0.7, 0.7, 0.7))
-                            canvas.add_polydata(
-                                boundary_pd, color=color, opacity=opacity)
-                        all_boundary_cells |= group.cell_ids
-                    pending_only = self._boundary_pending_cells - all_boundary_cells
-                    if pending_only:
-                        pending_pd = self._extract_boundary_polydata(
-                            asset.polydata, pending_only)
-                        if pending_pd is not None and pending_pd.GetNumberOfCells() > 0:
-                            canvas.add_polydata(
-                                pending_pd, color=(1.0, 0.6, 0.0), opacity=opacity,
-                                edge_color=(1.0, 0.4, 0.0), line_width=1.2,
-                            )
-                    all_used = all_boundary_cells | self._boundary_pending_cells
-                    total_cells = asset.polydata.GetNumberOfCells()
-                    if len(all_used) < total_cells:
-                        remainder = set(range(total_cells)) - all_used
-                        remainder_pd = self._extract_boundary_polydata(
-                            asset.polydata, remainder)
-                        if remainder_pd is not None and remainder_pd.GetNumberOfCells() > 0:
-                            canvas.add_polydata(
-                                remainder_pd, color=(0.25, 0.74, 1.0), opacity=opacity,
-                                edge_color=(0.96, 0.53, 0.12), line_width=1.0,
-                            )
+                canvas.add_polydata(
+                    asset.polydata, color=(0.25, 0.74, 1.0), opacity=opacity,
+                    edge_color=(0.96, 0.53, 0.12), line_width=1.0,
+                )
             else:
                 canvas.add_polydata(
                     asset.polydata, color=asset.color, opacity=opacity,
@@ -763,6 +745,15 @@ class GeometryLogicMixin:
                         np.array([corners[a], corners[b]]),
                         color=(0.2, 0.8, 0.4), width=2.0, opacity=0.7,
                     )
+                # highlight selected domain face
+                if 0 <= self._highlighted_domain_face < len(DOMAIN_FACE_DEFAULTS):
+                    face_def = DOMAIN_FACE_DEFAULTS[self._highlighted_domain_face]
+                    vi = [int(v) for v in face_def["face"].split()]
+                    face_corners = corners[vi]
+                    canvas.add_polygon(
+                        face_corners, color=(0.96, 0.85, 0.16),
+                        opacity=0.42, edge_color=(1.0, 0.85, 0.0),
+                    )
 
         if saved is not None:
             camera.SetPosition(*saved[0])
@@ -773,135 +764,69 @@ class GeometryLogicMixin:
         else:
             canvas.finish()
 
-    # ── boundary face / Group 2 logic ────────────────────────
+    # ── domain face / Group 2 logic ──────────────────────────
 
-    def _setup_boundary_picker(self) -> None:
-        canvas = self._mesh_grid_vtk
-        self._cell_picker = vtk.vtkCellPicker()
-        self._cell_picker.SetTolerance(0.01)
-        canvas._interactor.SetPicker(self._cell_picker)
-        self._pick_observer_id = canvas._interactor.AddObserver(
-            "LeftButtonPressEvent", self._on_boundary_pick_event)
-
-    def _on_boundary_pick_event(self, obj, _event) -> None:
-        if not self._boundary_pick_active:
+    def _init_domain_face_table(self) -> None:
+        """Fill domain face table with 6 rows of default/combo widgets."""
+        if not hasattr(self, "_domain_face_table"):
             return
-        if self._mesh_import_selected_index < 0:
-            return
-        x, y = obj.GetEventPosition()
-        self._cell_picker.Pick(x, y, 0, self._mesh_grid_vtk._renderer)
-        cell_id = self._cell_picker.GetCellId()
-        if cell_id < 0:
-            return
-        asset = self._mesh_imports[self._mesh_import_selected_index]
-        if cell_id >= asset.polydata.GetNumberOfCells():
-            return
-        if cell_id in self._boundary_pending_cells:
-            self._boundary_pending_cells.discard(cell_id)
-        else:
-            self._boundary_pending_cells.add(cell_id)
-        self._redraw_mesh_grid_vtk()
-
-    def _toggle_boundary_pick(self) -> None:
-        self._boundary_pick_active = not self._boundary_pick_active
-        btn = self._boundary_pick_btn
-        if self._boundary_pick_active:
-            btn.setText("拾取中...(再按停止)")
-            btn.setStyleSheet("background: #d9534f; color: #fff; font-weight: bold;")
-            self._set_status("面拾取模式已激活，点击 3D 视图中的几何面片。")
-        else:
-            btn.setText("拾取面")
-            btn.setStyleSheet("")
-            self._set_status("面拾取模式已关闭。")
-
-    def _on_boundary_type_changed(self, _index: int) -> None:
-        btype = self._boundary_type_combo.currentData()
-        if btype and not self._boundary_name_input.text().strip():
-            self._boundary_name_input.setPlaceholderText(f"默认: {btype}")
-
-    def _apply_boundary_to_selected(self) -> None:
-        if not self._boundary_pending_cells:
-            self._show_error("请先在 3D 视图中拾取面片。")
-            return
-        btype = self._boundary_type_combo.currentData()
-        name = self._boundary_name_input.text().strip()
-        if not name:
-            name = btype
-        idx = self._find_boundary_group(name)
-        if idx >= 0:
-            self._boundary_groups[idx].cell_ids |= self._boundary_pending_cells
-        else:
-            self._boundary_groups.append(BoundaryFaceGroup(
-                name=name, boundary_type=btype,
-                cell_ids=set(self._boundary_pending_cells)))
-        self._boundary_pending_cells.clear()
-        self._redraw_mesh_grid_vtk()
-        self._set_status(f"已将 {len(self._boundary_groups[-1].cell_ids)} 个面片应用到 {name}({btype})。")
-
-    def _find_boundary_group(self, name: str) -> int:
-        for i, group in enumerate(self._boundary_groups):
-            if group.name == name:
-                return i
-        return -1
-
-    def _delete_boundary_group(self, row: int) -> None:
-        if row < 0 or row >= len(self._boundary_groups):
-            return
-        self._boundary_groups.pop(row)
-        self._redraw_mesh_grid_vtk()
-
-    def _rebuild_boundary_table(self) -> None:
-        if not hasattr(self, "_boundary_table"):
-            return
-        table = self._boundary_table
+        table = self._domain_face_table
+        table.blockSignals(True)
         table.setRowCount(0)
-        for i, group in enumerate(self._boundary_groups):
+        for i, face in enumerate(DOMAIN_FACE_DEFAULTS):
             table.insertRow(i)
-            table.setItem(i, 0, QTableWidgetItem(group.name))
-            table.setItem(i, 1, QTableWidgetItem(
-                BOUNDARY_TYPE_LABELS.get(group.boundary_type, group.boundary_type)))
-            table.setItem(i, 2, QTableWidgetItem(str(len(group.cell_ids))))
-            del_btn = QPushButton("删除")
-            del_btn.clicked.connect(
-                lambda _checked=False, r=i: self._delete_boundary_group(r))
-            table.setCellWidget(i, 3, del_btn)
-
-    def _clear_all_boundary_groups(self) -> None:
-        self._boundary_groups.clear()
-        self._boundary_pending_cells.clear()
-        self._redraw_mesh_grid_vtk()
-        self._set_status("所有边界定义已清空。")
-
-    def _extract_boundary_polydata(self, source_polydata, cell_ids: set[int]):
-        if not cell_ids:
-            return None
+            table.setRowHeight(i, 34)
+            label_item = QTableWidgetItem(face["label"])
+            label_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            table.setItem(i, 0, label_item)
+            combo = QComboBox()
+            combo.addItems(BOUNDARY_TYPE_OPTIONS)
+            combo.setMinimumHeight(28)
+            idx = combo.findText(face["type"])
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+            table.setCellWidget(i, 1, combo)
+            name_edit = QLineEdit()
+            name_edit.setText(face["name"])
+            name_edit.setPlaceholderText("边界名称")
+            name_edit.setMinimumHeight(28)
+            table.setCellWidget(i, 2, name_edit)
+        table.blockSignals(False)
+        table.selectRow(0)
+        self._highlighted_domain_face = 0
         try:
-            id_array = vtk.vtkIdTypeArray()
-            id_array.SetNumberOfComponents(1)
-            for cid in sorted(cell_ids):
-                id_array.InsertNextValue(cid)
-            sel_node = vtk.vtkSelectionNode()
-            sel_node.SetFieldType(vtk.vtkSelectionNode.CELL)
-            sel_node.SetContentType(vtk.vtkSelectionNode.INDICES)
-            sel_node.SetSelectionList(id_array)
-            sel = vtk.vtkSelection()
-            sel.AddNode(sel_node)
-            extract = vtk.vtkExtractSelection()
-            extract.SetInputData(0, source_polydata)
-            extract.SetInputData(1, sel)
-            extract.Update()
-            output = extract.GetOutput()
-            if output is None:
-                return None
-            geom_filter = vtk.vtkGeometryFilter()
-            geom_filter.SetInputData(output)
-            geom_filter.Update()
-            result = geom_filter.GetOutput()
-            if result is None or result.GetNumberOfCells() == 0:
-                return None
-            return result
-        except Exception:
-            return None
+            table.selectionModel().selectionChanged.disconnect(
+                self._on_domain_face_selection_changed)
+        except (TypeError, RuntimeError):
+            pass
+        table.selectionModel().selectionChanged.connect(
+            self._on_domain_face_selection_changed)
+
+    def _on_domain_face_selection_changed(self) -> None:
+        rows = set()
+        for idx in self._domain_face_table.selectedIndexes():
+            rows.add(idx.row())
+        self._highlighted_domain_face = rows.pop() if rows else -1
+        self._redraw_mesh_grid_vtk()
+
+    def _get_domain_face_definitions(self) -> list[dict]:
+        """Return list of {label, name, type, faces} from the table."""
+        if not hasattr(self, "_domain_face_table"):
+            return DOMAIN_FACE_DEFAULTS.copy()
+        result = []
+        table = self._domain_face_table
+        for i in range(table.rowCount()):
+            label_item = table.item(i, 0)
+            if label_item is None:
+                continue
+            label = label_item.text().strip()
+            face = DOMAIN_FACE_DEFAULTS[i]["face"]
+            combo = table.cellWidget(i, 1)
+            btype = combo.currentText() if combo else DOMAIN_FACE_DEFAULTS[i]["type"]
+            name_edit = table.cellWidget(i, 2)
+            name = name_edit.text().strip() if name_edit else DOMAIN_FACE_DEFAULTS[i]["name"]
+            result.append({"label": label, "name": name or btype, "type": btype, "faces": face})
+        return result
 
     # ── domain mesh / Group 3 logic ─────────────────────────
 
@@ -1033,11 +958,17 @@ class GeometryLogicMixin:
             " simpleGrading (1 1 1)\n);\n\n"
             "edges\n(\n);\n\n"
             "boundary\n(\n"
-            "    inlet  { type patch; faces ((0 4 7 3)); }\n"
-            "    outlet { type patch; faces ((1 2 6 5)); }\n"
-            "    walls  { type wall;  faces ((0 1 2 3) (4 5 6 7) (0 1 5 4) (3 2 6 7)); }\n"
-            ");\n"
         )
+        # dynamic boundary from domain face table (Group 2)
+        face_defs = self._get_domain_face_definitions()
+        merged: dict[tuple[str, str], list[str]] = {}
+        for f in face_defs:
+            key = (f["name"], f["type"])
+            merged.setdefault(key, []).append(f["faces"])
+        for (bname, btype), face_list in merged.items():
+            f_str = " ".join(f"({v})" for v in face_list)
+            bm += f"    {bname}  {{ type {btype}; faces ({f_str}); }}\n"
+        bm += ");\n"
         (system_dir / "blockMeshDict").write_text(bm, encoding="utf-8")
         # ── write snappyHexMeshDict ──
         snappy = self._get_snappy_params()
@@ -1318,40 +1249,11 @@ class GeometryLogicMixin:
             return
         self._show_error(f"checkMesh 输出：\n\n{self._last_checkmesh_output[-2000:]}")
 
-    def _on_export_boundary_stl(self) -> None:
-        if not self._boundary_groups:
-            self._show_error("请先在组2中定义边界面并应用到选中面。")
-            return
-        if self._mesh_import_selected_index < 0:
-            self._show_error("请先在组1中选中一个几何。")
-            return
-        import shutil
-        case_dir = self._current_project.case_dir if self._current_project else None
-        if case_dir is None:
-            self._show_error("请先新建或打开项目。")
-            return
-        tri_dir = case_dir / "constant" / "triSurface"
-        tri_dir.mkdir(parents=True, exist_ok=True)
-        asset = self._mesh_imports[self._mesh_import_selected_index]
-        for g in self._boundary_groups:
-            pd = self._extract_boundary_polydata(asset.polydata, g.cell_ids)
-            if pd is None or pd.GetNumberOfCells() == 0:
-                continue
-            stl_path = tri_dir / f"{g.name}.stl"
-            writer = vtk.vtkSTLWriter()
-            writer.SetFileName(str(stl_path))
-            writer.SetInputData(pd)
-            writer.Write()
-            self._append_log(f"已导出：{stl_path} ({g.boundary_type})")
-        self._set_status(f"已按边界拆分导出 {len(self._boundary_groups)} 个 STL 到 constant/triSurface/。")
-
     def _on_reset_all_params(self) -> None:
-        self._boundary_groups.clear()
-        self._boundary_pending_cells.clear()
         self._domain_bounds_manual = False
         self._last_checkmesh_output = ""
+        self._init_domain_face_table()
         self._rebuild_mesh_import_combo()
-        self._rebuild_boundary_table()
         self._redraw_mesh_grid_vtk()
         self._set_status("所有网格参数已重置。")
 
@@ -1372,10 +1274,9 @@ class GeometryLogicMixin:
                  "visible": a.visible, "translucent": a.translucent}
                 for a in self._mesh_imports
             ],
-            "boundary_groups": [
-                {"name": g.name, "boundary_type": g.boundary_type,
-                 "cell_ids": sorted(g.cell_ids)}
-                for g in self._boundary_groups
+            "domain_faces": [
+                {"label": f["label"], "name": f["name"], "type": f["type"]}
+                for f in self._get_domain_face_definitions()
             ],
             "domain": self._get_domain_mesh_params() if self._mesh_imports else {},
             "snappy": self._get_snappy_params() if hasattr(self, "_snappy_level_combo") else {},
@@ -1416,15 +1317,22 @@ class GeometryLogicMixin:
             self._mesh_imports.append(asset)
         if hasattr(self, "_mesh_import_combo"):
             self._rebuild_mesh_import_combo()
-        # restore boundaries
-        self._boundary_groups.clear()
-        for g in payload.get("boundary_groups", []):
-            self._boundary_groups.append(BoundaryFaceGroup(
-                name=g["name"], boundary_type=g["boundary_type"],
-                cell_ids=set(g.get("cell_ids", [])),
-            ))
-        if hasattr(self, "_boundary_table"):
-            self._rebuild_boundary_table()
+        # restore domain faces (Group 2)
+        domain_faces = payload.get("domain_faces", [])
+        if domain_faces and hasattr(self, "_domain_face_table"):
+            self._init_domain_face_table()
+            table = self._domain_face_table
+            for i, df in enumerate(domain_faces):
+                if i >= table.rowCount():
+                    break
+                combo = table.cellWidget(i, 1)
+                if combo:
+                    idx = combo.findText(df.get("type", ""))
+                    if idx >= 0:
+                        combo.setCurrentIndex(idx)
+                name_edit = table.cellWidget(i, 2)
+                if name_edit:
+                    name_edit.setText(df.get("name", ""))
         # restore domain
         domain = payload.get("domain", {})
         if domain and hasattr(self, "_domain_bounds_inputs"):

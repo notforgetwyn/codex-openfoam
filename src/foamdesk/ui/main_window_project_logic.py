@@ -54,7 +54,6 @@ class ProjectProcessLogicMixin:
         self._clear_case_runtime_state()
         self._context.project_service.remember_project(project)
         self._refresh_project_tree()
-        self._workspace_tabs.setCurrentIndex(self.TAB_PROJECT_HOME)
         self._case_label.setText(f"当前 Case: {project.name}/{project.case_name}")
         self._refresh_geometry_panel()
         self._refresh_project_home_summary()
@@ -67,6 +66,9 @@ class ProjectProcessLogicMixin:
         self._restore_project_result_state()
         self._append_log(f"当前项目：{project.path}")
         self._set_status(status_text)
+        # refresh the currently visible tab with new case data
+        current_idx = self._workspace_tabs.currentIndex()
+        self._on_workspace_tab_changed(current_idx)
 
     def _refresh_project_home_summary(self) -> None:
         if not hasattr(self, "_project_home_summary"):
