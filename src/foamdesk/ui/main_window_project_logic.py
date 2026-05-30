@@ -12,8 +12,18 @@ from foamdesk.ui.startup_window import StartupWindow
 
 
 class ProjectProcessLogicMixin:
+    def _before_project_change(self) -> None:
+        if getattr(self, "_current_project", None) is None:
+            return
+        if hasattr(self, "_save_modeling_state_if_ready"):
+            self._save_modeling_state_if_ready()
+        if hasattr(self, "_clear_draw_geometry_cache"):
+            self._clear_draw_geometry_cache()
+
     def _save_current_state(self) -> None:
         self._save_settings()
+        if hasattr(self, "_save_modeling_state_if_ready"):
+            self._save_modeling_state_if_ready()
         self._append_log("保存：当前设置已写入本地配置。")
 
     def _create_project(self) -> None:
@@ -50,6 +60,7 @@ class ProjectProcessLogicMixin:
         self._set_status("项目打开完成。")
 
     def _activate_project(self, project: SimulationProject, status_text: str) -> None:
+        self._before_project_change()
         self._current_project = project
         self._clear_case_runtime_state()
         self._context.project_service.remember_project(project)
@@ -232,6 +243,7 @@ class ProjectProcessLogicMixin:
         self._activate_project(project, f"Case 已回退到：{fallback}")
 
     def _return_to_project_selection(self) -> None:
+        self._before_project_change()
         app = QApplication.instance()
         old_quit_on_close = app.quitOnLastWindowClosed() if app else True
         if app:
@@ -392,11 +404,17 @@ class ProjectProcessLogicMixin:
             self._task_text.setPlainText("任务状态：空闲")
             self._set_status("当前没有正在运行的任务。")
             return
+        process_kind = self._active_process_kind
+        if process_kind == "simulation" and hasattr(self, "_mark_simulation_paused"):
+            self._sim_pause_requested = True
         self._foam_process.terminate()
         if not self._foam_process.waitForFinished(3000):
             self._foam_process.kill()
         self._task_text.setPlainText("任务状态：已停止")
         self._active_process_kind = "idle"
+        if process_kind == "simulation" and hasattr(self, "_mark_simulation_paused"):
+            self._mark_simulation_paused()
+            return
         self._set_status("任务已停止。")
 
     def _read_process_stdout(self) -> None:

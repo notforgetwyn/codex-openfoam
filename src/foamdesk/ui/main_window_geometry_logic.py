@@ -747,13 +747,16 @@ class GeometryLogicMixin:
                     )
                 # highlight selected domain face
                 if 0 <= self._highlighted_domain_face < len(DOMAIN_FACE_DEFAULTS):
-                    face_def = DOMAIN_FACE_DEFAULTS[self._highlighted_domain_face]
-                    vi = [int(v) for v in face_def["face"].split()]
+                    face_defs = self._get_domain_face_definitions()
+                    face_def = face_defs[self._highlighted_domain_face] if self._highlighted_domain_face < len(face_defs) else DOMAIN_FACE_DEFAULTS[self._highlighted_domain_face]
+                    face_text = face_def.get("faces") or face_def.get("face") or DOMAIN_FACE_DEFAULTS[self._highlighted_domain_face]["face"]
+                    vi = [int(v) for v in face_text.split()]
                     face_corners = corners[vi]
                     canvas.add_polygon(
                         face_corners, color=(0.96, 0.85, 0.16),
                         opacity=0.42, edge_color=(1.0, 0.85, 0.0),
                     )
+                    self._draw_domain_face_velocity_arrows(canvas, face_corners, face_def)
 
         if saved is not None:
             camera.SetPosition(*saved[0])
@@ -785,12 +788,25 @@ class GeometryLogicMixin:
             idx = combo.findText(face["type"])
             if idx >= 0:
                 combo.setCurrentIndex(idx)
+            combo.currentIndexChanged.connect(lambda _idx, row=i: self._on_domain_face_type_changed(row))
             table.setCellWidget(i, 1, combo)
             name_edit = QLineEdit()
             name_edit.setText(face["name"])
             name_edit.setPlaceholderText("边界名称")
             name_edit.setMinimumHeight(28)
+            name_edit.editingFinished.connect(lambda row=i: self._on_domain_face_name_changed(row))
             table.setCellWidget(i, 2, name_edit)
+            u_value, p_value = self._default_domain_face_field_values(face["name"], face["type"])
+            u_edit = QLineEdit(u_value)
+            u_edit.setPlaceholderText("如 (10 0 0)、noSlip、zeroGradient")
+            u_edit.setMinimumHeight(28)
+            u_edit.editingFinished.connect(self._on_domain_face_field_changed)
+            table.setCellWidget(i, 3, u_edit)
+            p_edit = QLineEdit(p_value)
+            p_edit.setPlaceholderText("如 0、zeroGradient")
+            p_edit.setMinimumHeight(28)
+            p_edit.editingFinished.connect(self._on_domain_face_field_changed)
+            table.setCellWidget(i, 4, p_edit)
         table.blockSignals(False)
         table.selectRow(0)
         self._highlighted_domain_face = 0
@@ -825,8 +841,112 @@ class GeometryLogicMixin:
             btype = combo.currentText() if combo else DOMAIN_FACE_DEFAULTS[i]["type"]
             name_edit = table.cellWidget(i, 2)
             name = name_edit.text().strip() if name_edit else DOMAIN_FACE_DEFAULTS[i]["name"]
-            result.append({"label": label, "name": name or btype, "type": btype, "faces": face})
+            u_edit = table.cellWidget(i, 3)
+            p_edit = table.cellWidget(i, 4)
+            default_u, default_p = self._default_domain_face_field_values(name, btype)
+            u_value = u_edit.text().strip() if u_edit and u_edit.text().strip() else default_u
+            p_value = p_edit.text().strip() if p_edit and p_edit.text().strip() else default_p
+            result.append({
+                "label": label,
+                "name": name or btype,
+                "type": btype,
+                "faces": face,
+                "u_value": u_value,
+                "p_value": p_value,
+            })
         return result
+
+    def _default_domain_face_field_values(self, name: str, boundary_type: str) -> tuple[str, str]:
+        lowered = name.lower()
+        if boundary_type == "empty":
+            return "empty", "empty"
+        if boundary_type == "symmetry":
+            return "symmetry", "symmetry"
+        if "inlet" in lowered or "入口" in lowered:
+            return "(10 0 0)", "zeroGradient"
+        if "outlet" in lowered or "出口" in lowered:
+            return "zeroGradient", "0"
+        if boundary_type == "wall" or "wall" in lowered or "壁" in lowered:
+            return "noSlip", "zeroGradient"
+        return "zeroGradient", "zeroGradient"
+
+    def _parse_velocity_vector_value(self, value: str) -> np.ndarray | None:
+        import re
+        text = (value or "").strip()
+        if not text or text in {"noSlip", "zeroGradient", "symmetry", "empty"}:
+            return None
+        numbers = re.findall(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?", text)
+        if len(numbers) < 3:
+            return None
+        vector = np.array([float(numbers[0]), float(numbers[1]), float(numbers[2])], dtype=float)
+        if float(np.linalg.norm(vector)) <= 1e-12:
+            return None
+        return vector
+
+    def _draw_domain_face_velocity_arrows(self, canvas: NativeVtkPreviewWidget, face_corners: np.ndarray, face_def: dict) -> None:
+        velocity = self._parse_velocity_vector_value(str(face_def.get("u_value", "")))
+        if velocity is None:
+            return
+        origin = face_corners[0]
+        u_axis = face_corners[1] - face_corners[0]
+        v_axis = face_corners[3] - face_corners[0]
+        face_size = max(float(np.linalg.norm(u_axis)), float(np.linalg.norm(v_axis)), 1e-9)
+        normal = np.cross(u_axis, v_axis)
+        normal_norm = float(np.linalg.norm(normal))
+        if normal_norm > 1e-12:
+            normal = normal / normal_norm
+        else:
+            normal = np.zeros(3, dtype=float)
+        arrow_length = face_size * 0.16
+        offset = normal * face_size * 0.015
+        for u_ratio in (0.22, 0.5, 0.78):
+            for v_ratio in (0.22, 0.5, 0.78):
+                start = origin + u_axis * u_ratio + v_axis * v_ratio + offset
+                canvas.add_arrow(start, velocity, arrow_length, color=(0.10, 0.45, 1.0), opacity=0.95)
+
+    def _on_domain_face_type_changed(self, row: int) -> None:
+        if not hasattr(self, "_domain_face_table"):
+            return
+        table = self._domain_face_table
+        if row < 0 or row >= table.rowCount():
+            return
+        combo = table.cellWidget(row, 1)
+        name_edit = table.cellWidget(row, 2)
+        u_edit = table.cellWidget(row, 3)
+        p_edit = table.cellWidget(row, 4)
+        btype = combo.currentText() if combo else DOMAIN_FACE_DEFAULTS[row]["type"]
+        name = name_edit.text().strip() if name_edit else DOMAIN_FACE_DEFAULTS[row]["name"]
+        u_value, p_value = self._default_domain_face_field_values(name, btype)
+        if u_edit:
+            u_edit.setText(u_value)
+        if p_edit:
+            p_edit.setText(p_value)
+        self._save_mesh_workflow_state()
+        self._redraw_mesh_grid_vtk()
+
+    def _on_domain_face_name_changed(self, row: int) -> None:
+        if not hasattr(self, "_domain_face_table"):
+            return
+        table = self._domain_face_table
+        if row < 0 or row >= table.rowCount():
+            return
+        combo = table.cellWidget(row, 1)
+        name_edit = table.cellWidget(row, 2)
+        u_edit = table.cellWidget(row, 3)
+        p_edit = table.cellWidget(row, 4)
+        btype = combo.currentText() if combo else DOMAIN_FACE_DEFAULTS[row]["type"]
+        name = name_edit.text().strip() if name_edit else DOMAIN_FACE_DEFAULTS[row]["name"]
+        default_u, default_p = self._default_domain_face_field_values(name, btype)
+        if u_edit and not u_edit.text().strip():
+            u_edit.setText(default_u)
+        if p_edit and not p_edit.text().strip():
+            p_edit.setText(default_p)
+        self._save_mesh_workflow_state()
+        self._redraw_mesh_grid_vtk()
+
+    def _on_domain_face_field_changed(self) -> None:
+        self._save_mesh_workflow_state()
+        self._redraw_mesh_grid_vtk()
 
     # ── domain mesh / Group 3 logic ─────────────────────────
 
@@ -1085,6 +1205,7 @@ class GeometryLogicMixin:
             ");\n"
         )
         (system_dir / "snappyHexMeshDict").write_text(shm, encoding="utf-8")
+        self._write_zero_field_files(case_dir)
         self._append_log("已生成 blockMeshDict 和 snappyHexMeshDict，启动网格流水线。")
         # execute mesh pipeline via existing infrastructure
         self._run_mesh_pipeline_command()
@@ -1275,7 +1396,13 @@ class GeometryLogicMixin:
                 for a in self._mesh_imports
             ],
             "domain_faces": [
-                {"label": f["label"], "name": f["name"], "type": f["type"]}
+                {
+                    "label": f["label"],
+                    "name": f["name"],
+                    "type": f["type"],
+                    "u_value": f.get("u_value", ""),
+                    "p_value": f.get("p_value", ""),
+                }
                 for f in self._get_domain_face_definitions()
             ],
             "domain": self._get_domain_mesh_params() if self._mesh_imports else {},
@@ -1333,6 +1460,16 @@ class GeometryLogicMixin:
                 name_edit = table.cellWidget(i, 2)
                 if name_edit:
                     name_edit.setText(df.get("name", ""))
+                default_u, default_p = self._default_domain_face_field_values(
+                    df.get("name", DOMAIN_FACE_DEFAULTS[i]["name"]),
+                    df.get("type", DOMAIN_FACE_DEFAULTS[i]["type"]),
+                )
+                u_edit = table.cellWidget(i, 3)
+                if u_edit:
+                    u_edit.setText(df.get("u_value") or default_u)
+                p_edit = table.cellWidget(i, 4)
+                if p_edit:
+                    p_edit.setText(df.get("p_value") or default_p)
         # restore domain
         domain = payload.get("domain", {})
         if domain and hasattr(self, "_domain_bounds_inputs"):

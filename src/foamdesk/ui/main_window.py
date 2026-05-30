@@ -171,6 +171,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._save_modeling_state()
+        self._clear_draw_geometry_cache()
         self._save_sim_config_state()
         self._save_solver_run_state()
         self._save_mesh_workflow_state()
@@ -405,11 +406,13 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         # Group 2 — domain face boundary configuration
         g2 = QGroupBox("计算域边界配置（每行对应计算域的一个面）")
         g2_layout = QVBoxLayout(g2)
-        self._domain_face_table = QTableWidget(6, 3)
-        self._domain_face_table.setHorizontalHeaderLabels(["面", "边界类型", "边界名称"])
+        self._domain_face_table = QTableWidget(6, 5)
+        self._domain_face_table.setHorizontalHeaderLabels(["面", "边界类型", "边界名称", "速度 U", "压力 p"])
         self._domain_face_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self._domain_face_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._domain_face_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self._domain_face_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self._domain_face_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self._domain_face_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         self._domain_face_table.verticalHeader().setVisible(False)
         self._domain_face_table.verticalHeader().setDefaultSectionSize(36)
         self._domain_face_table.setMinimumHeight(260)
@@ -629,11 +632,17 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         # === solver basics group ===
         solver_grp = QGroupBox("求解器基础")
         solver_form = QFormLayout(solver_grp)
+        self._cfg_flow_type_combo = QComboBox()
+        self._cfg_flow_type_combo.addItem("不可压缩", "incompressible")
+        self._cfg_flow_type_combo.addItem("可压缩", "compressible")
+        self._cfg_flow_type_combo.currentIndexChanged.connect(self._on_physics_model_changed)
+        self._cfg_time_type_combo = QComboBox()
+        self._cfg_time_type_combo.addItem("稳态", "steady")
+        self._cfg_time_type_combo.addItem("瞬态", "transient")
+        self._cfg_time_type_combo.currentIndexChanged.connect(self._on_physics_model_changed)
+        self._cfg_recommended_solver = QLabel("simpleFoam")
+        self._cfg_recommended_solver.setStyleSheet("color: #9da5b4;")
         self._cfg_solver_combo = QComboBox()
-        self._cfg_solver_combo.addItem("simpleFoam - 稳态不可压", "simpleFoam")
-        self._cfg_solver_combo.addItem("pimpleFoam - 瞬态不可压", "pimpleFoam")
-        self._cfg_solver_combo.addItem("icoFoam - 入门瞬态", "icoFoam")
-        self._cfg_solver_combo.addItem("pisoFoam - 瞬态不可压", "pisoFoam")
         self._cfg_end_time = QLineEdit("1.0")
         self._cfg_delta_t = QLineEdit("0.001")
         self._cfg_write_interval = QSpinBox()
@@ -641,6 +650,9 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._cfg_write_interval.setValue(100)
         self._cfg_init_velocity = QLineEdit("(0 0 0)")
         self._cfg_init_pressure = QLineEdit("0")
+        solver_form.addRow("流体类型", self._cfg_flow_type_combo)
+        solver_form.addRow("时间类型", self._cfg_time_type_combo)
+        solver_form.addRow("推荐求解器", self._cfg_recommended_solver)
         solver_form.addRow("求解类型", self._cfg_solver_combo)
         solver_form.addRow("总计算时长 (s)", self._cfg_end_time)
         solver_form.addRow("时间步长 (s)", self._cfg_delta_t)
@@ -661,6 +673,10 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._cfg_density = QLineEdit("1.225")
         self._cfg_nu = QLineEdit("1.48e-5")
         self._cfg_mu = QLineEdit("1.812e-5")
+        self._cfg_temperature = QLineEdit("300")
+        self._cfg_cp = QLineEdit("1005")
+        self._cfg_gas_r = QLineEdit("287")
+        self._cfg_prandtl = QLineEdit("0.7")
         calc_mu_btn = QPushButton("计算 mu = rho * nu")
         calc_mu_btn.clicked.connect(self._calc_mu)
         mu_row = QHBoxLayout()
@@ -670,54 +686,11 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         fluid_form.addRow("密度 rho (kg/m3)", self._cfg_density)
         fluid_form.addRow("运动粘度 nu (m2/s)", self._cfg_nu)
         fluid_form.addRow("动力粘度 mu", mu_row)
+        fluid_form.addRow("初始温度 T (K)", self._cfg_temperature)
+        fluid_form.addRow("定压比热 Cp", self._cfg_cp)
+        fluid_form.addRow("气体常数 R", self._cfg_gas_r)
+        fluid_form.addRow("Prandtl 数", self._cfg_prandtl)
         left_col.addWidget(fluid_grp)
-
-        # === boundary conditions group ===
-        bc_grp = QGroupBox("边界条件")
-        bc_layout = QVBoxLayout(bc_grp)
-        bc_hdr = QHBoxLayout()
-        bc_hdr.addStretch(1)
-        refresh_bc_btn = QPushButton("刷新边界")
-        refresh_bc_btn.setFixedHeight(26)
-        refresh_bc_btn.clicked.connect(self._load_boundaries_into_table)
-        bc_hdr.addWidget(refresh_bc_btn)
-        bc_layout.addLayout(bc_hdr)
-        self._cfg_boundary_table = QTableWidget(0, 4)
-        self._cfg_boundary_table.setHorizontalHeaderLabels(["边界名", "类型", "速度 U", "压力 p"])
-        self._cfg_boundary_table.horizontalHeader().setStretchLastSection(True)
-        self._cfg_boundary_table.horizontalHeader().setMinimumHeight(28)
-        self._cfg_boundary_table.verticalHeader().setDefaultSectionSize(24)
-        self._cfg_boundary_table.verticalHeader().setVisible(False)
-        self._cfg_boundary_table.setMinimumHeight(140)
-        self._cfg_boundary_table.setMaximumHeight(220)
-        self._cfg_boundary_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self._cfg_boundary_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._cfg_boundary_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self._cfg_boundary_table.selectionModel().selectionChanged.connect(
-            lambda sel, desel: self._on_boundary_row_selected(
-                self._cfg_boundary_table.currentRow()
-            )
-        )
-        bc_layout.addWidget(self._cfg_boundary_table)
-        bc_form = QFormLayout()
-        self._cfg_bc_name = QLabel("—")
-        bc_form.addRow("选中边界", self._cfg_bc_name)
-        self._cfg_bc_type = QComboBox()
-        self._cfg_bc_type.addItems(["inlet", "outlet", "wall", "symmetry", "empty"])
-        self._cfg_bc_type.currentIndexChanged.connect(self._on_boundary_type_changed)
-        bc_form.addRow("边界类型", self._cfg_bc_type)
-        self._cfg_bc_u_value = QLineEdit()
-        self._cfg_bc_u_value.editingFinished.connect(
-            lambda: self._sync_boundary_table_from_ui(self._cfg_boundary_table.currentRow())
-        )
-        bc_form.addRow("速度 U", self._cfg_bc_u_value)
-        self._cfg_bc_p_value = QLineEdit()
-        self._cfg_bc_p_value.editingFinished.connect(
-            lambda: self._sync_boundary_table_from_ui(self._cfg_boundary_table.currentRow())
-        )
-        bc_form.addRow("压力 p", self._cfg_bc_p_value)
-        bc_layout.addLayout(bc_form)
-        right_col.addWidget(bc_grp)
 
         # === turbulence model group ===
         turb_grp = QGroupBox("湍流模型")
@@ -734,6 +707,8 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         turb_form.addRow("湍流强度", self._cfg_turb_intensity)
         turb_form.addRow("混合长度 (m)", self._cfg_turb_length)
         right_col.addWidget(turb_grp)
+        self._rebuild_solver_options()
+        self._update_compressible_controls()
 
         # === solver control group ===
         ctrl_grp = QGroupBox("求解控制")
@@ -786,6 +761,8 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         return wrapper
 
     def _load_boundaries_into_table(self) -> None:
+        if not hasattr(self, "_cfg_boundary_table"):
+            return
         self._cfg_boundary_table.setRowCount(0)
         if self._current_project is None:
             return
@@ -898,15 +875,29 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._sync_boundary_table_from_ui(row)
 
     def _read_boundary_rows(self) -> list[dict]:
-        rows = []
-        for r in range(self._cfg_boundary_table.rowCount()):
-            name = self._cfg_boundary_table.item(r, 0)
-            role = self._cfg_boundary_table.item(r, 1)
-            u_val = self._cfg_boundary_table.item(r, 2)
-            p_val = self._cfg_boundary_table.item(r, 3)
-            if name and role and u_val and p_val:
-                rows.append({"name": name.text(), "role": role.text(),
-                             "u_value": u_val.text(), "p_value": p_val.text()})
+        rows: list[dict] = []
+        if hasattr(self, "_domain_face_table"):
+            merged: dict[str, dict] = {}
+            for face in self._get_domain_face_definitions():
+                name = face.get("name", "").strip()
+                if not name or name in merged:
+                    continue
+                merged[name] = {
+                    "name": name,
+                    "role": face.get("type", ""),
+                    "u_value": face.get("u_value", "zeroGradient"),
+                    "p_value": face.get("p_value", "zeroGradient"),
+                }
+            return list(merged.values())
+        if hasattr(self, "_cfg_boundary_table"):
+            for r in range(self._cfg_boundary_table.rowCount()):
+                name = self._cfg_boundary_table.item(r, 0)
+                role = self._cfg_boundary_table.item(r, 1)
+                u_val = self._cfg_boundary_table.item(r, 2)
+                p_val = self._cfg_boundary_table.item(r, 3)
+                if name and role and u_val and p_val:
+                    rows.append({"name": name.text(), "role": role.text(),
+                                 "u_value": u_val.text(), "p_value": p_val.text()})
         return rows
 
     def _build_boundary_block(self, field: str) -> str:
@@ -924,6 +915,8 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
                     blocks.append(f"    {name}\n    {{\n        type            zeroGradient;\n    }}")
                 elif val == "symmetry":
                     blocks.append(f"    {name}\n    {{\n        type            symmetry;\n    }}")
+                elif val == "empty":
+                    blocks.append(f"    {name}\n    {{\n        type            empty;\n    }}")
                 else:
                     blocks.append(f"    {name}\n    {{\n        type            fixedValue;\n        value           uniform {val};\n    }}")
             else:  # p
@@ -932,9 +925,42 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
                     blocks.append(f"    {name}\n    {{\n        type            zeroGradient;\n    }}")
                 elif val == "symmetry":
                     blocks.append(f"    {name}\n    {{\n        type            symmetry;\n    }}")
+                elif val == "empty":
+                    blocks.append(f"    {name}\n    {{\n        type            empty;\n    }}")
                 else:
                     blocks.append(f"    {name}\n    {{\n        type            fixedValue;\n        value           uniform {val};\n    }}")
         return "\n".join(blocks)
+
+    def _scalar_boundary_block(self, field: str, inlet_value: str, wall_value: str = "zeroGradient") -> str:
+        rows = self._read_boundary_rows()
+        if not rows:
+            return "    // 无边界"
+        blocks = []
+        for bc in rows:
+            name = bc["name"]
+            lowered = name.lower()
+            role = str(bc.get("role", "")).lower()
+            if bc.get("u_value") in {"symmetry", "empty"}:
+                blocks.append(f"    {name}\n    {{\n        type            {bc['u_value']};\n    }}")
+            elif "inlet" in lowered or "inlet" in role:
+                blocks.append(f"    {name}\n    {{\n        type            fixedValue;\n        value           uniform {inlet_value};\n    }}")
+            elif "wall" in lowered or role == "wall":
+                if wall_value == "zeroGradient":
+                    blocks.append(f"    {name}\n    {{\n        type            zeroGradient;\n    }}")
+                else:
+                    blocks.append(f"    {name}\n    {{\n        type            fixedValue;\n        value           uniform {wall_value};\n    }}")
+            else:
+                blocks.append(f"    {name}\n    {{\n        type            zeroGradient;\n    }}")
+        return "\n".join(blocks)
+
+    def _vol_scalar_field_text(self, name: str, dimensions: str, internal: str, boundary: str) -> str:
+        return (
+            self._foam_header("volScalarField", name) +
+            f"dimensions      {dimensions};\n"
+            f"internalField   uniform {internal};\n"
+            f"boundaryField\n{{\n{boundary}\n}}\n"
+            f"// ************************************************************************* //\n"
+        )
 
     def _refresh_dict_preview(self) -> None:
         solver = self._cfg_solver_combo.currentData()
@@ -952,34 +978,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         rho = self._cfg_density.text().strip()
         nu = self._cfg_nu.text().strip()
         mu = self._cfg_mu.text().strip()
-        turb_model = self._cfg_turb_model.currentData()
-        turb_intensity = self._cfg_turb_intensity.text().strip()
-        turb_length = self._cfg_turb_length.text().strip()
-
-        transport_props = (
-            f"// constant/transportProperties\n"
-            f"transportModel  Newtonian;\n"
-            f"rho             rho [1 -3 0 0 0 0 0] {rho};\n"
-            f"nu              nu [0 2 -1 0 0 0 0] {nu};\n"
-            f"mu              mu [1 -1 -1 0 0 0 0] {mu};\n"
-        )
-
-        if turb_model == "laminar":
-            turb_props = (
-                f"// constant/turbulenceProperties\n"
-                f"simulationType  laminar;\n"
-            )
-        else:
-            ras_model = "kEpsilon" if turb_model == "kEpsilon" else "kOmegaSST" if turb_model == "kOmegaSST" else turb_model
-            turb_props = (
-                f"// constant/turbulenceProperties\n"
-                f"simulationType  RAS;\n"
-                f"RAS\n{{\n"
-                f"    RASModel        {ras_model};\n"
-                f"    turbulence      on;\n"
-                f"    printCoeffs     on;\n"
-                f"}}\n"
-            )
+        is_compressible = self._cfg_flow_type_combo.currentData() == "compressible"
 
         u_fmt = init_u.strip()
         if not u_fmt.startswith("(") and " " in u_fmt:
@@ -1001,13 +1000,24 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             f"{self._build_boundary_block('U')}\n"
             f"}}\n\n"
             f"// 0/p\n"
-            f"dimensions      [0 2 -2 0 0 0 0];\n"
+            f"dimensions      {'[1 -1 -2 0 0 0 0]' if is_compressible else '[0 2 -2 0 0 0 0]'};\n"
             f"internalField   uniform {init_p};\n"
             f"boundaryField\n{{\n"
             f"{self._build_boundary_block('p')}\n"
             f"}}\n\n"
-            f"{transport_props}\n\n"
-            f"{turb_props}\n\n"
+            + (
+                f"// 0/T\n"
+                f"dimensions      [0 0 0 1 0 0 0];\n"
+                f"internalField   uniform {self._cfg_temperature.text().strip() or '300'};\n"
+                f"boundaryField\n{{\n"
+                f"{self._scalar_boundary_block('T', self._cfg_temperature.text().strip() or '300')}\n"
+                f"}}\n\n"
+                if is_compressible else ""
+            ) +
+            f"// constant/{'thermophysicalProperties' if is_compressible else 'physicalProperties'}\n"
+            f"{self._physical_properties_text(rho, nu, mu)}\n\n"
+            f"// constant/momentumTransport\n"
+            f"{self._momentum_transport_text()}\n\n"
             f"// system/fvSchemes\n{fv_schemes_text}\n\n"
             f"// system/fvSolution\n{fv_solution_text}\n"
         )
@@ -1048,8 +1058,17 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         reltol = "0.1" if key == "fast" else "0.01" if key == "default" else "0.001"
         solver = self._cfg_solver_combo.currentData()
         is_steady = solver in ("simpleFoam",)
+        is_compressible = solver in {"rhoSimpleFoam", "rhoPimpleFoam"}
         outer_correctors = "1" if is_steady else ncorrectors
         momentum_predictor = "no" if is_steady else "yes"
+        extra_solvers = ""
+        if is_compressible:
+            extra_solvers = (
+                f"    T\n    {{\n        solver          smoothSolver;\n        smoother        symGaussSeidel;\n"
+                f"        tolerance       {residual};\n        relTol          {reltol};\n    }}\n"
+                f"    TFinal\n    {{\n        $T;\n        relTol          0;\n    }}\n"
+                f"    rho\n    {{\n        solver          diagonal;\n    }}\n"
+            )
         return (
             f"solvers\n{{\n"
             f"    p\n    {{\n        solver          PCG;\n        preconditioner  DIC;\n"
@@ -1058,6 +1077,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             f"    U\n    {{\n        solver          smoothSolver;\n        smoother        symGaussSeidel;\n"
             f"        tolerance       {residual};\n        relTol          {reltol};\n    }}\n"
             f"    UFinal\n    {{\n        $U;\n        relTol          0;\n    }}\n"
+            f"{extra_solvers}"
             f"}}\n"
             f"PIMPLE\n{{\n"
             f"    nOuterCorrectors {outer_correctors};\n"
@@ -1083,6 +1103,154 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             f"    class       {class_name};\n    object      {object_name};\n}}\n"
             "// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //\n"
         )
+
+    def _write_zero_field_files(self, case_dir) -> None:
+        (case_dir / "0").mkdir(parents=True, exist_ok=True)
+        init_u = self._cfg_init_velocity.text().strip()
+        init_p = self._cfg_init_pressure.text().strip()
+        is_compressible = self._cfg_flow_type_combo.currentData() == "compressible"
+        u_fmt = init_u.strip()
+        if not u_fmt.startswith("(") and " " in u_fmt:
+            u_fmt = f"({u_fmt})"
+        u_field = (
+            self._foam_header("volVectorField", "U") +
+            f"dimensions      [0 1 -1 0 0 0 0];\n"
+            f"internalField   uniform {u_fmt};\n"
+            f"boundaryField\n{{\n"
+            f"{self._build_boundary_block('U')}\n"
+            f"}}\n"
+            f"// ************************************************************************* //\n"
+        )
+        (case_dir / "0" / "U").write_text(u_field, encoding="utf-8")
+
+        p_field = (
+            self._foam_header("volScalarField", "p") +
+            f"dimensions      {'[1 -1 -2 0 0 0 0]' if is_compressible else '[0 2 -2 0 0 0 0]'};\n"
+            f"internalField   uniform {init_p};\n"
+            f"boundaryField\n{{\n"
+            f"{self._build_boundary_block('p')}\n"
+            f"}}\n"
+            f"// ************************************************************************* //\n"
+        )
+        (case_dir / "0" / "p").write_text(p_field, encoding="utf-8")
+        if is_compressible:
+            temperature = self._cfg_temperature.text().strip() or "300"
+            (case_dir / "0" / "T").write_text(
+                self._vol_scalar_field_text(
+                    "T", "[0 0 0 1 0 0 0]", temperature,
+                    self._scalar_boundary_block("T", temperature),
+                ),
+                encoding="utf-8",
+            )
+        self._write_turbulence_field_files(case_dir)
+
+    def _write_turbulence_field_files(self, case_dir) -> None:
+        zero_dir = case_dir / "0"
+        model = self._cfg_turb_model.currentData()
+        if model == "laminar":
+            return
+        intensity = self._cfg_turb_intensity.text().strip() or "0.05"
+        length = self._cfg_turb_length.text().strip() or "0.1"
+        k_value = "0.01"
+        epsilon_value = "0.01"
+        omega_value = "1"
+        try:
+            u_text = self._cfg_init_velocity.text().replace("(", " ").replace(")", " ")
+            values = [float(part) for part in u_text.split()[:3]]
+            speed = max(float(sum(v * v for v in values) ** 0.5), 1e-9)
+            intensity_float = max(float(intensity), 1e-9)
+            length_float = max(float(length), 1e-9)
+            k_float = 1.5 * (speed * intensity_float) ** 2
+            k_value = f"{k_float:.6g}"
+            epsilon_value = f"{0.09 ** 0.75 * k_float ** 1.5 / length_float:.6g}"
+            omega_value = f"{(k_float ** 0.5) / (0.09 ** 0.25 * length_float):.6g}"
+        except (ValueError, ZeroDivisionError):
+            pass
+        if model in {"kEpsilon", "kOmegaSST"}:
+            (zero_dir / "k").write_text(
+                self._vol_scalar_field_text("k", "[0 2 -2 0 0 0 0]", k_value, self._scalar_boundary_block("k", k_value, "0")),
+                encoding="utf-8",
+            )
+            (zero_dir / "nut").write_text(
+                self._vol_scalar_field_text("nut", "[0 2 -1 0 0 0 0]", "0", self._scalar_boundary_block("nut", "0", "0")),
+                encoding="utf-8",
+            )
+        if model == "kEpsilon":
+            (zero_dir / "epsilon").write_text(
+                self._vol_scalar_field_text("epsilon", "[0 2 -3 0 0 0 0]", epsilon_value, self._scalar_boundary_block("epsilon", epsilon_value, "0")),
+                encoding="utf-8",
+            )
+        elif model == "kOmegaSST":
+            (zero_dir / "omega").write_text(
+                self._vol_scalar_field_text("omega", "[0 0 -1 0 0 0 0]", omega_value, self._scalar_boundary_block("omega", omega_value, omega_value)),
+                encoding="utf-8",
+            )
+        elif model == "SpalartAllmaras":
+            (zero_dir / "nuTilda").write_text(
+                self._vol_scalar_field_text("nuTilda", "[0 2 -1 0 0 0 0]", self._cfg_nu.text().strip() or "1e-5", self._scalar_boundary_block("nuTilda", self._cfg_nu.text().strip() or "1e-5", "0")),
+                encoding="utf-8",
+            )
+
+    def _physical_properties_text(self, rho: str, nu: str, mu: str) -> str:
+        if self._cfg_flow_type_combo.currentData() == "compressible":
+            cp = self._cfg_cp.text().strip() or "1005"
+            pr = self._cfg_prandtl.text().strip() or "0.7"
+            mol_weight = "28.9"
+            try:
+                gas_r = max(float(self._cfg_gas_r.text().strip() or "287"), 1e-9)
+                mol_weight = f"{8314.462618 / gas_r:.6g}"
+            except ValueError:
+                pass
+            return (
+                self._foam_header("dictionary", "thermophysicalProperties") +
+                "thermoType\n{\n"
+                "    type            hePsiThermo;\n"
+                "    mixture         pureMixture;\n"
+                "    transport       const;\n"
+                "    thermo          hConst;\n"
+                "    equationOfState perfectGas;\n"
+                "    specie          specie;\n"
+                "    energy          sensibleEnthalpy;\n"
+                "}\n\n"
+                "mixture\n{\n"
+                "    specie\n    {\n"
+                "        nMoles      1;\n"
+                f"        molWeight   {mol_weight};\n"
+                "    }\n"
+                "    thermodynamics\n    {\n"
+                f"        Cp          {cp};\n"
+                "        Hf          0;\n"
+                "    }\n"
+                "    transport\n    {\n"
+                f"        mu          {mu};\n"
+                f"        Pr          {pr};\n"
+                "    }\n"
+                "}\n"
+                "// ************************************************************************* //\n"
+            )
+        return (
+            self._foam_header("dictionary", "physicalProperties") +
+            f"viscosityModel  constant;\n"
+            f"rho             rho [1 -3 0 0 0 0 0] {rho};\n"
+            f"nu              nu [0 2 -1 0 0 0 0] {nu};\n"
+            f"// ************************************************************************* //\n"
+        )
+
+    def _momentum_transport_text(self) -> str:
+        turb_model = self._cfg_turb_model.currentData()
+        if turb_model == "laminar":
+            turb = "simulationType  laminar;\n"
+        else:
+            ras_model = "kEpsilon" if turb_model == "kEpsilon" else "kOmegaSST" if turb_model == "kOmegaSST" else turb_model
+            turb = (
+                f"simulationType  RAS;\n"
+                f"RAS\n{{\n"
+                f"    model           {ras_model};\n"
+                f"    turbulence      on;\n"
+                f"    printCoeffs     on;\n"
+                f"}}\n"
+            )
+        return self._foam_header("dictionary", "momentumTransport") + turb + "// ************************************************************************* //\n"
 
     def _export_sim_dicts(self) -> None:
         if self._current_project is None:
@@ -1121,58 +1289,20 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         )
         (case_dir / "system" / "controlDict").write_text(control_dict, encoding="utf-8")
 
-        u_fmt = init_u.strip()
-        if not u_fmt.startswith("(") and " " in u_fmt:
-            u_fmt = f"({u_fmt})"
-        u_field = (
-            self._foam_header("volVectorField", "U") +
-            f"dimensions      [0 1 -1 0 0 0 0];\n"
-            f"internalField   uniform {u_fmt};\n"
-            f"boundaryField\n{{\n"
-            f"{self._build_boundary_block('U')}\n"
-            f"}}\n"
-            f"// ************************************************************************* //\n"
-        )
-        (case_dir / "0" / "U").write_text(u_field, encoding="utf-8")
-
-        p_field = (
-            self._foam_header("volScalarField", "p") +
-            f"dimensions      [0 2 -2 0 0 0 0];\n"
-            f"internalField   uniform {init_p};\n"
-            f"boundaryField\n{{\n"
-            f"{self._build_boundary_block('p')}\n"
-            f"}}\n"
-            f"// ************************************************************************* //\n"
-        )
-        (case_dir / "0" / "p").write_text(p_field, encoding="utf-8")
+        self._write_zero_field_files(case_dir)
 
         (case_dir / "constant").mkdir(parents=True, exist_ok=True)
-        physical = (
-            self._foam_header("dictionary", "physicalProperties") +
-            f"viscosityModel  constant;\n"
-            f"rho             rho [1 -3 0 0 0 0 0] {rho};\n"
-            f"nu              nu [0 2 -1 0 0 0 0] {nu};\n"
-            f"// ************************************************************************* //\n"
-        )
-        (case_dir / "constant" / "physicalProperties").write_text(physical, encoding="utf-8")
-
-        if turb_model == "laminar":
-            turb = "simulationType  laminar;\n"
-        else:
-            ras_model = "kEpsilon" if turb_model == "kEpsilon" else "kOmegaSST" if turb_model == "kOmegaSST" else turb_model
-            turb = (
-                f"simulationType  RAS;\n"
-                f"RAS\n{{\n"
-                f"    model           {ras_model};\n"
-                f"    turbulence      on;\n"
-                f"    printCoeffs     on;\n"
-                f"}}\n"
+        if self._cfg_flow_type_combo.currentData() == "compressible":
+            (case_dir / "constant" / "thermophysicalProperties").write_text(
+                self._physical_properties_text(rho, nu, mu), encoding="utf-8"
             )
+        else:
+            (case_dir / "constant" / "physicalProperties").write_text(
+                self._physical_properties_text(rho, nu, mu), encoding="utf-8"
+            )
+
         (case_dir / "constant" / "momentumTransport").write_text(
-            self._foam_header("dictionary", "momentumTransport") +
-            turb +
-            "// ************************************************************************* //\n",
-            encoding="utf-8"
+            self._momentum_transport_text(), encoding="utf-8"
         )
 
         (case_dir / "system" / "fvSchemes").write_text(
@@ -1217,6 +1347,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         primitives = [
             ("cube", "立方体"), ("sphere", "球体"),
             ("cylinder", "圆柱"), ("cone", "圆锥"),
+            ("airfoil", "机翼"), ("bend_pipe", "弯管"),
         ]
         for kind, label in primitives:
             btn = QPushButton(label)
@@ -1239,6 +1370,26 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
 
         toolbar.addSpacing(12)
 
+        edit_menu = QMenu(self)
+        edit_menu.addAction("按点移动", lambda: self._edit_selected_vertices("point"))
+        edit_menu.addAction("按线移动", lambda: self._edit_selected_vertices("edge"))
+        edit_menu.addAction("按面拉伸", lambda: self._edit_selected_vertices("face"))
+        edit_btn = QPushButton("点/线/面编辑")
+        edit_btn.setFixedHeight(30)
+        edit_btn.setMenu(edit_menu)
+        toolbar.addWidget(edit_btn)
+
+        boolean_menu = QMenu(self)
+        boolean_menu.addAction("并集", lambda: self._boolean_selected("union"))
+        boolean_menu.addAction("差集", lambda: self._boolean_selected("difference"))
+        boolean_menu.addAction("交集", lambda: self._boolean_selected("intersection"))
+        boolean_btn = QPushButton("布尔运算")
+        boolean_btn.setFixedHeight(30)
+        boolean_btn.setMenu(boolean_menu)
+        toolbar.addWidget(boolean_btn)
+
+        toolbar.addSpacing(12)
+
         import_btn = QPushButton("导入 STL")
         import_btn.setFixedHeight(30)
         import_btn.clicked.connect(self._import_stl_file)
@@ -1248,6 +1399,11 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         export_btn.setFixedHeight(30)
         export_btn.clicked.connect(self._export_stl_file)
         toolbar.addWidget(export_btn)
+
+        finish_draw_btn = QPushButton("完成绘制")
+        finish_draw_btn.setFixedHeight(30)
+        finish_draw_btn.clicked.connect(self._finish_draw_geometry)
+        toolbar.addWidget(finish_draw_btn)
 
         toolbar.addSpacing(12)
 
@@ -1290,6 +1446,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         # property panel
         prop_wrapper = QWidget()
         prop_wrapper.setStyleSheet("background: #252526;")
+        prop_wrapper.setMinimumWidth(300)
         prop_layout = QVBoxLayout(prop_wrapper)
         prop_layout.setContentsMargins(12, 12, 12, 12)
         prop_layout.setSpacing(10)
@@ -1342,7 +1499,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         prop_layout.addStretch(1)
         body.addWidget(prop_wrapper)
 
-        body.setSizes([200, 520, 220])
+        body.setSizes([220, 760, 320])
         root.addWidget(body, 1)
 
         # --- status bar ---
@@ -1366,14 +1523,18 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         sb.setRange(min_val, max_val)
         sb.setDecimals(2)
         sb.setSingleStep(step)
+        sb.setMinimumWidth(120)
+        sb.setMinimumHeight(28)
         sb.valueChanged.connect(callback)
         return sb
 
     def _modeling_group(self, label_text, x, y, z) -> QGroupBox:
         gb = QGroupBox(label_text)
+        gb.setMinimumHeight(96)
         form = QFormLayout(gb)
         form.setContentsMargins(8, 12, 8, 8)
-        form.setSpacing(4)
+        form.setVerticalSpacing(6)
+        form.setHorizontalSpacing(8)
         form.addRow("X", x)
         form.addRow("Y", y)
         form.addRow("Z", z)
@@ -1394,6 +1555,10 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._cfg_start_btn.setFixedHeight(34)
         self._cfg_start_btn.setStyleSheet("background: #0e639c; color: #fff; font-weight: 600;")
         self._cfg_start_btn.clicked.connect(self._start_simulation)
+        self._cfg_continue_btn = QPushButton("继续计算")
+        self._cfg_continue_btn.setFixedHeight(34)
+        self._cfg_continue_btn.setEnabled(False)
+        self._cfg_continue_btn.clicked.connect(self._continue_simulation)
         self._cfg_stop_btn = QPushButton("终止计算")
         self._cfg_stop_btn.setFixedHeight(34)
         self._cfg_stop_btn.setStyleSheet("color: #f48771;")
@@ -1408,6 +1573,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._cfg_status_label = QLabel("状态：空闲")
         self._cfg_status_label.setStyleSheet("font-weight: 600;")
         control_row.addWidget(self._cfg_start_btn)
+        control_row.addWidget(self._cfg_continue_btn)
         control_row.addWidget(self._cfg_stop_btn)
         control_row.addSpacing(12)
         control_row.addWidget(self._cfg_status_label)
@@ -1455,6 +1621,8 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
     def _save_sim_config_state(self) -> None:
         import json
         data = {
+            "flow_type": self._cfg_flow_type_combo.currentData(),
+            "time_type": self._cfg_time_type_combo.currentData(),
             "solver": self._cfg_solver_combo.currentData(),
             "end_time": self._cfg_end_time.text(),
             "delta_t": self._cfg_delta_t.text(),
@@ -1465,6 +1633,10 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             "density": self._cfg_density.text(),
             "nu": self._cfg_nu.text(),
             "mu": self._cfg_mu.text(),
+            "temperature": self._cfg_temperature.text(),
+            "cp": self._cfg_cp.text(),
+            "gas_r": self._cfg_gas_r.text(),
+            "prandtl": self._cfg_prandtl.text(),
             "turb_model": self._cfg_turb_model.currentData(),
             "turb_intensity": self._cfg_turb_intensity.text(),
             "turb_length": self._cfg_turb_length.text(),
@@ -1487,6 +1659,13 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         if cd.exists():
             try:
                 content = cd.read_text(encoding="utf-8")
+                solver_match = re.search(r"application\s+(\S+);", content)
+                if solver_match:
+                    solver_name = solver_match.group(1)
+                    self._cfg_flow_type_combo.setCurrentIndex(1 if solver_name.startswith("rho") else 0)
+                    transient = solver_name in {"pimpleFoam", "pisoFoam", "icoFoam", "rhoPimpleFoam"}
+                    self._cfg_time_type_combo.setCurrentIndex(1 if transient else 0)
+                    self._rebuild_solver_options(solver_name)
                 for key, widget, pattern in [
                     ("solver", self._cfg_solver_combo, r"application\s+(\S+);"),
                     ("end_time", self._cfg_end_time, r"endTime\s+([0-9.e+\-]+);"),
@@ -1503,6 +1682,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
                         elif widget:
                             widget.setText(m.group(1))
             except Exception: pass
+        self._update_compressible_controls()
         fs = case_dir / "system" / "fvSchemes"
         if fs.exists():
             try:
@@ -1536,6 +1716,19 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
                         self._cfg_mu.setText(f"{float(m.group(1))*float(self._cfg_nu.text()):.6g}")
                     except ValueError: pass
             except Exception: pass
+        thermo = case_dir / "constant" / "thermophysicalProperties"
+        if thermo.exists():
+            try:
+                content = thermo.read_text(encoding="utf-8")
+                self._cfg_flow_type_combo.setCurrentIndex(1)
+                self._rebuild_solver_options()
+                m = re.search(r"Cp\s+([0-9.e+\-]+);", content)
+                if m: self._cfg_cp.setText(m.group(1))
+                m = re.search(r"mu\s+([0-9.e+\-]+);", content)
+                if m: self._cfg_mu.setText(m.group(1))
+                m = re.search(r"Pr\s+([0-9.e+\-]+);", content)
+                if m: self._cfg_prandtl.setText(m.group(1))
+            except Exception: pass
         mt = case_dir / "constant" / "momentumTransport"
         if mt.exists():
             try:
@@ -1551,6 +1744,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         for fn, widget, pattern in [
             ("0/U", self._cfg_init_velocity, r"internalField\s+uniform\s+\(([^)]+)\)"),
             ("0/p", self._cfg_init_pressure, r"internalField\s+uniform\s+([0-9.e+\-]+)"),
+            ("0/T", self._cfg_temperature, r"internalField\s+uniform\s+([0-9.e+\-]+)"),
         ]:
             fp = case_dir / fn
             if fp.exists():
@@ -1580,6 +1774,50 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         except ValueError:
             pass
 
+    def _solver_options_for_model(self) -> list[tuple[str, str]]:
+        flow = self._cfg_flow_type_combo.currentData() if hasattr(self, "_cfg_flow_type_combo") else "incompressible"
+        time_type = self._cfg_time_type_combo.currentData() if hasattr(self, "_cfg_time_type_combo") else "steady"
+        if flow == "compressible":
+            return [("rhoSimpleFoam - 稳态可压缩", "rhoSimpleFoam")] if time_type == "steady" else [
+                ("rhoPimpleFoam - 瞬态可压缩", "rhoPimpleFoam")
+            ]
+        if time_type == "steady":
+            return [("simpleFoam - 稳态不可压", "simpleFoam")]
+        return [
+            ("pimpleFoam - 瞬态不可压", "pimpleFoam"),
+            ("pisoFoam - 瞬态不可压", "pisoFoam"),
+            ("icoFoam - 入门瞬态", "icoFoam"),
+        ]
+
+    def _rebuild_solver_options(self, preferred: str | None = None) -> None:
+        if not hasattr(self, "_cfg_solver_combo"):
+            return
+        current = preferred or self._cfg_solver_combo.currentData()
+        options = self._solver_options_for_model()
+        self._cfg_solver_combo.blockSignals(True)
+        self._cfg_solver_combo.clear()
+        for label, value in options:
+            self._cfg_solver_combo.addItem(label, value)
+        index = self._cfg_solver_combo.findData(current)
+        if index < 0:
+            index = 0
+        self._cfg_solver_combo.setCurrentIndex(index)
+        self._cfg_solver_combo.blockSignals(False)
+        if hasattr(self, "_cfg_recommended_solver"):
+            self._cfg_recommended_solver.setText(str(self._cfg_solver_combo.currentData()))
+
+    def _update_compressible_controls(self) -> None:
+        if not hasattr(self, "_cfg_temperature"):
+            return
+        is_compressible = self._cfg_flow_type_combo.currentData() == "compressible"
+        for widget in (self._cfg_temperature, self._cfg_cp, self._cfg_gas_r, self._cfg_prandtl):
+            widget.setEnabled(is_compressible)
+
+    def _on_physics_model_changed(self) -> None:
+        self._rebuild_solver_options()
+        self._update_compressible_controls()
+        self._refresh_dict_preview()
+
     def _on_turb_model_changed(self) -> None:
         key = self._cfg_turb_model.currentData()
         if key == "laminar":
@@ -1589,12 +1827,42 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             self._cfg_turb_intensity.setEnabled(True)
             self._cfg_turb_length.setEnabled(True)
 
-    def _load_solver_run_state(self) -> None:
-        import json
+    def _solver_run_state_path(self):
         from pathlib import Path
-        path = (self._current_project.case_dir / "solver_run_state.json"
+        return (self._current_project.case_dir / "solver_run_state.json"
                 if self._current_project is not None
                 else Path(__file__).parent.parent.parent.parent / "config" / "solver_run_state.json")
+
+    def _latest_case_time_value(self) -> float | None:
+        if self._current_project is None:
+            return None
+        case_dir = self._current_project.case_dir
+        if not case_dir.exists():
+            return None
+        values: list[float] = []
+        for path in case_dir.iterdir():
+            if path.is_dir() and self._is_openfoam_time_dir(path.name):
+                try:
+                    values.append(float(path.name))
+                except ValueError:
+                    pass
+        return max(values) if values else None
+
+    def _restore_solver_progress(self, saved: dict) -> None:
+        total = int(saved.get("total_steps") or 0)
+        current = int(saved.get("current_step") or 0)
+        if total > 0:
+            self._cfg_progress.setRange(0, total)
+            self._cfg_progress.setValue(max(0, min(current, total)))
+            self._cfg_progress.setFormat("%v / %m")
+            self._cfg_progress.setTextVisible(True)
+            self._cfg_progress.setVisible(True)
+        else:
+            self._cfg_progress.setVisible(False)
+
+    def _load_solver_run_state(self) -> None:
+        import json
+        path = self._solver_run_state_path()
         saved = {}
         if path.exists():
             try:
@@ -1613,32 +1881,56 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             self._cfg_status_label.setStyleSheet("font-weight: 600; color: #89d185;")
             self._cfg_run_log.setPlaceholderText("网格和字典已就绪，点击 [启动计算] 开始仿真。")
             self._cfg_start_btn.setEnabled(True)
+            self._cfg_continue_btn.setEnabled(bool(saved.get("can_continue")))
         elif has_dicts:
             self._cfg_status_label.setText("状态：缺少网格")
             self._cfg_status_label.setStyleSheet("font-weight: 600; color: #d7ba7d;")
             self._cfg_run_log.setPlaceholderText("字典已就绪，请先在网格生成页运行 blockMesh。")
+            self._cfg_continue_btn.setEnabled(False)
         else:
             self._cfg_status_label.setText("状态：空闲")
             self._cfg_status_label.setStyleSheet("font-weight: 600;")
             self._cfg_run_log.setPlaceholderText("请先在仿真参数配置页导出字典。")
+            self._cfg_continue_btn.setEnabled(False)
         if saved.get("log"):
             self._cfg_run_log.setHtml(saved["log"])
+        self._sim_latest_time = saved.get("latest_time")
+        self._sim_current_step = int(saved.get("current_step") or 0)
+        self._sim_total_steps = int(saved.get("total_steps") or 0)
+        self._sim_delta_t = float(saved.get("delta_t") or 0.0)
+        self._sim_end_time = float(saved.get("end_time") or 0.0)
+        self._restore_solver_progress(saved)
 
     def _save_solver_run_state(self) -> None:
         import json
-        from pathlib import Path
-        path = (self._current_project.case_dir / "solver_run_state.json"
-                if self._current_project is not None
-                else Path(__file__).parent.parent.parent.parent / "config" / "solver_run_state.json")
+        path = self._solver_run_state_path()
         data = {
             "status_text": self._cfg_status_label.text(),
             "log": self._cfg_run_log.toHtml() if hasattr(self, "_cfg_run_log") else "",
+            "latest_time": getattr(self, "_sim_latest_time", None),
+            "current_step": int(getattr(self, "_sim_current_step", 0) or 0),
+            "total_steps": int(getattr(self, "_sim_total_steps", 0) or 0),
+            "delta_t": float(getattr(self, "_sim_delta_t", 0.0) or 0.0),
+            "end_time": float(getattr(self, "_sim_end_time", 0.0) or 0.0),
+            "can_continue": bool(getattr(self, "_sim_can_continue", False)),
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-    def _start_simulation(self) -> None:
+    def _set_control_dict_start_from(self, ctrl_dict, start_from: str) -> None:
+        import re
+        content = ctrl_dict.read_text(encoding="utf-8")
+        if re.search(r"\bstartFrom\s+\S+;", content):
+            content = re.sub(r"\bstartFrom\s+\S+;", f"startFrom       {start_from};", content, count=1)
+        else:
+            content = content.replace("application", f"startFrom       {start_from};\napplication", 1)
+        ctrl_dict.write_text(content, encoding="utf-8")
+
+    def _continue_simulation(self) -> None:
+        self._start_simulation(resume=True)
+
+    def _start_simulation(self, resume: bool = False) -> None:
         if self._current_project is None:
             self._set_status("请先新建或打开项目")
             return
@@ -1658,6 +1950,14 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         if not (case_dir / "constant" / "polyMesh").exists():
             self._set_status("未生成网格，请先在网格生成页运行 blockMesh")
             return
+        if resume:
+            latest_time = self._latest_case_time_value()
+            if latest_time is None or latest_time <= 0:
+                self._set_status("没有可继续的时间步，请先启动一次仿真并写出结果。")
+                return
+            self._set_control_dict_start_from(ctrl_dict, "latestTime")
+        else:
+            self._set_control_dict_start_from(ctrl_dict, "startTime")
         content = ctrl_dict.read_text(encoding="utf-8")
         m = re.search(r"application\s+(\S+);", content)
         solver = m.group(1) if m else "simpleFoam"
@@ -1667,20 +1967,35 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             end_time_val = float(end_m.group(1)) if end_m else 1.0
             dt_val = float(dt_m.group(1)) if dt_m else 0.001
             self._sim_total_steps = int(end_time_val / dt_val)
+            self._sim_delta_t = dt_val
+            self._sim_end_time = end_time_val
         except (ValueError, ZeroDivisionError):
             self._sim_total_steps = 0
-        self._sim_current_step = 0
+            self._sim_delta_t = 0.0
+            self._sim_end_time = 0.0
+        resume_time = self._latest_case_time_value() if resume else 0.0
+        if resume and self._sim_delta_t:
+            self._sim_current_step = int(round((resume_time or 0.0) / self._sim_delta_t))
+        else:
+            self._sim_current_step = 0
+        self._sim_latest_time = resume_time
+        self._sim_can_continue = False
+        self._sim_pause_requested = False
+        self._sim_finish_handled = False
         command = (
             f"source {shlex.quote(status.env_script_path)} >/dev/null 2>&1 && "
             f"cd {shlex.quote(str(case_dir))} && "
             f"{shlex.quote(solver)}"
         )
         self._cfg_start_btn.setEnabled(False)
+        self._cfg_continue_btn.setEnabled(False)
         self._cfg_stop_btn.setEnabled(True)
         self._cfg_status_label.setText("状态：计算中")
         if self._sim_total_steps > 0:
             self._cfg_progress.setRange(0, self._sim_total_steps)
-            self._cfg_progress.setValue(0)
+            self._cfg_progress.setValue(max(0, min(self._sim_current_step, self._sim_total_steps)))
+            self._cfg_progress.setFormat("%v / %m")
+            self._cfg_progress.setTextVisible(True)
         else:
             self._cfg_progress.setRange(0, 0)
         self._cfg_progress.setVisible(True)
@@ -1689,14 +2004,16 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._cfg_residual_axes.set_yscale("log")
         self._cfg_residual_axes.grid(True, alpha=0.2, color="#2d2d30")
         self._cfg_residual_canvas.draw()
-        self._cfg_run_log.clear()
-        self._cfg_run_log.append(f"<span style='color:#569cd6;'>=== 启动仿真 ===</span>")
+        if not resume:
+            self._cfg_run_log.clear()
+        self._cfg_run_log.append(f"<span style='color:#569cd6;'>=== {'继续' if resume else '启动'}仿真 ===</span>")
         self._cfg_run_log.append(f"Case: {case_dir}")
         self._cfg_run_log.append(f"Solver: {solver}")
         self._cfg_run_log.append("")
         self._residual_data: dict[str, list[float]] = {"Ux": [], "Uy": [], "Uz": [], "p": [], "iter": []}
 
         self._foam_process = QProcess(self)
+        self._active_process_kind = "simulation"
         self._foam_process.setProgram("bash")
         self._foam_process.setArguments(["-lc", command])
         self._foam_process.readyReadStandardOutput.connect(self._on_sim_stdout)
@@ -1727,7 +2044,14 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             # Detect time step completion
             tm = re.search(r"^Time\s*=\s*([0-9.e+\-]+)", line)
             if tm:
-                self._sim_current_step += 1
+                try:
+                    self._sim_latest_time = float(tm.group(1))
+                except ValueError:
+                    self._sim_latest_time = None
+                if getattr(self, "_sim_delta_t", 0.0):
+                    self._sim_current_step = int(round((self._sim_latest_time or 0.0) / self._sim_delta_t))
+                else:
+                    self._sim_current_step += 1
                 if self._sim_total_steps > 0:
                     self._cfg_progress.setValue(min(self._sim_current_step, self._sim_total_steps))
                     self._cfg_progress.setFormat(f"%v / %m")
@@ -1741,6 +2065,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
                     self._residual_data[field].append(initial)
                     self._residual_data["iter"].append(len(self._residual_data["p"]))
         self._redraw_residuals()
+        self._save_solver_run_state()
 
     def _redraw_residuals(self) -> None:
         self._cfg_residual_axes.clear()
@@ -1774,23 +2099,52 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             json.dumps(save), encoding="utf-8")
 
     def _on_sim_finished(self, exit_code: int, _exit_status) -> None:
+        if getattr(self, "_sim_finish_handled", False):
+            return
+        if getattr(self, "_sim_pause_requested", False):
+            self._mark_simulation_paused()
+            return
+        self._active_process_kind = "idle"
         self._cfg_start_btn.setEnabled(True)
         self._cfg_stop_btn.setEnabled(False)
         if exit_code == 0:
             self._cfg_status_label.setText("状态：完成")
             self._cfg_status_label.setStyleSheet("font-weight: 600; color: #89d185;")
-            self._cfg_progress.setRange(0, 100)
-            self._cfg_progress.setValue(100)
-            self._cfg_progress.setVisible(True)
+            if self._sim_total_steps > 0:
+                self._cfg_progress.setValue(min(self._sim_current_step, self._sim_total_steps))
+                self._cfg_progress.setVisible(True)
             self._cfg_run_log.append("<span style='color:#89d185;'>=== 仿真完成 ===</span>")
+            self._sim_can_continue = False
+            self._cfg_continue_btn.setEnabled(False)
             self._run_foam_to_vtk()
         else:
             self._cfg_status_label.setText(f"状态：异常 (退出码 {exit_code})")
             self._cfg_status_label.setStyleSheet("font-weight: 600; color: #f48771;")
-            self._cfg_progress.setVisible(False)
             self._cfg_run_log.append(f"<span style='color:#f48771;'>=== 仿真异常 (退出码 {exit_code}) ===</span>")
         self._set_status(f"仿真结束，退出码 {exit_code}")
         self._save_residual_data()
+        self._save_solver_run_state()
+
+    def _mark_simulation_paused(self) -> None:
+        self._sim_finish_handled = True
+        self._active_process_kind = "idle"
+        latest_time = self._latest_case_time_value()
+        if latest_time is not None:
+            self._sim_latest_time = latest_time
+            if getattr(self, "_sim_delta_t", 0.0):
+                self._sim_current_step = int(round(latest_time / self._sim_delta_t))
+                if self._sim_total_steps > 0:
+                    self._cfg_progress.setValue(min(self._sim_current_step, self._sim_total_steps))
+        self._sim_can_continue = bool((self._sim_latest_time or 0) > 0)
+        self._sim_pause_requested = False
+        self._cfg_start_btn.setEnabled(True)
+        self._cfg_continue_btn.setEnabled(self._sim_can_continue)
+        self._cfg_stop_btn.setEnabled(False)
+        self._cfg_status_label.setText("状态：已暂停")
+        self._cfg_status_label.setStyleSheet("font-weight: 600; color: #d7ba7d;")
+        self._cfg_run_log.append("<span style='color:#d7ba7d;'>=== 仿真已暂停，可从最新写出的时间步继续 ===</span>")
+        self._set_status("仿真已暂停。")
+        self._save_solver_run_state()
 
     def _run_foam_to_vtk(self) -> None:
         """Run foamToVTK -latestTime to export VTK files into case/VTK/."""
@@ -2040,4 +2394,3 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
     def _open_draw_geometry_tab(self) -> None:
         self._workspace_tabs.setCurrentIndex(self.TAB_DRAW_GEOMETRY)
         self._set_status("已打开绘制几何页。")
-

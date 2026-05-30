@@ -156,6 +156,50 @@ class NativeVtkPreviewWidget(QWidget):
         poly_data.SetPolys(cells)
         self.add_polydata(poly_data, color=color, opacity=opacity, edge_color=edge_color, line_width=1.0)
 
+    def add_arrow(
+        self,
+        start: np.ndarray,
+        direction: np.ndarray,
+        length: float,
+        color: tuple[float, float, float] = (0.15, 0.45, 1.0),
+        opacity: float = 0.92,
+    ) -> None:
+        direction = np.asarray(direction, dtype=float)
+        norm = float(np.linalg.norm(direction))
+        if norm <= 1e-12 or length <= 0:
+            return
+        unit = direction / norm
+        arrow = vtk.vtkArrowSource()
+        arrow.SetShaftRadius(0.025)
+        arrow.SetTipRadius(0.075)
+        arrow.SetTipLength(0.28)
+        arrow.Update()
+
+        transform = vtk.vtkTransform()
+        matrix = vtk.vtkMatrix4x4()
+        side_values = [0.0, 0.0, 0.0]
+        up_values = [0.0, 0.0, 0.0]
+        vtk.vtkMath.Perpendiculars(unit.tolist(), side_values, up_values, 0)
+        side = np.asarray(side_values, dtype=float)
+        up = np.cross(unit, side)
+        matrix.Identity()
+        for row, value in enumerate(unit):
+            matrix.SetElement(row, 0, float(value))
+        for row, value in enumerate(side):
+            matrix.SetElement(row, 1, float(value))
+        for row, value in enumerate(up):
+            matrix.SetElement(row, 2, float(value))
+        transform.Translate(float(start[0]), float(start[1]), float(start[2]))
+        transform.Concatenate(matrix)
+        transform.Scale(float(length), float(length), float(length))
+
+        tf = vtk.vtkTransformPolyDataFilter()
+        tf.SetInputConnection(arrow.GetOutputPort())
+        tf.SetTransform(transform)
+        tf.Update()
+        actor = self.add_polydata(tf.GetOutput(), color=color, opacity=opacity, edge_color=None)
+        actor.GetProperty().SetSpecular(0.25)
+
     def add_text(
         self,
         text: str,
