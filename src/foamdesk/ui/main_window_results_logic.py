@@ -284,7 +284,8 @@ class ResultsLogicMixin:
             return
         if mode.startswith("Streamline"):
             try:
-                streamline_output, vtu_grid, seed_label, seed_count, speed_range = self._build_streamlines_from_vtu()
+                streamline_output, vtu_grid, seed_label, seed_count, speed_range = self._build_streamlines_from_vtu("inlet")
+                stl_streamline_output, _stl_grid, stl_seed_label, stl_seed_count, stl_speed_range = self._build_streamlines_from_vtu("geometry")
             except (OSError, RuntimeError, ValueError) as error:
                 self._show_error(f"生成流线失败：{error}")
                 return
@@ -293,11 +294,12 @@ class ResultsLogicMixin:
                 streamline_output,
                 speed_range,
                 inlet_label=seed_label,
+                stl_streamline_data=(stl_streamline_output, stl_speed_range, stl_seed_label),
             )
             line_count = streamline_output.GetNumberOfLines()
             point_count = streamline_output.GetNumberOfPoints()
             self._finish_result_visualization(
-                f"Streamline 流线：几何体表面={seed_label}, seeds={seed_count}, lines={line_count}, points={point_count}, speedRange={speed_range}"
+                f"Streamline 流线：入口面={seed_label}, seeds={seed_count}, lines={line_count}, points={point_count}, speedRange={speed_range}; STL近壁={stl_seed_label}, seeds={stl_seed_count}"
             )
             return
         if mode.startswith("Volume"):
@@ -432,7 +434,7 @@ class ResultsLogicMixin:
             self._results_text.setPlainText(message)
         self._set_status("结果显示已加载。")
 
-    def _build_streamlines_from_vtu(self):
+    def _build_streamlines_from_vtu(self, seed_mode: str = "geometry"):
         """Follow Plan.md: read foamToVTK export and generate streamlines.
         Supports XML (.vtu/.vtp) and legacy (.vtk) formats.
         Returns (streamline_output, source_grid, seed_label, seed_count, speed_range)."""
@@ -468,9 +470,14 @@ class ResultsLogicMixin:
         if grid_data is None or grid_data.GetNumberOfPoints() == 0:
             raise RuntimeError("读取体网格文件失败")
 
-        # ── 2. 读取导入几何体表面作为种子源 ──
-        seed_geometry, seed_label = self._load_geometry_seed_surface(vtk_dir)
+        # ── 2. 读取种子源 ──
+        if seed_mode == "inlet":
+            seed_geometry, seed_label = self._load_inlet_seed_surface(vtk_dir)
+        else:
+            seed_geometry, seed_label = self._load_geometry_seed_surface(vtk_dir)
         if seed_geometry is None or seed_geometry.GetNumberOfPoints() == 0:
+            if seed_mode == "inlet":
+                raise RuntimeError("未找到入口面文件。请确认仿真完成并生成了 VTK/inlet/ 目录。")
             raise RuntimeError("未找到几何体表面文件。请先导入 STL，并确认 foamToVTK 已导出几何体边界面。")
         seed_count = seed_geometry.GetNumberOfPoints()
 
@@ -503,13 +510,21 @@ class ResultsLogicMixin:
                     return traced
             return None
 
-        flow_direction = self._mean_flow_direction(grid_data)
-        near_wall_seed_geometry = self._near_wall_seed_shell(seed_geometry, flow_direction)
-        stream_lines = _trace_all_directions(near_wall_seed_geometry)
+        if seed_mode == "inlet":
+            seed_source = self._densify_seed_points(seed_geometry)
+            stream_lines = _trace_all_directions(seed_source, ("forward", "backward", "both"))
+            seed_label = f"{seed_label} 入口面"
+            seed_count = seed_source.GetNumberOfPoints()
+        else:
+            flow_direction = self._mean_flow_direction(grid_data)
+            near_wall_seed_geometry = self._near_wall_seed_shell(seed_geometry, flow_direction)
+            stream_lines = _trace_all_directions(near_wall_seed_geometry)
+            if stream_lines is None or stream_lines.GetNumberOfLines() == 0:
+                stream_lines = _trace_all_directions(self._offset_seed_surface(seed_geometry, flow_direction=flow_direction))
+            seed_label = f"{seed_label} 近壁层"
+            seed_count = near_wall_seed_geometry.GetNumberOfPoints() or seed_count
         if stream_lines is None or stream_lines.GetNumberOfLines() == 0:
-            stream_lines = _trace_all_directions(self._offset_seed_surface(seed_geometry, flow_direction=flow_direction))
-        if stream_lines is None or stream_lines.GetNumberOfLines() == 0:
-            raise RuntimeError("几何体表面附近没有生成下游方向有效流线，请确认速度场结果和几何体边界面存在。")
+            raise RuntimeError(f"{seed_label} 没有生成下游方向有效流线，请确认速度场结果和边界面存在。")
 
         # ── 4. 速度大小着色 (Plan.md 第77-85行: 优先 VelocityMagnitude, fallback |U|) ──
         speed_range = (0.0, 1.0)
@@ -532,7 +547,88 @@ class ResultsLogicMixin:
                 stream_lines.GetPointData().SetActiveScalars("U_mag")
                 speed_range = (smin, smax)
 
-        return stream_lines, grid_data, f"{seed_label} 近壁层", near_wall_seed_geometry.GetNumberOfPoints() or seed_count, speed_range
+        return stream_lines, grid_data, seed_label, seed_count, speed_range
+
+    def _load_inlet_seed_surface(self, vtk_dir: Path):
+        surfaces_dir = vtk_dir / "surfaces"
+        if surfaces_dir.exists():
+            inlet_vtp = surfaces_dir / "inlet.vtp"
+            if inlet_vtp.exists():
+                reader = vtk.vtkXMLPolyDataReader()
+                reader.SetFileName(str(inlet_vtp))
+                reader.Update()
+                return reader.GetOutput(), "inlet"
+
+        inlet_dir = vtk_dir / "inlet"
+        if not inlet_dir.exists():
+            for child in sorted(vtk_dir.iterdir()):
+                if child.is_dir() and "inlet" in child.name.lower():
+                    inlet_dir = child
+                    break
+        if inlet_dir.exists():
+            inlet_files = sorted(inlet_dir.glob("*.vtk"))
+            if inlet_files:
+                reader = vtk.vtkDataSetReader()
+                reader.SetFileName(str(inlet_files[-1]))
+                reader.Update()
+                return self._as_poly_data(reader.GetOutput()), inlet_dir.name
+        return None, ""
+
+    def _densify_seed_points(self, seed_geometry):
+        points = seed_geometry.GetPoints()
+        if points is None or seed_geometry.GetNumberOfPoints() == 0:
+            return seed_geometry
+        dense_points = vtk.vtkPoints()
+        for index in range(seed_geometry.GetNumberOfPoints()):
+            dense_points.InsertNextPoint(points.GetPoint(index))
+        cells = seed_geometry.GetPolys() or seed_geometry.GetLines()
+        if cells is not None:
+            raw_cells = vtk_to_numpy(cells.GetData())
+            index = 0
+            while index < len(raw_cells):
+                count = int(raw_cells[index])
+                index += 1
+                ids = raw_cells[index : index + count].astype(int)
+                index += count
+                if count < 2:
+                    continue
+                cell_points = np.array([points.GetPoint(int(point_id)) for point_id in ids], dtype=float)
+                centroid = cell_points.mean(axis=0)
+                dense_points.InsertNextPoint(float(centroid[0]), float(centroid[1]), float(centroid[2]))
+                for edge_index in range(count):
+                    p0 = cell_points[edge_index]
+                    p1 = cell_points[(edge_index + 1) % count]
+                    midpoint = (p0 + p1) * 0.5
+                    dense_points.InsertNextPoint(float(midpoint[0]), float(midpoint[1]), float(midpoint[2]))
+        bounds = seed_geometry.GetBounds()
+        if bounds is not None and all(np.isfinite(bounds)):
+            spans = np.array(
+                [
+                    bounds[1] - bounds[0],
+                    bounds[3] - bounds[2],
+                    bounds[5] - bounds[4],
+                ],
+                dtype=float,
+            )
+            normal_axis = int(np.argmin(spans))
+            plane_axes = [axis for axis in range(3) if axis != normal_axis]
+            target_grid_points = 38000
+            aspect = max(float(spans[plane_axes[0]]), 1e-9) / max(float(spans[plane_axes[1]]), 1e-9)
+            count_a = max(24, int(np.sqrt(target_grid_points * aspect)))
+            count_b = max(24, int(target_grid_points / count_a))
+            fixed_value = (bounds[normal_axis * 2] + bounds[normal_axis * 2 + 1]) * 0.5
+            axis_a_values = np.linspace(bounds[plane_axes[0] * 2], bounds[plane_axes[0] * 2 + 1], count_a)
+            axis_b_values = np.linspace(bounds[plane_axes[1] * 2], bounds[plane_axes[1] * 2 + 1], count_b)
+            for value_a in axis_a_values:
+                for value_b in axis_b_values:
+                    point = [0.0, 0.0, 0.0]
+                    point[normal_axis] = fixed_value
+                    point[plane_axes[0]] = float(value_a)
+                    point[plane_axes[1]] = float(value_b)
+                    dense_points.InsertNextPoint(point)
+        dense_seed = vtk.vtkPolyData()
+        dense_seed.SetPoints(dense_points)
+        return dense_seed
 
     def _mean_flow_direction(self, grid_data) -> np.ndarray | None:
         u_array = grid_data.GetPointData().GetArray("U")

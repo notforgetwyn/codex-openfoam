@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -387,6 +388,8 @@ class NativeVtkViewerDialog(QDialog):
         self._slice_data = None
         self._combined_stl_polydata = None
         self._last_plot_fn = None
+        self._current_plot_mode = ""
+        self._streamline_display_state = None
         self._animation_timer = QTimer(self)
         self._animation_timer.timeout.connect(self._advance_animation_frame)
         layout = QVBoxLayout(self)
@@ -396,6 +399,20 @@ class NativeVtkViewerDialog(QDialog):
         self._near_stl_check.setToolTip("仅显示 STL 几何表面附近的场数据")
         self._near_stl_check.toggled.connect(self._on_near_stl_toggled)
         toolbar.addWidget(self._near_stl_check)
+        toolbar.addSpacing(8)
+        self._streamline_count_label = QLabel("基线数")
+        self._streamline_count_label.setVisible(False)
+        toolbar.addWidget(self._streamline_count_label)
+        self._streamline_count_spin = QSpinBox()
+        self._streamline_count_spin.setRange(50, 12000)
+        self._streamline_count_spin.setSingleStep(100)
+        self._streamline_count_spin.setValue(2600)
+        self._streamline_count_spin.setVisible(False)
+        toolbar.addWidget(self._streamline_count_spin)
+        self._streamline_count_apply_button = QPushButton("确定")
+        self._streamline_count_apply_button.clicked.connect(self._on_streamline_count_confirmed)
+        self._streamline_count_apply_button.setVisible(False)
+        toolbar.addWidget(self._streamline_count_apply_button)
         toolbar.addSpacing(8)
         self._status_label = QLabel("原生 VTK 高质量渲染窗口")
         toolbar.addWidget(self._status_label)
@@ -448,6 +465,14 @@ class NativeVtkViewerDialog(QDialog):
         self._slice_lbl.setVisible(True)
         self._slice_axis_combo.setVisible(True)
         self._slice_pos_spin.setVisible(True)
+
+    def _set_near_stl_control_visible(self, visible: bool) -> None:
+        self._near_stl_check.setVisible(visible)
+
+    def _set_streamline_controls_visible(self, visible: bool) -> None:
+        self._streamline_count_label.setVisible(visible)
+        self._streamline_count_spin.setVisible(visible)
+        self._streamline_count_apply_button.setVisible(visible)
 
     def set_geometry_assets(self, assets) -> None:
         self._geometry_assets = [
@@ -521,7 +546,10 @@ class NativeVtkViewerDialog(QDialog):
             self._animation_render_callback(frame_index)
 
     def plot_surface(self, poly_data, field_array, scalar_range: tuple[float, float], label: str) -> None:
+        self._current_plot_mode = "surface"
         self._reset_scene(f"Surface 表面云图：{label}")
+        self._set_near_stl_control_visible(True)
+        self._set_streamline_controls_visible(False)
         display_data = self._maybe_clip_near_stl(poly_data)
         array_name = self._scalar_array_name(display_data, field_array, label)
         display_data.GetPointData().SetActiveScalars(array_name)
@@ -564,6 +592,7 @@ class NativeVtkViewerDialog(QDialog):
         axis_name: str | None,
         normalized_position: float,
     ) -> tuple[str, float]:
+        self._current_plot_mode = "slice"
         self._slice_data = {
             "poly_data": poly_data, "field_array": field_array,
             "scalar_range": scalar_range, "label": label,
@@ -579,6 +608,8 @@ class NativeVtkViewerDialog(QDialog):
         self._slice_axis_combo.blockSignals(False)
         self._slice_pos_spin.blockSignals(False)
         self._reset_scene(f"Slice 切片：{label}")
+        self._set_near_stl_control_visible(False)
+        self._set_streamline_controls_visible(False)
         array_name = self._scalar_array_name(poly_data, field_array, label)
         axis, center = self._axis_and_center(poly_data, axis_name, normalized_position)
         plane = vtk.vtkPlane()
@@ -594,7 +625,7 @@ class NativeVtkViewerDialog(QDialog):
         cutter.SetInputDataObject(poly_data)
         cutter.SetCutFunction(plane)
         cutter.Update()
-        slice_data = self._maybe_clip_near_stl(cutter.GetOutput())
+        slice_data = cutter.GetOutput()
         mapper = vtk.vtkPolyDataMapper()
         mapper.SetInputData(slice_data)
         mapper.SetScalarModeToUsePointFieldData()
@@ -614,7 +645,10 @@ class NativeVtkViewerDialog(QDialog):
         return "XYZ"[axis], center
 
     def plot_iso_surface(self, poly_data, field_array, scalar_range: tuple[float, float], label: str) -> None:
+        self._current_plot_mode = "iso_surface"
         self._reset_scene(f"Iso-surface 等值面：{label}")
+        self._set_near_stl_control_visible(False)
+        self._set_streamline_controls_visible(False)
         display_data = self._maybe_clip_near_stl(poly_data)
         array_name = self._scalar_array_name(display_data, field_array, label)
         display_data.GetPointData().SetActiveScalars(array_name)
@@ -646,7 +680,10 @@ class NativeVtkViewerDialog(QDialog):
         self._finish_scene(display_data)
 
     def plot_volume(self, poly_data, field_array, scalar_range: tuple[float, float], label: str) -> None:
+        self._current_plot_mode = "volume"
         self._reset_scene(f"Volume 体渲染：{label}")
+        self._set_near_stl_control_visible(False)
+        self._set_streamline_controls_visible(False)
         display_data = self._maybe_clip_near_stl(poly_data)
         array_name = self._scalar_array_name(display_data, field_array, label)
         vmin, vmax = scalar_range
@@ -669,9 +706,33 @@ class NativeVtkViewerDialog(QDialog):
         self._last_plot_fn = (self.plot_volume, (poly_data, field_array, scalar_range, label))
         self._finish_scene(display_data)
 
-    def plot_streamlines(self, source_poly_data, streamline_poly_data, speed_range: tuple[float, float], inlet_label: str = "") -> None:
-        title = f"Streamline 流线：几何体表面={inlet_label}，按 |U| 着色" if inlet_label else "Streamline 流线：由几何体表面生成，按 |U| 着色"
+    def plot_streamlines(
+        self,
+        source_poly_data,
+        streamline_poly_data,
+        speed_range: tuple[float, float],
+        inlet_label: str = "",
+        stl_streamline_data=None,
+    ) -> None:
+        self._current_plot_mode = "streamline"
+        self._streamline_display_state = {
+            "source_poly_data": source_poly_data,
+            "inlet": (streamline_poly_data, speed_range, inlet_label),
+            "stl": stl_streamline_data,
+        }
+        self._plot_current_streamline_dataset()
+
+    def _plot_current_streamline_dataset(self) -> None:
+        if not self._streamline_display_state:
+            return
+        source_poly_data = self._streamline_display_state["source_poly_data"]
+        use_stl = self._near_stl_check.isChecked() and self._streamline_display_state.get("stl") is not None
+        streamline_poly_data, speed_range, label = self._streamline_display_state["stl" if use_stl else "inlet"]
+        title_prefix = "几何体表面" if use_stl else "入口面"
+        title = f"Streamline 流线：{title_prefix}={label}，按 |U| 着色"
         self._reset_scene(title)
+        self._set_near_stl_control_visible(True)
+        self._set_streamline_controls_visible(True)
         speed_array_name = self._streamline_speed_array_name(streamline_poly_data)
         value_min, value_max = speed_range
         if value_max <= value_min:
@@ -686,7 +747,7 @@ class NativeVtkViewerDialog(QDialog):
         )
         self._add_scalar_bar(lookup_table, "|U| (m/s)")
         camera_target = self._combined_stl_polydata if self._combined_stl_polydata is not None else source_poly_data
-        self._last_plot_fn = (self.plot_streamlines, (source_poly_data, streamline_poly_data, speed_range, inlet_label))
+        self._last_plot_fn = (self._plot_current_streamline_dataset, ())
         self._finish_scene(camera_target, zoom=1.55)
 
     def _reset_scene(self, status: str) -> None:
@@ -785,9 +846,23 @@ class NativeVtkViewerDialog(QDialog):
 
     def _on_near_stl_toggled(self, _checked: bool) -> None:
         """Re-render with current data to apply/remove STL proximity clip."""
+        if self._current_plot_mode == "slice":
+            return
+        if self._current_plot_mode == "streamline":
+            self._on_streamline_near_stl_toggled(_checked)
+            return
         if self._last_plot_fn is not None:
             fn, args = self._last_plot_fn
             fn(*args)
+
+    def _on_streamline_near_stl_toggled(self, _checked: bool) -> None:
+        """Switch Streamline mode between inlet seeds and STL-near seeds."""
+        self._plot_current_streamline_dataset()
+
+    def _on_streamline_count_confirmed(self) -> None:
+        if self._current_plot_mode != "streamline":
+            return
+        self._plot_current_streamline_dataset()
 
     def _maybe_clip_near_stl(self, input_data):
         """If '仅显示STL附近' is checked, clip input to STL proximity."""
@@ -1158,11 +1233,16 @@ class NativeVtkViewerDialog(QDialog):
                 }
             )
         paths = self._filter_visible_streamline_paths(paths)
-        max_paths = 2600
+        max_paths = self._selected_streamline_count()
         if len(paths) <= max_paths:
             return paths
         selected = np.linspace(0, len(paths) - 1, max_paths, dtype=int)
         return [paths[int(path_index)] for path_index in selected]
+
+    def _selected_streamline_count(self) -> int:
+        if hasattr(self, "_streamline_count_spin"):
+            return max(1, int(self._streamline_count_spin.value()))
+        return 2600
 
     def _extend_streamline_tail(
         self,
