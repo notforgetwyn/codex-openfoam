@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
@@ -119,6 +120,94 @@ class ResultsLogicMixin:
         if not mode.startswith("Streamline"):
             self._configure_result_animation_source()
 
+    def _compute_inlet_outlet_positions(self):
+        """Read constant/polyMesh/{boundary,faces,points} to find
+        inlet/outlet patch face centroids. No VTK dependency.
+        Returns (inlet_centers: list, outlet_centers: list) or (None, None)."""
+        if self._current_project is None:
+            return None, None
+        case_dir = self._current_project.case_dir
+        boundary_path = case_dir / "constant" / "polyMesh" / "boundary"
+        faces_path = case_dir / "constant" / "polyMesh" / "faces"
+        points_path = case_dir / "constant" / "polyMesh" / "points"
+        if not (boundary_path.exists() and faces_path.exists() and points_path.exists()):
+            return None, None
+
+        # ── helper: skip FoamFile header and return content after the first '(' ──
+        def _skip_foam_header(text: str) -> str:
+            idx = text.find("(")
+            if idx < 0:
+                return text
+            return text[idx + 1:]
+
+        # ── 1. parse boundary → {name: (nFaces, startFace)} ──
+        b_content = _skip_foam_header(boundary_path.read_text(encoding="utf-8"))
+        patch_info: dict[str, tuple[int, int]] = {}
+        for pm in re.finditer(r"(\S+)\s*\n\s*\{([^}]+)\}", b_content):
+            name = pm.group(1).strip()
+            body = pm.group(2)
+            if name.isdigit() or name in ("(", ")"):
+                continue
+            nf_m = re.search(r"nFaces\s+(\d+)", body)
+            sf_m = re.search(r"startFace\s+(\d+)", body)
+            if nf_m and sf_m:
+                patch_info[name] = (int(nf_m.group(1)), int(sf_m.group(1)))
+
+        # ── 2. identify inlet/outlet by name ──
+        inlet_names = [n for n in patch_info if "inlet" in n.lower()]
+        outlet_names = [n for n in patch_info if "outlet" in n.lower()]
+        if not inlet_names and not outlet_names:
+            return None, None
+
+        # ── 3. read points ──
+        pt_content = _skip_foam_header(points_path.read_text(encoding="utf-8"))
+        points = []
+        for m in re.finditer(r"\(([^)]+)\)", pt_content):
+            parts = m.group(1).split()
+            if len(parts) >= 3:
+                points.append((float(parts[0]), float(parts[1]), float(parts[2])))
+        if not points:
+            return None, None
+
+        # ── 4. read faces (4-index format like "4(0 1 5 4)") ──
+        f_content = _skip_foam_header(faces_path.read_text(encoding="utf-8"))
+        faces = []  # list of (vertex_indices,)
+        for m in re.finditer(r"(\d+)\s*\(([^)]+)\)", f_content):
+            count = int(m.group(1))
+            ids = [int(x) for x in m.group(2).split() if x]
+            if len(ids) >= 3 and len(ids) == count:
+                faces.append(ids)
+
+        # ── 5. compute patch centroid from its face vertices ──
+        def _patch_centroid(patch_name: str):
+            info = patch_info.get(patch_name)
+            if info is None:
+                return None
+            nf, sf = info
+            sx = sy = sz = 0.0
+            n_verts = 0
+            for fi in range(sf, min(sf + nf, len(faces))):
+                for vi in faces[fi]:
+                    if vi < len(points):
+                        px, py, pz = points[vi]
+                        sx += px; sy += py; sz += pz
+                        n_verts += 1
+            if n_verts == 0:
+                return None
+            return (sx / n_verts, sy / n_verts, sz / n_verts)
+
+        inlet_centers = []
+        for n in inlet_names:
+            c = _patch_centroid(n)
+            if c:
+                inlet_centers.append(c)
+        outlet_centers = []
+        for n in outlet_names:
+            c = _patch_centroid(n)
+            if c:
+                outlet_centers.append(c)
+        return inlet_centers, outlet_centers
+
     def _render_result_display(
         self,
         output,
@@ -129,13 +218,18 @@ class ResultsLogicMixin:
         mode: str,
         color_range: tuple[float, float],
     ) -> None:
+        # ensure viewer exists before passing inlet/outlet positions
+        self._ensure_native_vtk_viewer()
+        io_positions = self._compute_inlet_outlet_positions()
+        if io_positions[0] or io_positions[1]:
+            self._native_vtk_viewer.set_inlet_outlet_positions(*io_positions)
+
         if mode.startswith("Surface"):
             try:
                 output, field_array = self._ensure_point_field(output, field_array, storage)
             except RuntimeError as error:
                 self._show_error(str(error))
                 return
-            self._ensure_native_vtk_viewer()
             self._native_vtk_viewer.plot_surface(output, field_array, color_range, display_name)
             face_count = output.GetNumberOfPolys()
             self._finish_result_visualization(
@@ -148,7 +242,6 @@ class ResultsLogicMixin:
             except RuntimeError as error:
                 self._show_error(str(error))
                 return
-            self._ensure_native_vtk_viewer()
             self._native_vtk_viewer.plot_iso_surface(
                 output,
                 field_array,
@@ -177,7 +270,6 @@ class ResultsLogicMixin:
             except (OSError, RuntimeError, ValueError) as error:
                 self._show_error(str(error))
                 return
-            self._ensure_native_vtk_viewer()
             resolved_axis, center = self._native_vtk_viewer.plot_slice(
                 vol_data,
                 arr,
@@ -191,38 +283,21 @@ class ResultsLogicMixin:
             )
             return
         if mode.startswith("Streamline"):
-            field_name = self._result_field_combo.currentText().strip()
-            if field_name != "U":
-                self._show_error("流线需要速度矢量场 U，不能直接使用 p、T、k 等标量场生成。")
-                self._refresh_result_display_modes()
-                return
-            output, vector_array = self._point_vector_field(output, "U")
-            if vector_array is None:
-                self._show_error("流线当前需要点字段 U。请先确认当前 Case 输出了 U。")
-                return
             try:
-                stream_input = self._context.openfoam_vtk_service.build_case_output(
-                    self._current_project,
-                    time_value=self._selected_result_time_value(),
-                )
-                streamline_output, main_axis, seed_count, speed_range = self._build_vtk_streamlines(
-                    stream_input,
-                    output,
-                    vector_array,
-                )
+                streamline_output, vtu_grid, seed_label, seed_count, speed_range = self._build_streamlines_from_vtu()
             except (OSError, RuntimeError, ValueError) as error:
                 self._show_error(f"生成流线失败：{error}")
                 return
-            self._ensure_native_vtk_viewer()
             self._native_vtk_viewer.plot_streamlines(
-                output,
+                vtu_grid,
                 streamline_output,
-                color_range if color_range[1] > color_range[0] else speed_range,
+                speed_range,
+                inlet_label=seed_label,
             )
             line_count = streamline_output.GetNumberOfLines()
             point_count = streamline_output.GetNumberOfPoints()
             self._finish_result_visualization(
-                f"Streamline 流线已加载到原生 VTK 3D 窗口：time={selected_time}, mainAxis={main_axis}, seeds={seed_count}, lines={line_count}, points={point_count}, speedRange={speed_range}"
+                f"Streamline 流线：几何体表面={seed_label}, seeds={seed_count}, lines={line_count}, points={point_count}, speedRange={speed_range}"
             )
             return
         if mode.startswith("Volume"):
@@ -243,7 +318,6 @@ class ResultsLogicMixin:
             except (OSError, RuntimeError, ValueError) as error:
                 self._show_error(str(error))
                 return
-            self._ensure_native_vtk_viewer()
             self._native_vtk_viewer.plot_volume(volume_output, vol_field, color_range, display_name)
             self._finish_result_visualization(
                 f"Volume 体渲染已加载：field={display_name}, time={selected_time}, range={color_range}"
@@ -358,119 +432,350 @@ class ResultsLogicMixin:
             self._results_text.setPlainText(message)
         self._set_status("结果显示已加载。")
 
-    def _build_vtk_streamlines(
-        self,
-        stream_input,
-        bounds_poly_data,
-        velocity_array,
-        seed_resolution_x: int = 26,
-        seed_resolution_y: int = 14,
-        margin_ratio: float = 0.04,
-        length_factor: float = 4.0,
-        step_factor: float = 0.01,
-    ):
-        vtk_points = bounds_poly_data.GetPoints()
-        if vtk_points is None:
-            points = np.empty((0, 3), dtype=float)
-        else:
-            points = vtk_to_numpy(vtk_points.GetData())
-        vectors = vtk_to_numpy(velocity_array)
-        if points.size == 0 or vectors.size == 0 or vectors.ndim != 2 or vectors.shape[1] < 3:
-            raise RuntimeError("当前 Case 没有可用于流线追踪的速度点字段。")
-        count = min(len(points), len(vectors))
-        points = points[:count]
-        vectors = vectors[:count, :3]
-        speeds = np.linalg.norm(vectors, axis=1)
-        usable = speeds > 1e-12
-        if not np.any(usable):
-            raise RuntimeError("速度场全为 0，无法生成流线。")
-
-        mean_vector = vectors[usable].mean(axis=0)
-        axis = int(np.argmax(np.abs(mean_vector)))
-        main_axis = "XYZ"[axis]
-        bounds_min = points.min(axis=0)
-        bounds_max = points.max(axis=0)
-        spans = bounds_max - bounds_min
-        direction_sign = 1.0 if mean_vector[axis] >= 0 else -1.0
-        domain_size = max(float(spans.max()), 1e-9)
-        inlet_value = bounds_min[axis] if direction_sign >= 0 else bounds_max[axis]
-        seed_plane = inlet_value + direction_sign * max(float(spans[axis]) * 0.015, domain_size * 0.002)
-        cross_axes = [index for index in range(3) if index != axis]
-        seed_resolution_x = max(4, min(int(seed_resolution_x), 48))
-        seed_resolution_y = max(2, min(int(seed_resolution_y), 28))
-        length_factor = max(0.5, min(float(length_factor), 10.0))
-        step_factor = max(0.002, min(float(step_factor), 0.1))
-
-        seed_axes_values = []
-        for cross_axis, requested_count in zip(cross_axes, (seed_resolution_x, seed_resolution_y), strict=True):
-            span = float(spans[cross_axis])
-            if span <= domain_size * 1e-5:
-                seed_axes_values.append(np.array([(bounds_min[cross_axis] + bounds_max[cross_axis]) * 0.5], dtype=float))
-                continue
-            margin = min(span * max(margin_ratio, 0.0), span * 0.35)
-            seed_axes_values.append(
-                np.linspace(
-                    float(bounds_min[cross_axis] + margin),
-                    float(bounds_max[cross_axis] - margin),
-                    requested_count,
-                    dtype=float,
-                )
+    def _build_streamlines_from_vtu(self):
+        """Follow Plan.md: read foamToVTK export and generate streamlines.
+        Supports XML (.vtu/.vtp) and legacy (.vtk) formats.
+        Returns (streamline_output, source_grid, seed_label, seed_count, speed_range)."""
+        if self._current_project is None:
+            raise RuntimeError("未选择项目")
+        case_dir = self._current_project.case_dir
+        vtk_dir = case_dir / "VTK"
+        if not vtk_dir.exists():
+            raise RuntimeError(
+                "未找到 VTK 目录。请先运行仿真，仿真结束后会自动执行 foamToVTK 导出。"
             )
 
-        seed_points = []
-        for first_value in seed_axes_values[0]:
-            for second_value in seed_axes_values[1]:
-                point = np.zeros(3, dtype=float)
-                point[axis] = seed_plane
-                point[cross_axes[0]] = first_value
-                point[cross_axes[1]] = second_value
-                seed_points.append(point)
+        # ── 1. 读取体网格与流场数据 (Plan.md 第22-37行) ──
+        grid_data = None
+        # try XML .vtu first
+        volumes_dir = vtk_dir / "volumes"
+        if volumes_dir.exists():
+            vtu_files = sorted(volumes_dir.glob("*.vtu"))
+            if vtu_files:
+                vtu_reader = vtk.vtkXMLUnstructuredGridReader()
+                vtu_reader.SetFileName(str(vtu_files[-1]))
+                vtu_reader.Update()
+                grid_data = vtu_reader.GetOutput()
+        # fallback: legacy .vtk
+        if grid_data is None:
+            vtk_files = sorted(vtk_dir.glob("*.vtk"))
+            if not vtk_files:
+                raise RuntimeError(f"{vtk_dir} 中没有 .vtu 或 .vtk 体网格文件")
+            legacy_reader = vtk.vtkUnstructuredGridReader()
+            legacy_reader.SetFileName(str(vtk_files[-1]))
+            legacy_reader.Update()
+            grid_data = legacy_reader.GetOutput()
+        if grid_data is None or grid_data.GetNumberOfPoints() == 0:
+            raise RuntimeError("读取体网格文件失败")
 
-        vtk_seed_points = vtkPoints()
-        for point in seed_points:
-            vtk_seed_points.InsertNextPoint(float(point[0]), float(point[1]), float(point[2]))
-        seed_data = vtkPolyData()
-        seed_data.SetPoints(vtk_seed_points)
+        # ── 2. 读取导入几何体表面作为种子源 ──
+        seed_geometry, seed_label = self._load_geometry_seed_surface(vtk_dir)
+        if seed_geometry is None or seed_geometry.GetNumberOfPoints() == 0:
+            raise RuntimeError("未找到几何体表面文件。请先导入 STL，并确认 foamToVTK 已导出几何体边界面。")
+        seed_count = seed_geometry.GetNumberOfPoints()
 
-        initial_step = max(domain_size * step_factor, domain_size * 0.002)
-        tracer = vtkStreamTracer()
-        tracer.SetInputDataObject(stream_input)
-        tracer.SetSourceData(seed_data)
-        tracer.SetIntegrator(vtkRungeKutta45())
-        tracer.SetIntegrationDirectionToForward()
-        tracer.SetMaximumPropagation(domain_size * length_factor)
-        tracer.SetInitialIntegrationStep(initial_step)
-        tracer.SetMinimumIntegrationStep(max(initial_step * 0.1, domain_size * 0.0002))
-        tracer.SetMaximumIntegrationStep(max(initial_step * 2.5, domain_size * 0.005))
-        if hasattr(tracer, "SetMaximumError"):
-            tracer.SetMaximumError(1e-6)
-        tracer.SetComputeVorticity(False)
-        tracer.SetInputArrayToProcess(0, 0, 0, vtk.vtkDataObject.FIELD_ASSOCIATION_POINTS, "U")
-        tracer.Update()
-        streamline_output = tracer.GetOutput()
-        if streamline_output.GetNumberOfLines() == 0:
-            raise RuntimeError("VTK StreamTracer 没有生成有效流线。")
-        self._add_streamline_speed_array(streamline_output, "U")
-        return streamline_output, main_axis, vtk_seed_points.GetNumberOfPoints(), (
-            float(speeds[usable].min()),
-            float(speeds[usable].max()),
-        )
+        # ── 3. 流线追踪 (Plan.md 第45-74行) ──
+        def _trace_streamlines(seed_source, direction: str):
+            stream_tracer = vtkStreamTracer()
+            stream_tracer.SetInputData(grid_data)
+            stream_tracer.SetInputArrayToProcess(
+                0, 0, 0, vtk.vtkDataObject.FIELD_ASSOCIATION_POINTS, "U"
+            )
+            stream_tracer.SetSourceData(seed_source)
+            stream_tracer.SetMaximumPropagation(500)
+            stream_tracer.SetIntegrationStepUnit(vtk.vtkStreamTracer.LENGTH_UNIT)
+            stream_tracer.SetInitialIntegrationStep(0.1)
+            stream_tracer.SetMinimumIntegrationStep(0.01)
+            stream_tracer.SetMaximumIntegrationStep(1.0)
+            if direction == "backward":
+                stream_tracer.SetIntegrationDirectionToBackward()
+            elif direction == "both":
+                stream_tracer.SetIntegrationDirectionToBoth()
+            else:
+                stream_tracer.SetIntegrationDirectionToForward()
+            stream_tracer.Update()
+            return stream_tracer.GetOutput()
 
-    def _add_streamline_speed_array(self, streamline_output, vector_name: str) -> None:
-        vector_array = streamline_output.GetPointData().GetArray(vector_name)
-        if vector_array is None:
-            return
-        vectors = vtk_to_numpy(vector_array)
-        if vectors.size == 0:
-            return
-        if vectors.ndim == 1:
-            speed_values = np.abs(vectors.astype(float))
+        def _trace_all_directions(seed_source, directions=("forward",)):
+            for direction in directions:
+                traced = _trace_streamlines(seed_source, direction)
+                if traced is not None and traced.GetNumberOfLines() > 0:
+                    return traced
+            return None
+
+        flow_direction = self._mean_flow_direction(grid_data)
+        near_wall_seed_geometry = self._near_wall_seed_shell(seed_geometry, flow_direction)
+        stream_lines = _trace_all_directions(near_wall_seed_geometry)
+        if stream_lines is None or stream_lines.GetNumberOfLines() == 0:
+            stream_lines = _trace_all_directions(self._offset_seed_surface(seed_geometry, flow_direction=flow_direction))
+        if stream_lines is None or stream_lines.GetNumberOfLines() == 0:
+            raise RuntimeError("几何体表面附近没有生成下游方向有效流线，请确认速度场结果和几何体边界面存在。")
+
+        # ── 4. 速度大小着色 (Plan.md 第77-85行: 优先 VelocityMagnitude, fallback |U|) ──
+        speed_range = (0.0, 1.0)
+        vel_mag = stream_lines.GetPointData().GetArray("VelocityMagnitude")
+        if vel_mag is not None:
+            rng = vel_mag.GetRange()
+            speed_range = (float(rng[0]), float(rng[1]))
         else:
-            speed_values = np.linalg.norm(vectors[:, : min(vectors.shape[1], 3)], axis=1)
-        speed_array = numpy_to_vtk(speed_values.astype(float), deep=True)
-        speed_array.SetName("U_mag")
-        streamline_output.GetPointData().AddArray(speed_array)
-        streamline_output.GetPointData().SetActiveScalars("U_mag")
+            u_array = stream_lines.GetPointData().GetArray("U")
+            if u_array is not None:
+                vecs = vtk_to_numpy(u_array)
+                if vecs.ndim == 2 and vecs.shape[1] >= 3:
+                    speeds = np.linalg.norm(vecs[:, :3], axis=1)
+                else:
+                    speeds = np.abs(vecs.astype(float))
+                smin, smax = float(speeds.min()), float(speeds.max())
+                speed_array = numpy_to_vtk(speeds.astype(float), deep=True)
+                speed_array.SetName("U_mag")
+                stream_lines.GetPointData().AddArray(speed_array)
+                stream_lines.GetPointData().SetActiveScalars("U_mag")
+                speed_range = (smin, smax)
+
+        return stream_lines, grid_data, f"{seed_label} 近壁层", near_wall_seed_geometry.GetNumberOfPoints() or seed_count, speed_range
+
+    def _mean_flow_direction(self, grid_data) -> np.ndarray | None:
+        u_array = grid_data.GetPointData().GetArray("U")
+        if u_array is None:
+            u_array = grid_data.GetCellData().GetArray("U")
+        if u_array is None:
+            return None
+        vectors = vtk_to_numpy(u_array)
+        if vectors.ndim != 2 or vectors.shape[1] < 3:
+            return None
+        vectors = vectors[:, :3].astype(float)
+        speeds = np.linalg.norm(vectors, axis=1)
+        usable = speeds > max(float(speeds.max()) * 0.02, 1e-12) if speeds.size else []
+        if not np.any(usable):
+            return None
+        direction = vectors[usable].mean(axis=0)
+        norm = float(np.linalg.norm(direction))
+        if norm <= 1e-12:
+            return None
+        return direction / norm
+
+    def _keep_streamlines_near_geometry(self, stream_lines, seed_geometry):
+        bounds = seed_geometry.GetBounds()
+        if bounds is None or not all(np.isfinite(bounds)):
+            return stream_lines
+        diagonal = float(
+            np.linalg.norm(
+                [
+                    bounds[1] - bounds[0],
+                    bounds[3] - bounds[2],
+                    bounds[5] - bounds[4],
+                ]
+            )
+        )
+        max_distance = max(diagonal * 0.16, 1e-5)
+        try:
+            distance = vtk.vtkImplicitPolyDataDistance()
+            distance.SetInput(seed_geometry)
+        except Exception:
+            return stream_lines
+
+        source_points = stream_lines.GetPoints()
+        source_lines = stream_lines.GetLines()
+        if source_points is None or source_lines is None:
+            return stream_lines
+        source_point_data = stream_lines.GetPointData()
+        speed_array = source_point_data.GetArray("U_mag") or source_point_data.GetArray("VelocityMagnitude")
+        vector_array = source_point_data.GetArray("U")
+
+        output_points = vtk.vtkPoints()
+        output_lines = vtk.vtkCellArray()
+        output_speeds = vtk.vtkFloatArray()
+        output_speeds.SetName("U_mag")
+        output_vectors = vtk.vtkDoubleArray()
+        output_vectors.SetName("U")
+        output_vectors.SetNumberOfComponents(3)
+
+        raw_lines = vtk_to_numpy(source_lines.GetData())
+        index = 0
+        while index < len(raw_lines):
+            count = int(raw_lines[index])
+            index += 1
+            ids = raw_lines[index : index + count].astype(int)
+            index += count
+            kept_ids = []
+            for point_id in ids:
+                point = source_points.GetPoint(int(point_id))
+                if abs(float(distance.EvaluateFunction(point))) > max_distance:
+                    break
+                kept_ids.append(int(point_id))
+            if len(kept_ids) < 2:
+                continue
+            polyline = vtk.vtkPolyLine()
+            polyline.GetPointIds().SetNumberOfIds(len(kept_ids))
+            for local_index, old_id in enumerate(kept_ids):
+                point = source_points.GetPoint(old_id)
+                new_id = output_points.InsertNextPoint(point)
+                if speed_array is not None:
+                    output_speeds.InsertNextValue(float(speed_array.GetTuple1(old_id)))
+                elif vector_array is not None:
+                    vector = vector_array.GetTuple3(old_id)
+                    output_speeds.InsertNextValue(float(np.linalg.norm(vector)))
+                else:
+                    output_speeds.InsertNextValue(0.0)
+                if vector_array is not None:
+                    output_vectors.InsertNextTuple(vector_array.GetTuple3(old_id))
+                else:
+                    output_vectors.InsertNextTuple((0.0, 0.0, 0.0))
+                polyline.GetPointIds().SetId(local_index, new_id)
+            output_lines.InsertNextCell(polyline)
+
+        clipped = vtk.vtkPolyData()
+        clipped.SetPoints(output_points)
+        clipped.SetLines(output_lines)
+        clipped.GetPointData().AddArray(output_speeds)
+        clipped.GetPointData().SetActiveScalars("U_mag")
+        if output_vectors.GetNumberOfTuples() > 0:
+            clipped.GetPointData().AddArray(output_vectors)
+        return clipped
+
+    def _load_geometry_seed_surface(self, vtk_dir: Path):
+        assets = [
+            asset
+            for asset in self._context.geometry_import_service.list_assets(self._current_project)
+            if asset.format.upper() == "STL" and asset.stored_path.exists()
+        ]
+        if not assets:
+            raise RuntimeError("未找到已导入的 STL 几何体。")
+
+        pieces = []
+        labels = []
+        for asset in assets:
+            poly_data = self._read_exported_geometry_surface(vtk_dir, asset)
+            source_label = asset.stored_path.stem
+            if poly_data is None or poly_data.GetNumberOfPoints() == 0:
+                poly_data = self._read_stl_seed_surface(asset.stored_path)
+                source_label = f"{asset.stored_path.stem} (STL)"
+            if poly_data is None or poly_data.GetNumberOfPoints() == 0:
+                continue
+            pieces.append(poly_data)
+            labels.append(source_label)
+
+        if not pieces:
+            return None, ""
+        if len(pieces) == 1:
+            return pieces[0], labels[0]
+        append_filter = vtk.vtkAppendPolyData()
+        for piece in pieces:
+            append_filter.AddInputData(piece)
+        append_filter.Update()
+        clean = vtk.vtkCleanPolyData()
+        clean.SetInputConnection(append_filter.GetOutputPort())
+        clean.Update()
+        return clean.GetOutput(), " + ".join(labels)
+
+    def _read_exported_geometry_surface(self, vtk_dir: Path, asset):
+        names = {
+            asset.stored_path.stem.lower(),
+            asset.stored_path.name.lower(),
+            asset.name.lower(),
+            Path(asset.name).stem.lower(),
+        }
+        surfaces_dir = vtk_dir / "surfaces"
+        if surfaces_dir.exists():
+            for vtp_path in sorted(surfaces_dir.glob("*.vtp")):
+                stem = vtp_path.stem.lower()
+                if stem in names or any(name and name in stem for name in names):
+                    reader = vtk.vtkXMLPolyDataReader()
+                    reader.SetFileName(str(vtp_path))
+                    reader.Update()
+                    return reader.GetOutput()
+
+        for child in sorted(vtk_dir.iterdir()):
+            if not child.is_dir() or child.name in {"volumes", "surfaces"}:
+                continue
+            child_name = child.name.lower()
+            if child_name not in names and not any(name and name in child_name for name in names):
+                continue
+            vtk_files = sorted(child.glob("*.vtk"))
+            if not vtk_files:
+                continue
+            reader = vtk.vtkDataSetReader()
+            reader.SetFileName(str(vtk_files[-1]))
+            reader.Update()
+            return self._as_poly_data(reader.GetOutput())
+        return None
+
+    def _read_stl_seed_surface(self, stl_path: Path):
+        reader = vtk.vtkSTLReader()
+        reader.SetFileName(str(stl_path))
+        reader.Update()
+        return reader.GetOutput()
+
+    def _as_poly_data(self, data_object):
+        if data_object is None:
+            return None
+        if isinstance(data_object, vtk.vtkPolyData):
+            return data_object
+        geometry_filter = vtk.vtkGeometryFilter()
+        geometry_filter.SetInputDataObject(data_object)
+        geometry_filter.Update()
+        return geometry_filter.GetOutput()
+
+    def _near_wall_seed_shell(self, seed_geometry, flow_direction: np.ndarray | None = None):
+        pieces = []
+        for offset_ratio in (0.004, 0.010, 0.018):
+            shifted = self._offset_seed_surface(
+                seed_geometry,
+                offset_ratio=offset_ratio,
+                flow_direction=flow_direction,
+            )
+            if shifted is not None and shifted.GetNumberOfPoints() > 0:
+                pieces.append(shifted)
+        if not pieces:
+            return seed_geometry
+        append_filter = vtk.vtkAppendPolyData()
+        for piece in pieces:
+            append_filter.AddInputData(piece)
+        append_filter.Update()
+        return append_filter.GetOutput()
+
+    def _offset_seed_surface(
+        self,
+        seed_geometry,
+        offset_ratio: float = 0.01,
+        flow_direction: np.ndarray | None = None,
+    ):
+        bounds = seed_geometry.GetBounds()
+        if bounds is None or not all(np.isfinite(bounds)):
+            return seed_geometry
+        center = np.array(
+            [
+                (bounds[0] + bounds[1]) * 0.5,
+                (bounds[2] + bounds[3]) * 0.5,
+                (bounds[4] + bounds[5]) * 0.5,
+            ],
+            dtype=float,
+        )
+        diagonal = float(
+            np.linalg.norm(
+                [
+                    bounds[1] - bounds[0],
+                    bounds[3] - bounds[2],
+                    bounds[5] - bounds[4],
+                ]
+            )
+        )
+        offset = max(diagonal * float(offset_ratio), 1e-5)
+        shifted_points = vtk.vtkPoints()
+        source_points = seed_geometry.GetPoints()
+        for index in range(seed_geometry.GetNumberOfPoints()):
+            point = np.array(source_points.GetPoint(index), dtype=float)
+            direction = point - center
+            norm = float(np.linalg.norm(direction))
+            if norm > 1e-12:
+                unit_direction = direction / norm
+                if flow_direction is not None and float(np.dot(unit_direction, flow_direction)) > 0.25:
+                    continue
+                point = point + unit_direction * offset
+            shifted_points.InsertNextPoint(float(point[0]), float(point[1]), float(point[2]))
+        shifted = vtk.vtkPolyData()
+        shifted.SetPoints(shifted_points)
+        return shifted
 
     def _ensure_native_vtk_viewer(self) -> None:
         if self._native_vtk_viewer is None:
