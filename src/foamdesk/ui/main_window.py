@@ -161,7 +161,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._init_modeling_state()
         self._build_ui()
         for obj in self._modeling_objects:
-            self._modeling_viewport._renderer.AddActor(obj.actor)
+            self._add_modeling_object_actors(obj)
             self._apply_transform(obj)
         self._rebuild_tree()
         self._apply_settings_theme()
@@ -633,8 +633,8 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         solver_grp = QGroupBox("求解器基础")
         solver_form = QFormLayout(solver_grp)
         self._cfg_flow_type_combo = QComboBox()
-        self._cfg_flow_type_combo.addItem("不可压缩", "incompressible")
-        self._cfg_flow_type_combo.addItem("可压缩", "compressible")
+        self._cfg_flow_type_combo.addItem("不可压缩（低速/常密度）", "incompressible")
+        self._cfg_flow_type_combo.addItem("可压缩（高速/密度变化）", "compressible")
         self._cfg_flow_type_combo.currentIndexChanged.connect(self._on_physics_model_changed)
         self._cfg_time_type_combo = QComboBox()
         self._cfg_time_type_combo.addItem("稳态", "steady")
@@ -658,7 +658,8 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         solver_form.addRow("时间步长 (s)", self._cfg_delta_t)
         solver_form.addRow("输出间隔 (步)", self._cfg_write_interval)
         solver_form.addRow("初始速度 (m/s)", self._cfg_init_velocity)
-        solver_form.addRow("初始压力 (Pa)", self._cfg_init_pressure)
+        self._cfg_pressure_label = QLabel("初始压力 p (m2/s2)")
+        solver_form.addRow(self._cfg_pressure_label, self._cfg_init_pressure)
         left_col.addWidget(solver_grp)
 
         # === fluid properties group ===
@@ -686,11 +687,25 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         fluid_form.addRow("密度 rho (kg/m3)", self._cfg_density)
         fluid_form.addRow("运动粘度 nu (m2/s)", self._cfg_nu)
         fluid_form.addRow("动力粘度 mu", mu_row)
-        fluid_form.addRow("初始温度 T (K)", self._cfg_temperature)
-        fluid_form.addRow("定压比热 Cp", self._cfg_cp)
-        fluid_form.addRow("气体常数 R", self._cfg_gas_r)
-        fluid_form.addRow("Prandtl 数", self._cfg_prandtl)
         left_col.addWidget(fluid_grp)
+
+        self._cfg_compressible_group = QGroupBox("可压缩参数")
+        compressible_form = QFormLayout(self._cfg_compressible_group)
+        self._cfg_temperature_label = QLabel("初始温度 T (K)")
+        self._cfg_cp_label = QLabel("定压比热 Cp")
+        self._cfg_gas_r_label = QLabel("气体常数 R")
+        self._cfg_prandtl_label = QLabel("Prandtl 数")
+        compressible_form.addRow(self._cfg_temperature_label, self._cfg_temperature)
+        compressible_form.addRow(self._cfg_cp_label, self._cfg_cp)
+        compressible_form.addRow(self._cfg_gas_r_label, self._cfg_gas_r)
+        compressible_form.addRow(self._cfg_prandtl_label, self._cfg_prandtl)
+        self._cfg_compressible_rows = [
+            (self._cfg_temperature_label, self._cfg_temperature),
+            (self._cfg_cp_label, self._cfg_cp),
+            (self._cfg_gas_r_label, self._cfg_gas_r),
+            (self._cfg_prandtl_label, self._cfg_prandtl),
+        ]
+        left_col.addWidget(self._cfg_compressible_group)
 
         # === turbulence model group ===
         turb_grp = QGroupBox("湍流模型")
@@ -1060,7 +1075,9 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         is_steady = solver in ("simpleFoam",)
         is_compressible = solver in {"rhoSimpleFoam", "rhoPimpleFoam"}
         outer_correctors = "1" if is_steady else ncorrectors
-        momentum_predictor = "no" if is_steady else "yes"
+        # 始终开启动量预测，否则求解器不会求解/打印速度方程，
+        # 残差曲线就只剩压强 p，没有 Ux/Uy/Uz。
+        momentum_predictor = "yes"
         extra_solvers = ""
         if is_compressible:
             extra_solvers = (
@@ -1440,6 +1457,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         vp_layout = QVBoxLayout(viewport_wrapper)
         vp_layout.setContentsMargins(0, 0, 0, 0)
         self._modeling_viewport = NativeVtkPreviewWidget(viewport_wrapper, background=(0.94, 0.94, 0.94))
+        self._install_interactive_edit_handlers()
         vp_layout.addWidget(self._modeling_viewport, 1)
         body.addWidget(viewport_wrapper)
 
@@ -1447,12 +1465,25 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         prop_wrapper = QWidget()
         prop_wrapper.setStyleSheet("background: #252526;")
         prop_wrapper.setMinimumWidth(300)
-        prop_layout = QVBoxLayout(prop_wrapper)
-        prop_layout.setContentsMargins(12, 12, 12, 12)
-        prop_layout.setSpacing(10)
+        prop_outer_layout = QVBoxLayout(prop_wrapper)
+        prop_outer_layout.setContentsMargins(12, 12, 12, 12)
+        prop_outer_layout.setSpacing(10)
         prop_title = QLabel("属性")
         prop_title.setStyleSheet("font-size: 15px; font-weight: 600;")
-        prop_layout.addWidget(prop_title)
+        prop_outer_layout.addWidget(prop_title)
+
+        prop_scroll = QScrollArea()
+        prop_scroll.setWidgetResizable(True)
+        prop_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        prop_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        prop_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        prop_content = QWidget()
+        prop_content.setStyleSheet("background: #252526;")
+        prop_layout = QVBoxLayout(prop_content)
+        prop_layout.setContentsMargins(0, 0, 0, 0)
+        prop_layout.setSpacing(10)
+        prop_scroll.setWidget(prop_content)
+        prop_outer_layout.addWidget(prop_scroll, 1)
 
         self._modeling_prop_name = QLineEdit()
         self._modeling_prop_name.setPlaceholderText("模型名称")
@@ -1752,6 +1783,8 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
                     m = re.search(pattern, fp.read_text(encoding="utf-8"))
                     if m: widget.setText(m.group(1).strip())
                 except Exception: pass
+        self._sync_material_preset_to_values()
+        self._update_compressible_controls()
 
     def _on_material_preset_changed(self) -> None:
         presets = {
@@ -1771,8 +1804,37 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             rho = float(self._cfg_density.text().strip())
             nu = float(self._cfg_nu.text().strip())
             self._cfg_mu.setText(f"{rho * nu:.6g}")
+            self._sync_material_preset_to_values()
         except ValueError:
             pass
+
+    def _sync_material_preset_to_values(self) -> None:
+        if not hasattr(self, "_cfg_material_combo"):
+            return
+        presets = {
+            "air": (1.225, 1.48e-5, 1.812e-5),
+            "water": (1000.0, 1e-6, 0.001),
+            "oil": (880.0, 5e-5, 0.044),
+        }
+        key = self._cfg_material_combo.currentData()
+        if key not in presets:
+            return
+        try:
+            values = (
+                float(self._cfg_density.text().strip()),
+                float(self._cfg_nu.text().strip()),
+                float(self._cfg_mu.text().strip()),
+            )
+        except ValueError:
+            return
+        expected = presets[key]
+        matched = all(abs(a - b) <= max(abs(b), 1.0) * 1e-6 for a, b in zip(values, expected))
+        if not matched:
+            index = self._cfg_material_combo.findData("custom")
+            if index >= 0:
+                self._cfg_material_combo.blockSignals(True)
+                self._cfg_material_combo.setCurrentIndex(index)
+                self._cfg_material_combo.blockSignals(False)
 
     def _solver_options_for_model(self) -> list[tuple[str, str]]:
         flow = self._cfg_flow_type_combo.currentData() if hasattr(self, "_cfg_flow_type_combo") else "incompressible"
@@ -1810,7 +1872,14 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         if not hasattr(self, "_cfg_temperature"):
             return
         is_compressible = self._cfg_flow_type_combo.currentData() == "compressible"
-        for widget in (self._cfg_temperature, self._cfg_cp, self._cfg_gas_r, self._cfg_prandtl):
+        if hasattr(self, "_cfg_pressure_label"):
+            unit = "Pa" if is_compressible else "m2/s2"
+            self._cfg_pressure_label.setText(f"初始压力 p ({unit})")
+        if hasattr(self, "_cfg_compressible_group"):
+            self._cfg_compressible_group.setVisible(is_compressible)
+        for label, widget in getattr(self, "_cfg_compressible_rows", []):
+            label.setVisible(is_compressible)
+            widget.setVisible(is_compressible)
             widget.setEnabled(is_compressible)
 
     def _on_physics_model_changed(self) -> None:

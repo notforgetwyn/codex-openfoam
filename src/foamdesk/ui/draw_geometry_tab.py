@@ -28,6 +28,8 @@ class GeometryObject:
     rotation: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     scale: list[float] = field(default_factory=lambda: [1.0, 1.0, 1.0])
     color: tuple[float, float, float] = (0.25, 0.74, 1.0)
+    wire_actor: object | None = None
+    point_actor: object | None = None
 
 
 def _create_cube_source() -> vtk.vtkCubeSource:
@@ -193,19 +195,105 @@ class DrawGeometryLogicMixin:
     def _init_modeling_state(self) -> None:
         if hasattr(self, "_modeling_viewport") and self._modeling_viewport is not None:
             for obj in self._modeling_objects:
-                self._modeling_viewport._renderer.RemoveActor(obj.actor)
+                self._remove_modeling_object_actors(obj)
         self._modeling_objects: list[GeometryObject] = []
         self._modeling_selected_index: int = -1
         self._modeling_counter: dict[str, int] = {}
         self._modeling_active_section: str = "stl"
+        self._interactive_edit_mode: str | None = None
+        self._interactive_edit_drag: dict | None = None
+        self._interactive_edit_observer_tags: list[int] = []
+        self._interactive_edit_old_style = None
+        self._interactive_edit_handlers_installed = False
         self._load_modeling_state()
         if hasattr(self, "_modeling_viewport") and self._modeling_viewport is not None:
             for obj in self._modeling_objects:
-                self._modeling_viewport._renderer.AddActor(obj.actor)
+                self._add_modeling_object_actors(obj)
                 self._apply_transform(obj)
             if hasattr(self, "_modeling_tree"):
                 self._rebuild_tree()
             self._modeling_viewport.render()
+
+    def _modeling_display_polydata(self, source):
+        if isinstance(source, vtk.vtkPolyData):
+            source_poly_data = source
+        else:
+            source.Update()
+            source_poly_data = source.GetOutput()
+        triangle = vtk.vtkTriangleFilter()
+        triangle.SetInputData(source_poly_data)
+        triangle.Update()
+        clean = vtk.vtkCleanPolyData()
+        clean.SetInputData(triangle.GetOutput())
+        clean.Update()
+        output = vtk.vtkPolyData()
+        output.DeepCopy(clean.GetOutput())
+        return output
+
+    def _create_modeling_actor_bundle(
+        self,
+        source,
+        color: tuple[float, float, float] = (0.25, 0.74, 1.0),
+        opacity: float = 1.0,
+        visible: bool = True,
+    ):
+        display_poly_data = self._modeling_display_polydata(source)
+
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputData(display_poly_data)
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetColor(*color)
+        actor.GetProperty().SetOpacity(opacity)
+        actor.GetProperty().SetInterpolationToPhong()
+        actor.GetProperty().EdgeVisibilityOn()
+        actor.GetProperty().SetEdgeColor(0.02, 0.06, 0.08)
+        actor.GetProperty().SetLineWidth(0.6)
+        actor.SetVisibility(visible)
+
+        edge_filter = vtk.vtkExtractEdges()
+        edge_filter.SetInputData(display_poly_data)
+        edge_mapper = vtk.vtkPolyDataMapper()
+        edge_mapper.SetInputConnection(edge_filter.GetOutputPort())
+        wire_actor = vtk.vtkActor()
+        wire_actor.SetMapper(edge_mapper)
+        wire_actor.GetProperty().SetColor(0.0, 0.0, 0.0)
+        wire_actor.GetProperty().SetLineWidth(1.05)
+        wire_actor.GetProperty().SetOpacity(0.85)
+        wire_actor.SetVisibility(visible)
+
+        vertex_filter = vtk.vtkVertexGlyphFilter()
+        vertex_filter.SetInputData(display_poly_data)
+        point_mapper = vtk.vtkPolyDataMapper()
+        point_mapper.SetInputConnection(vertex_filter.GetOutputPort())
+        point_actor = vtk.vtkActor()
+        point_actor.SetMapper(point_mapper)
+        point_actor.GetProperty().SetColor(1.0, 0.96, 0.30)
+        point_actor.GetProperty().SetPointSize(4.2)
+        point_actor.GetProperty().SetOpacity(0.92)
+        point_actor.SetVisibility(visible)
+
+        return actor, wire_actor, point_actor
+
+    def _add_modeling_object_actors(self, obj: GeometryObject) -> None:
+        if not hasattr(self, "_modeling_viewport") or self._modeling_viewport is None:
+            return
+        for actor in (obj.actor, obj.wire_actor, obj.point_actor):
+            if actor is not None:
+                self._modeling_viewport._renderer.AddActor(actor)
+
+    def _remove_modeling_object_actors(self, obj: GeometryObject) -> None:
+        if not hasattr(self, "_modeling_viewport") or self._modeling_viewport is None:
+            return
+        for actor in (obj.actor, obj.wire_actor, obj.point_actor):
+            if actor is not None:
+                self._modeling_viewport._renderer.RemoveActor(actor)
+
+    def _set_modeling_object_visible(self, obj: GeometryObject, visible: bool) -> None:
+        obj.visible = visible
+        for actor in (obj.actor, obj.wire_actor, obj.point_actor):
+            if actor is not None:
+                actor.SetVisibility(visible)
 
     # ------------------------------------------------------------------
     # persistence
@@ -299,19 +387,15 @@ class DrawGeometryLogicMixin:
                 src = factory()
             else:
                 continue
-            mapper = vtk.vtkPolyDataMapper()
-            if isinstance(src, vtk.vtkPolyData):
-                mapper.SetInputData(src)
-            else:
-                mapper.SetInputConnection(src.GetOutputPort())
-            actor = vtk.vtkActor()
-            actor.SetMapper(mapper)
-            actor.GetProperty().SetColor(*d.get("color", [0.25, 0.74, 1.0]))
-            actor.GetProperty().SetOpacity(d.get("opacity", 1.0))
-            actor.GetProperty().SetInterpolationToPhong()
-            actor.SetVisibility(d.get("visible", True))
+            actor, wire_actor, point_actor = self._create_modeling_actor_bundle(
+                src,
+                tuple(d.get("color", [0.25, 0.74, 1.0])),
+                d.get("opacity", 1.0),
+                d.get("visible", True),
+            )
             obj = GeometryObject(
                 name=d["name"], kind=kind, actor=actor, source=src,
+                wire_actor=wire_actor, point_actor=point_actor,
                 section=d.get("section", "stl"),
                 position=d.get("position", [0, 0, 0]),
                 rotation=d.get("rotation", [0, 0, 0]),
@@ -333,19 +417,15 @@ class DrawGeometryLogicMixin:
         name = f"{label}{self._modeling_counter[kind]}"
 
         source = factory()
-        mapper = vtk.vtkPolyDataMapper()
-        if isinstance(source, vtk.vtkPolyData):
-            mapper.SetInputData(source)
-        else:
-            mapper.SetInputConnection(source.GetOutputPort())
-        actor = vtk.vtkActor()
-        actor.SetMapper(mapper)
-        actor.GetProperty().SetColor(0.25, 0.74, 1.0)
-        actor.GetProperty().SetInterpolationToPhong()
+        actor, wire_actor, point_actor = self._create_modeling_actor_bundle(source)
 
-        obj = GeometryObject(name=name, kind=kind, actor=actor, source=source, section=self._modeling_active_section)
+        obj = GeometryObject(
+            name=name, kind=kind, actor=actor, source=source,
+            wire_actor=wire_actor, point_actor=point_actor,
+            section=self._modeling_active_section,
+        )
         self._modeling_objects.append(obj)
-        self._modeling_viewport._renderer.AddActor(actor)
+        self._add_modeling_object_actors(obj)
 
         self._rebuild_tree()
         self._select_object(len(self._modeling_objects) - 1)
@@ -357,7 +437,7 @@ class DrawGeometryLogicMixin:
         if self._modeling_selected_index < 0 or self._modeling_selected_index >= len(self._modeling_objects):
             return
         obj = self._modeling_objects.pop(self._modeling_selected_index)
-        self._modeling_viewport._renderer.RemoveActor(obj.actor)
+        self._remove_modeling_object_actors(obj)
         self._modeling_selected_index = -1
         self._rebuild_tree()
         self._load_properties()
@@ -426,8 +506,7 @@ class DrawGeometryLogicMixin:
         if i < 0 or i >= len(self._modeling_objects):
             return
         visible = item.checkState(0) == Qt.CheckState.Checked
-        self._modeling_objects[i].visible = visible
-        self._modeling_objects[i].actor.SetVisibility(visible)
+        self._set_modeling_object_visible(self._modeling_objects[i], visible)
         self._modeling_viewport.render()
         self._save_modeling_state_if_ready()
 
@@ -478,22 +557,15 @@ class DrawGeometryLogicMixin:
         if poly_data.GetNumberOfPoints() == 0:
             self._set_modeling_status("STL 文件为空或读取失败")
             return
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputData(poly_data)
-        actor = vtk.vtkActor()
-        actor.SetMapper(mapper)
-        actor.GetProperty().SetColor(0.25, 0.74, 1.0)
-        actor.GetProperty().SetInterpolationToPhong()
-        actor.GetProperty().SetEdgeVisibility(True)
-        actor.GetProperty().SetEdgeColor(0.1, 0.1, 0.1)
-        actor.GetProperty().SetLineWidth(0.5)
+        actor, wire_actor, point_actor = self._create_modeling_actor_bundle(poly_data)
         name = Path(file_path).stem
         obj = GeometryObject(
             name=name, kind="stl", actor=actor, source=poly_data,
+            wire_actor=wire_actor, point_actor=point_actor,
             section=self._modeling_active_section, source_path=file_path,
         )
         self._modeling_objects.append(obj)
-        self._modeling_viewport._renderer.AddActor(actor)
+        self._add_modeling_object_actors(obj)
         self._rebuild_tree()
         self._select_object(len(self._modeling_objects) - 1)
         self._modeling_viewport.render()
@@ -656,25 +728,36 @@ class DrawGeometryLogicMixin:
         obj.source = output
         obj.kind = "stl"
         obj.source_path = ""
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputData(output)
-        obj.actor.SetMapper(mapper)
+        old_wire_actor = obj.wire_actor
+        old_point_actor = obj.point_actor
+        for actor in (old_wire_actor, old_point_actor):
+            if actor is not None and hasattr(self, "_modeling_viewport"):
+                self._modeling_viewport._renderer.RemoveActor(actor)
+        actor, wire_actor, point_actor = self._create_modeling_actor_bundle(output, obj.color, obj.opacity, obj.visible)
+        obj.actor.SetMapper(actor.GetMapper())
+        obj.actor.GetProperty().SetColor(*obj.color)
+        obj.actor.GetProperty().SetOpacity(obj.opacity)
+        obj.actor.GetProperty().EdgeVisibilityOn()
+        obj.actor.GetProperty().SetEdgeColor(0.02, 0.06, 0.08)
+        obj.actor.GetProperty().SetLineWidth(0.6)
+        obj.wire_actor = wire_actor
+        obj.point_actor = point_actor
+        self._add_modeling_object_actors(GeometryObject(name=obj.name, kind=obj.kind, actor=None, source=obj.source, wire_actor=wire_actor, point_actor=point_actor))
         self._apply_transform(obj)
         self._save_modeling_state_if_ready()
 
-    def _ask_edit_delta(self) -> tuple[float, float, float] | None:
-        text, ok = QInputDialog.getText(self, "输入移动量", "输入 dx dy dz，例如：0.2 0 0")
-        if not ok:
-            return None
-        parts = text.replace(",", " ").split()
-        if len(parts) != 3:
-            self._set_modeling_status("移动量格式应为 dx dy dz")
-            return None
-        try:
-            return float(parts[0]), float(parts[1]), float(parts[2])
-        except ValueError:
-            self._set_modeling_status("移动量必须是数字")
-            return None
+    def _install_interactive_edit_handlers(self) -> None:
+        if getattr(self, "_interactive_edit_handlers_installed", False):
+            return
+        if not hasattr(self, "_modeling_viewport") or self._modeling_viewport is None:
+            return
+        interactor = self._modeling_viewport._interactor
+        self._interactive_edit_observer_tags = [
+            interactor.AddObserver("LeftButtonPressEvent", self._on_interactive_edit_press, 1.0),
+            interactor.AddObserver("MouseMoveEvent", self._on_interactive_edit_move, 1.0),
+            interactor.AddObserver("LeftButtonReleaseEvent", self._on_interactive_edit_release, 1.0),
+        ]
+        self._interactive_edit_handlers_installed = True
 
     def _edit_selected_vertices(self, region_type: str) -> None:
         obj = self._selected_modeling_object()
@@ -684,69 +767,158 @@ class DrawGeometryLogicMixin:
         if source_pd is None or source_pd.GetNumberOfPoints() == 0:
             self._set_modeling_status("当前几何体没有可编辑点")
             return
-        points = source_pd.GetPoints()
-        bounds = source_pd.GetBounds()
-        ranges = [max(bounds[i * 2 + 1] - bounds[i * 2], 1e-9) for i in range(3)]
-        tolerance = max(ranges) * 0.04
+        self._install_interactive_edit_handlers()
+        self._interactive_edit_mode = region_type
+        self._interactive_edit_drag = None
+        if self._interactive_edit_old_style is None:
+            self._interactive_edit_old_style = self._modeling_viewport._interactor.GetInteractorStyle()
+        self._modeling_viewport._interactor.SetInteractorStyle(vtk.vtkInteractorStyleUser())
+        labels = {"point": "点", "edge": "线", "face": "面"}
+        self._set_modeling_status(
+            f"交互式{labels.get(region_type, '面')}编辑：在 3D 视图里按住目标{labels.get(region_type, '面')}拖动，松开鼠标保存"
+        )
 
-        if region_type == "point":
-            options = [
-                f"{sx}X {sy}Y {sz}Z"
-                for sx in ("-", "+") for sy in ("-", "+") for sz in ("-", "+")
-            ]
-            title = "按点编辑"
-        elif region_type == "edge":
-            options = [
-                "-Y -Z 边", "-Y +Z 边", "+Y -Z 边", "+Y +Z 边",
-                "-X -Z 边", "-X +Z 边", "+X -Z 边", "+X +Z 边",
-                "-X -Y 边", "-X +Y 边", "+X -Y 边", "+X +Y 边",
-            ]
-            title = "按线编辑"
+    def _finish_interactive_edit_mode(self, message: str = "") -> None:
+        self._interactive_edit_drag = None
+        self._interactive_edit_mode = None
+        if self._interactive_edit_old_style is not None and hasattr(self, "_modeling_viewport"):
+            self._modeling_viewport._interactor.SetInteractorStyle(self._interactive_edit_old_style)
+        self._interactive_edit_old_style = None
+        if message:
+            self._set_modeling_status(message)
+
+    def _interactive_edit_polydata(self, obj: GeometryObject):
+        mapper = obj.actor.GetMapper() if obj.actor is not None else None
+        if mapper is not None and mapper.GetInput() is not None:
+            return mapper.GetInput()
+        return self._source_polydata(obj)
+
+    def _object_transform(self, obj: GeometryObject):
+        transform = vtk.vtkTransform()
+        transform.Translate(obj.position[0], obj.position[1], obj.position[2])
+        transform.RotateX(obj.rotation[0])
+        transform.RotateY(obj.rotation[1])
+        transform.RotateZ(obj.rotation[2])
+        transform.Scale(obj.scale[0], obj.scale[1], obj.scale[2])
+        return transform
+
+    def _local_to_world_point(self, obj: GeometryObject, point) -> np.ndarray:
+        return np.array(self._object_transform(obj).TransformPoint(point), dtype=float)
+
+    def _world_delta_to_local(self, obj: GeometryObject, delta_world: np.ndarray) -> np.ndarray:
+        transform = self._object_transform(obj)
+        transform.Inverse()
+        return np.array(transform.TransformVector(delta_world), dtype=float)
+
+    def _pick_selected_edit_ids(self, obj: GeometryObject, poly_data, cell_id: int, pick_world: np.ndarray) -> list[int]:
+        cell = poly_data.GetCell(cell_id)
+        if cell is None:
+            return []
+        point_ids = [int(cell.GetPointId(i)) for i in range(cell.GetNumberOfPoints())]
+        if not point_ids:
+            return []
+        if self._interactive_edit_mode == "face":
+            return point_ids
+        world_points = [self._local_to_world_point(obj, poly_data.GetPoint(point_id)) for point_id in point_ids]
+        if self._interactive_edit_mode == "point":
+            closest_index = int(np.argmin([np.linalg.norm(point - pick_world) for point in world_points]))
+            return [point_ids[closest_index]]
+        edge_candidates: list[tuple[float, int, int]] = []
+        for index, start_id in enumerate(point_ids):
+            end_id = point_ids[(index + 1) % len(point_ids)]
+            midpoint = (world_points[index] + world_points[(index + 1) % len(world_points)]) * 0.5
+            edge_candidates.append((float(np.linalg.norm(midpoint - pick_world)), start_id, end_id))
+        _, start_id, end_id = min(edge_candidates, key=lambda item: item[0])
+        return [start_id, end_id]
+
+    def _screen_drag_to_world_delta(self, obj: GeometryObject, start_pos: tuple[int, int], current_pos: tuple[int, int]) -> np.ndarray:
+        dx = float(current_pos[0] - start_pos[0])
+        dy = float(current_pos[1] - start_pos[1])
+        renderer = self._modeling_viewport._renderer
+        camera = renderer.GetActiveCamera()
+        view_up = np.array(camera.GetViewUp(), dtype=float)
+        view_up = view_up / max(float(np.linalg.norm(view_up)), 1e-12)
+        direction = np.array(camera.GetDirectionOfProjection(), dtype=float)
+        direction = direction / max(float(np.linalg.norm(direction)), 1e-12)
+        view_right = np.cross(direction, view_up)
+        view_right = view_right / max(float(np.linalg.norm(view_right)), 1e-12)
+        bounds = obj.actor.GetBounds() if obj.actor is not None else None
+        if bounds is None or not all(np.isfinite(bounds)):
+            scale = 0.002
         else:
-            options = ["-X 面", "+X 面", "-Y 面", "+Y 面", "-Z 面", "+Z 面"]
-            title = "按面拉伸"
-        option, ok = QInputDialog.getItem(self, title, "选择要移动的区域", options, 0, False)
-        if not ok:
-            return
-        delta = self._ask_edit_delta()
-        if delta is None:
-            return
+            diagonal = float(np.linalg.norm([bounds[1] - bounds[0], bounds[3] - bounds[2], bounds[5] - bounds[4]]))
+            width, height = self._modeling_viewport._vtk_widget.GetRenderWindow().GetSize()
+            scale = diagonal / max(float(max(width, height)), 1.0) * 1.6
+        return (view_right * dx + view_up * dy) * scale
 
-        def near_axis(point, axis: int, side: str) -> bool:
-            target = bounds[axis * 2] if side == "-" else bounds[axis * 2 + 1]
-            return abs(point[axis] - target) <= tolerance
-
-        selected_ids: list[int] = []
-        for point_id in range(points.GetNumberOfPoints()):
-            point = points.GetPoint(point_id)
-            if region_type == "point":
-                sx, sy, sz = option.split()
-                selected = near_axis(point, 0, sx[0]) and near_axis(point, 1, sy[0]) and near_axis(point, 2, sz[0])
-            elif region_type == "edge":
-                selected = True
-                for token in option.split()[:2]:
-                    axis = "XYZ".index(token[1])
-                    selected = selected and near_axis(point, axis, token[0])
-            else:
-                token = option.split()[0]
-                selected = near_axis(point, "XYZ".index(token[1]), token[0])
-            if selected:
-                selected_ids.append(point_id)
+    def _on_interactive_edit_press(self, _obj, _event) -> None:
+        if not self._interactive_edit_mode:
+            return
+        obj = self._selected_modeling_object()
+        if obj is None:
+            return
+        x, y = self._modeling_viewport._interactor.GetEventPosition()
+        picker = vtk.vtkCellPicker()
+        picker.SetTolerance(0.01)
+        if not picker.Pick(x, y, 0, self._modeling_viewport._renderer):
+            self._set_modeling_status("没有点中当前几何体，请在模型表面、边线或顶点附近按住拖动")
+            return
+        picked_actor = picker.GetActor()
+        if picked_actor not in (obj.actor, obj.wire_actor, obj.point_actor):
+            self._set_modeling_status("请拖动当前选中的几何体")
+            return
+        poly_data = self._interactive_edit_polydata(obj)
+        cell_id = int(picker.GetCellId())
+        if poly_data is None or cell_id < 0:
+            return
+        pick_world = np.array(picker.GetPickPosition(), dtype=float)
+        selected_ids = self._pick_selected_edit_ids(obj, poly_data, cell_id, pick_world)
         if not selected_ids:
-            self._set_modeling_status("没有找到可编辑的点，换一个区域试试")
+            self._set_modeling_status("没有找到可拖动的点")
             return
+        self._interactive_edit_drag = {
+            "object": obj,
+            "poly_data": poly_data,
+            "selected_ids": selected_ids,
+            "start_pos": (int(x), int(y)),
+            "base_points": np.array([poly_data.GetPoint(point_id) for point_id in range(poly_data.GetNumberOfPoints())], dtype=float),
+        }
 
+    def _on_interactive_edit_move(self, _obj, _event) -> None:
+        drag = self._interactive_edit_drag
+        if not drag:
+            return
+        obj = drag["object"]
+        poly_data = drag["poly_data"]
+        x, y = self._modeling_viewport._interactor.GetEventPosition()
+        delta_world = self._screen_drag_to_world_delta(obj, drag["start_pos"], (int(x), int(y)))
+        delta_local = self._world_delta_to_local(obj, delta_world)
+        points = vtk.vtkPoints()
+        base_points = drag["base_points"]
+        selected_ids = set(drag["selected_ids"])
+        for point_id, point in enumerate(base_points):
+            moved = point + delta_local if point_id in selected_ids else point
+            points.InsertNextPoint(float(moved[0]), float(moved[1]), float(moved[2]))
+        poly_data.SetPoints(points)
+        poly_data.Modified()
+        for actor in (obj.actor, obj.wire_actor, obj.point_actor):
+            if actor is not None and actor.GetMapper() is not None:
+                actor.GetMapper().Modified()
+        self._modeling_viewport.render()
+
+    def _on_interactive_edit_release(self, _obj, _event) -> None:
+        drag = self._interactive_edit_drag
+        if not drag:
+            return
+        obj = drag["object"]
         edited = vtk.vtkPolyData()
-        edited.DeepCopy(source_pd)
-        edited_points = vtk.vtkPoints()
-        edited_points.DeepCopy(points)
-        for point_id in selected_ids:
-            x, y, z = edited_points.GetPoint(point_id)
-            edited_points.SetPoint(point_id, x + delta[0], y + delta[1], z + delta[2])
-        edited.SetPoints(edited_points)
+        edited.DeepCopy(drag["poly_data"])
+        moved_count = len(drag["selected_ids"])
         self._replace_object_polydata(obj, edited)
         self._modeling_viewport.render()
-        self._set_modeling_status(f"{title}完成：移动 {len(selected_ids)} 个点")
+        labels = {"point": "点", "edge": "线", "face": "面"}
+        mode_label = labels.get(self._interactive_edit_mode or "", "面")
+        self._finish_interactive_edit_mode(f"交互式{mode_label}编辑完成：移动 {moved_count} 个点")
 
     def _triangulated_polydata(self, poly_data):
         triangle = vtk.vtkTriangleFilter()
@@ -788,24 +960,19 @@ class DrawGeometryLogicMixin:
             self._set_modeling_status("布尔运算没有生成有效结果，请确认两个模型封闭且存在相交关系")
             return
         result_name = self._unique_modeling_name(f"{target.name}_{operation}_{tool.name}")
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputData(output)
-        actor = vtk.vtkActor()
-        actor.SetMapper(mapper)
-        actor.GetProperty().SetColor(*target.color)
-        actor.GetProperty().SetOpacity(target.opacity)
-        actor.GetProperty().SetInterpolationToPhong()
+        actor, wire_actor, point_actor = self._create_modeling_actor_bundle(output, target.color, target.opacity)
         result = GeometryObject(
             name=result_name,
             kind="stl",
             actor=actor,
             source=output,
+            wire_actor=wire_actor, point_actor=point_actor,
             section=target.section,
             color=target.color,
             opacity=target.opacity,
         )
         self._modeling_objects.append(result)
-        self._modeling_viewport._renderer.AddActor(actor)
+        self._add_modeling_object_actors(result)
         self._rebuild_tree()
         self._select_object(len(self._modeling_objects) - 1)
         self._modeling_viewport.render()
@@ -886,7 +1053,9 @@ class DrawGeometryLogicMixin:
         transform.RotateY(obj.rotation[1])
         transform.RotateZ(obj.rotation[2])
         transform.Scale(obj.scale[0], obj.scale[1], obj.scale[2])
-        obj.actor.SetUserTransform(transform)
+        for actor in (obj.actor, obj.wire_actor, obj.point_actor):
+            if actor is not None:
+                actor.SetUserTransform(transform)
         self._modeling_viewport.render()
 
     def _on_color_pick(self) -> None:

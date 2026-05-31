@@ -567,9 +567,13 @@ class NativeVtkViewerDialog(QDialog):
     def play_animation(self) -> None:
         if self._animation_render_callback is None or self._animation_frame_count <= 1:
             return
-        self._animation_frame_index = 0
-        self.render_animation_frame(self._animation_frame_index)
-        self._animation_frame_index = 1
+        near_stl_checked = self._near_stl_check.isChecked()
+        if self._animation_frame_index >= self._animation_frame_count - 1:
+            self._animation_frame_index = 0
+        first_frame = max(1, self._animation_frame_index)
+        self.render_animation_frame(first_frame)
+        self._restore_near_stl_checked(near_stl_checked)
+        self._animation_frame_index = min(first_frame + 1, self._animation_frame_count - 1)
         self._animation_timer.start(self._animation_interval_ms)
 
     def pause_animation(self) -> None:
@@ -903,10 +907,23 @@ class NativeVtkViewerDialog(QDialog):
         """Switch Streamline mode between inlet seeds and STL-near seeds."""
         self._plot_current_streamline_dataset()
 
+    def _restore_near_stl_checked(self, checked: bool) -> None:
+        if self._near_stl_check.isChecked() == checked:
+            return
+        self._near_stl_check.blockSignals(True)
+        self._near_stl_check.setChecked(checked)
+        self._near_stl_check.blockSignals(False)
+
     def _on_streamline_count_confirmed(self) -> None:
         if self._current_plot_mode != "streamline":
             return
+        near_stl_checked = self._near_stl_check.isChecked()
+        was_running = self._animation_timer.isActive()
+        self._restore_near_stl_checked(near_stl_checked)
         self._plot_current_streamline_dataset()
+        self._restore_near_stl_checked(near_stl_checked)
+        if was_running:
+            self.play_animation()
 
     def _maybe_clip_near_stl(self, input_data):
         """If '仅显示STL附近' is checked, clip input to STL proximity."""
@@ -1276,7 +1293,9 @@ class NativeVtkViewerDialog(QDialog):
                     "total_length": float(total_length),
                 }
             )
-        paths = self._filter_visible_streamline_paths(paths)
+        filtered_paths = self._filter_visible_streamline_paths(paths)
+        if filtered_paths:
+            paths = filtered_paths
         max_paths = self._selected_streamline_count()
         if len(paths) <= max_paths:
             return paths
