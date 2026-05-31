@@ -202,6 +202,9 @@ class DrawGeometryLogicMixin:
         self._modeling_active_section: str = "stl"
         self._interactive_edit_mode: str | None = None
         self._interactive_edit_drag: dict | None = None
+        self._interactive_edit_gizmo_actors: list[object] = []
+        self._interactive_edit_gizmo_axes: dict[str, np.ndarray] = {}
+        self._interactive_edit_selection: dict | None = None
         self._interactive_edit_observer_tags: list[int] = []
         self._interactive_edit_old_style = None
         self._interactive_edit_handlers_installed = False
@@ -781,11 +784,101 @@ class DrawGeometryLogicMixin:
     def _finish_interactive_edit_mode(self, message: str = "") -> None:
         self._interactive_edit_drag = None
         self._interactive_edit_mode = None
+        self._interactive_edit_selection = None
+        self._clear_interactive_edit_gizmo()
         if self._interactive_edit_old_style is not None and hasattr(self, "_modeling_viewport"):
             self._modeling_viewport._interactor.SetInteractorStyle(self._interactive_edit_old_style)
         self._interactive_edit_old_style = None
         if message:
             self._set_modeling_status(message)
+
+    def _clear_interactive_edit_gizmo(self) -> None:
+        if hasattr(self, "_modeling_viewport") and self._modeling_viewport is not None:
+            for actor in getattr(self, "_interactive_edit_gizmo_actors", []):
+                self._modeling_viewport._renderer.RemoveActor(actor)
+        self._interactive_edit_gizmo_actors = []
+        self._interactive_edit_gizmo_axes = {}
+
+    def _vtk_actor_key(self, actor) -> str:
+        if actor is None:
+            return ""
+        try:
+            return actor.GetAddressAsString("")
+        except Exception:
+            return str(id(actor))
+
+    def _set_edit_delta_fields(self, delta: np.ndarray) -> None:
+        widgets = (
+            getattr(self, "_modeling_edit_dx", None),
+            getattr(self, "_modeling_edit_dy", None),
+            getattr(self, "_modeling_edit_dz", None),
+        )
+        if any(widget is None for widget in widgets):
+            return
+        for widget, value in zip(widgets, delta):
+            widget.blockSignals(True)
+            widget.setValue(float(value))
+            widget.blockSignals(False)
+
+    def _edit_delta_from_fields(self) -> np.ndarray:
+        return np.array([
+            float(getattr(self, "_modeling_edit_dx").value()),
+            float(getattr(self, "_modeling_edit_dy").value()),
+            float(getattr(self, "_modeling_edit_dz").value()),
+        ], dtype=float)
+
+    def _show_interactive_edit_gizmo(self, obj: GeometryObject, poly_data, selected_ids: list[int]) -> None:
+        self._clear_interactive_edit_gizmo()
+        if not selected_ids:
+            return
+        selected_world = [self._local_to_world_point(obj, poly_data.GetPoint(point_id)) for point_id in selected_ids]
+        center = np.mean(np.array(selected_world, dtype=float), axis=0)
+        bounds = obj.actor.GetBounds() if obj.actor is not None else poly_data.GetBounds()
+        if bounds is None or not all(np.isfinite(bounds)):
+            length = 0.5
+        else:
+            diagonal = float(np.linalg.norm([bounds[1] - bounds[0], bounds[3] - bounds[2], bounds[5] - bounds[4]]))
+            length = max(diagonal * 0.28, 0.15)
+        radius = max(length * 0.035, 0.006)
+        axes = [
+            (np.array([1.0, 0.0, 0.0], dtype=float), (1.0, 0.12, 0.10)),
+            (np.array([0.0, 1.0, 0.0], dtype=float), (0.12, 0.85, 0.18)),
+            (np.array([0.0, 0.0, 1.0], dtype=float), (0.16, 0.35, 1.0)),
+        ]
+        for axis, color in axes:
+            arrow = vtk.vtkArrowSource()
+            arrow.SetTipLength(0.28)
+            arrow.SetTipRadius(radius * 2.6)
+            arrow.SetShaftRadius(radius)
+            arrow.Update()
+            transform = vtk.vtkTransform()
+            transform.PostMultiply()
+            transform.Scale(length, length, length)
+            base = np.array([1.0, 0.0, 0.0], dtype=float)
+            rotation_axis = np.cross(base, axis)
+            rotation_norm = float(np.linalg.norm(rotation_axis))
+            if rotation_norm > 1e-12:
+                rotation_axis = rotation_axis / rotation_norm
+                angle = float(np.degrees(np.arccos(np.clip(float(np.dot(base, axis)), -1.0, 1.0))))
+                transform.RotateWXYZ(angle, float(rotation_axis[0]), float(rotation_axis[1]), float(rotation_axis[2]))
+            elif float(np.dot(base, axis)) < 0.0:
+                transform.RotateWXYZ(180.0, 0.0, 0.0, 1.0)
+            transform.Translate(float(center[0]), float(center[1]), float(center[2]))
+            tf = vtk.vtkTransformPolyDataFilter()
+            tf.SetInputConnection(arrow.GetOutputPort())
+            tf.SetTransform(transform)
+            mapper = vtk.vtkPolyDataMapper()
+            mapper.SetInputConnection(tf.GetOutputPort())
+            actor = vtk.vtkActor()
+            actor.SetMapper(mapper)
+            actor.GetProperty().SetColor(*color)
+            actor.GetProperty().SetOpacity(0.95)
+            actor.GetProperty().SetSpecular(0.25)
+            actor.GetProperty().SetSpecularPower(16)
+            self._modeling_viewport._renderer.AddActor(actor)
+            self._interactive_edit_gizmo_actors.append(actor)
+            self._interactive_edit_gizmo_axes[self._vtk_actor_key(actor)] = axis
+        self._modeling_viewport.render()
 
     def _interactive_edit_polydata(self, obj: GeometryObject):
         mapper = obj.actor.GetMapper() if obj.actor is not None else None
@@ -864,8 +957,24 @@ class DrawGeometryLogicMixin:
             self._set_modeling_status("没有点中当前几何体，请在模型表面、边线或顶点附近按住拖动")
             return
         picked_actor = picker.GetActor()
+        picked_key = self._vtk_actor_key(picked_actor)
+        if picked_key in getattr(self, "_interactive_edit_gizmo_axes", {}):
+            selection = self._interactive_edit_selection
+            if not selection:
+                return
+            selected_obj = selection["object"]
+            poly_data = selection["poly_data"]
+            self._interactive_edit_drag = {
+                "object": selected_obj,
+                "poly_data": poly_data,
+                "selected_ids": selection["selected_ids"],
+                "axis_world": self._interactive_edit_gizmo_axes[picked_key],
+                "start_pos": (int(x), int(y)),
+                "base_points": np.array(selection.get("base_points"), dtype=float),
+            }
+            return
         if picked_actor not in (obj.actor, obj.wire_actor, obj.point_actor):
-            self._set_modeling_status("请拖动当前选中的几何体")
+            self._set_modeling_status("请先点选当前几何体上的点/线/面，或拖动已出现的红绿蓝轴")
             return
         poly_data = self._interactive_edit_polydata(obj)
         cell_id = int(picker.GetCellId())
@@ -876,13 +985,18 @@ class DrawGeometryLogicMixin:
         if not selected_ids:
             self._set_modeling_status("没有找到可拖动的点")
             return
-        self._interactive_edit_drag = {
+        self._interactive_edit_selection = {
             "object": obj,
             "poly_data": poly_data,
             "selected_ids": selected_ids,
-            "start_pos": (int(x), int(y)),
             "base_points": np.array([poly_data.GetPoint(point_id) for point_id in range(poly_data.GetNumberOfPoints())], dtype=float),
         }
+        self._set_edit_delta_fields(np.zeros(3, dtype=float))
+        self._show_interactive_edit_gizmo(obj, poly_data, selected_ids)
+        labels = {"point": "点", "edge": "线", "face": "面"}
+        self._set_modeling_status(
+            f"已选中{labels.get(self._interactive_edit_mode or '', '面')}，拖动红/绿/蓝轴可沿 X/Y/Z 方向编辑"
+        )
 
     def _on_interactive_edit_move(self, _obj, _event) -> None:
         drag = self._interactive_edit_drag
@@ -892,19 +1006,52 @@ class DrawGeometryLogicMixin:
         poly_data = drag["poly_data"]
         x, y = self._modeling_viewport._interactor.GetEventPosition()
         delta_world = self._screen_drag_to_world_delta(obj, drag["start_pos"], (int(x), int(y)))
+        axis_world = drag.get("axis_world")
+        if axis_world is not None:
+            axis_world = np.array(axis_world, dtype=float)
+            axis_world = axis_world / max(float(np.linalg.norm(axis_world)), 1e-12)
+            delta_world = axis_world * float(np.dot(delta_world, axis_world))
         delta_local = self._world_delta_to_local(obj, delta_world)
+        self._set_edit_delta_fields(delta_local)
+        self._apply_edit_delta_to_polydata(poly_data, drag["base_points"], drag["selected_ids"], delta_local)
+        self._refresh_edit_actor_mappers(obj)
+        if drag.get("axis_world") is not None:
+            self._show_interactive_edit_gizmo(obj, poly_data, drag["selected_ids"])
+        self._modeling_viewport.render()
+
+    def _apply_edit_delta_to_polydata(self, poly_data, base_points, selected_ids: list[int], delta_local: np.ndarray) -> None:
         points = vtk.vtkPoints()
-        base_points = drag["base_points"]
-        selected_ids = set(drag["selected_ids"])
+        selected = set(selected_ids)
         for point_id, point in enumerate(base_points):
-            moved = point + delta_local if point_id in selected_ids else point
+            moved = point + delta_local if point_id in selected else point
             points.InsertNextPoint(float(moved[0]), float(moved[1]), float(moved[2]))
         poly_data.SetPoints(points)
         poly_data.Modified()
+
+    def _refresh_edit_actor_mappers(self, obj: GeometryObject) -> None:
         for actor in (obj.actor, obj.wire_actor, obj.point_actor):
             if actor is not None and actor.GetMapper() is not None:
                 actor.GetMapper().Modified()
+
+    def _apply_interactive_edit_delta_from_fields(self) -> None:
+        selection = self._interactive_edit_selection
+        if not selection:
+            self._set_modeling_status("请先进入点/线/面编辑，并在 3D 视图中选中要编辑的点、线或面")
+            return
+        obj = selection["object"]
+        poly_data = selection["poly_data"]
+        delta_local = self._edit_delta_from_fields()
+        self._apply_edit_delta_to_polydata(poly_data, selection["base_points"], selection["selected_ids"], delta_local)
+        self._refresh_edit_actor_mappers(obj)
+        self._show_interactive_edit_gizmo(obj, poly_data, selection["selected_ids"])
+        edited = vtk.vtkPolyData()
+        edited.DeepCopy(poly_data)
+        moved_count = len(selection["selected_ids"])
+        self._replace_object_polydata(obj, edited)
         self._modeling_viewport.render()
+        labels = {"point": "点", "edge": "线", "face": "面"}
+        mode_label = labels.get(self._interactive_edit_mode or "", "面")
+        self._finish_interactive_edit_mode(f"数值位移{mode_label}编辑完成：移动 {moved_count} 个点")
 
     def _on_interactive_edit_release(self, _obj, _event) -> None:
         drag = self._interactive_edit_drag
@@ -918,7 +1065,7 @@ class DrawGeometryLogicMixin:
         self._modeling_viewport.render()
         labels = {"point": "点", "edge": "线", "face": "面"}
         mode_label = labels.get(self._interactive_edit_mode or "", "面")
-        self._finish_interactive_edit_mode(f"交互式{mode_label}编辑完成：移动 {moved_count} 个点")
+        self._finish_interactive_edit_mode(f"三轴操纵器{mode_label}编辑完成：移动 {moved_count} 个点")
 
     def _triangulated_polydata(self, poly_data):
         triangle = vtk.vtkTriangleFilter()

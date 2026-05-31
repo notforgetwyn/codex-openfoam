@@ -1506,6 +1506,12 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._modeling_prop_pos_x, self._modeling_prop_pos_y, self._modeling_prop_pos_z = pos_x, pos_y, pos_z
         self._modeling_prop_rot_x, self._modeling_prop_rot_y, self._modeling_prop_rot_z = rot_x, rot_y, rot_z
         self._modeling_prop_scl_x, self._modeling_prop_scl_y, self._modeling_prop_scl_z = scl_x, scl_y, scl_z
+        edit_dx = self._make_modeling_spinbox(-100, 100, 0.01, None)
+        edit_dy = self._make_modeling_spinbox(-100, 100, 0.01, None)
+        edit_dz = self._make_modeling_spinbox(-100, 100, 0.01, None)
+        self._modeling_edit_dx, self._modeling_edit_dy, self._modeling_edit_dz = edit_dx, edit_dy, edit_dz
+        self._modeling_apply_edit_delta_btn = QPushButton("应用位移")
+        self._modeling_apply_edit_delta_btn.clicked.connect(self._apply_interactive_edit_delta_from_fields)
 
         self._modeling_color_btn = QPushButton("■")
         self._modeling_color_btn.setFixedSize(36, 36)
@@ -1518,6 +1524,8 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         prop_layout.addWidget(self._modeling_group("位置", pos_x, pos_y, pos_z))
         prop_layout.addWidget(self._modeling_group("旋转 (°)", rot_x, rot_y, rot_z))
         prop_layout.addWidget(self._modeling_group("缩放", scl_x, scl_y, scl_z))
+        prop_layout.addWidget(self._modeling_group("三轴编辑位移", edit_dx, edit_dy, edit_dz))
+        prop_layout.addWidget(self._modeling_apply_edit_delta_btn)
         prop_layout.addWidget(QLabel("颜色"))
         prop_layout.addWidget(self._modeling_color_btn)
         prop_layout.addWidget(QLabel("透明度"))
@@ -1556,7 +1564,8 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         sb.setSingleStep(step)
         sb.setMinimumWidth(120)
         sb.setMinimumHeight(28)
-        sb.valueChanged.connect(callback)
+        if callback is not None:
+            sb.valueChanged.connect(callback)
         return sb
 
     def _modeling_group(self, label_text, x, y, z) -> QGroupBox:
