@@ -1,13 +1,7 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
-from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QTableWidgetItem
 
-from foamdesk.domain.models import SimulationParameters
 from foamdesk.ui.theme import THEMES, build_stylesheet
 
 
@@ -89,4 +83,3 @@ class SettingsPhysicsLogicMixin:
             f"- 说明：{status.detail}\n"
         )
         self._append_log(f"环境检查完成：{status_flag}，OpenFOAM={status.foam_version or '未知'}")
-

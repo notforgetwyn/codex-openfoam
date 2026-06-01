@@ -27,7 +27,7 @@ class GeometryObject:
     position: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     rotation: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     scale: list[float] = field(default_factory=lambda: [1.0, 1.0, 1.0])
-    color: tuple[float, float, float] = (0.25, 0.74, 1.0)
+    color: tuple[float, float, float] = (1.0, 0.82, 0.08)
     wire_actor: object | None = None
     point_actor: object | None = None
 
@@ -213,6 +213,7 @@ class DrawGeometryLogicMixin:
             for obj in self._modeling_objects:
                 self._add_modeling_object_actors(obj)
                 self._apply_transform(obj)
+            self._apply_modeling_selection_styles()
             if hasattr(self, "_modeling_tree"):
                 self._rebuild_tree()
             self._modeling_viewport.render()
@@ -236,7 +237,7 @@ class DrawGeometryLogicMixin:
     def _create_modeling_actor_bundle(
         self,
         source,
-        color: tuple[float, float, float] = (0.25, 0.74, 1.0),
+        color: tuple[float, float, float] = (1.0, 0.82, 0.08),
         opacity: float = 1.0,
         visible: bool = True,
     ):
@@ -250,8 +251,8 @@ class DrawGeometryLogicMixin:
         actor.GetProperty().SetOpacity(opacity)
         actor.GetProperty().SetInterpolationToPhong()
         actor.GetProperty().EdgeVisibilityOn()
-        actor.GetProperty().SetEdgeColor(0.02, 0.06, 0.08)
-        actor.GetProperty().SetLineWidth(0.6)
+        actor.GetProperty().SetEdgeColor(0.95, 0.72, 0.02)
+        actor.GetProperty().SetLineWidth(0.8)
         actor.SetVisibility(visible)
 
         edge_filter = vtk.vtkExtractEdges()
@@ -260,9 +261,9 @@ class DrawGeometryLogicMixin:
         edge_mapper.SetInputConnection(edge_filter.GetOutputPort())
         wire_actor = vtk.vtkActor()
         wire_actor.SetMapper(edge_mapper)
-        wire_actor.GetProperty().SetColor(0.0, 0.0, 0.0)
-        wire_actor.GetProperty().SetLineWidth(1.05)
-        wire_actor.GetProperty().SetOpacity(0.85)
+        wire_actor.GetProperty().SetColor(0.95, 0.72, 0.02)
+        wire_actor.GetProperty().SetLineWidth(1.15)
+        wire_actor.GetProperty().SetOpacity(0.95)
         wire_actor.SetVisibility(visible)
 
         vertex_filter = vtk.vtkVertexGlyphFilter()
@@ -297,6 +298,24 @@ class DrawGeometryLogicMixin:
         for actor in (obj.actor, obj.wire_actor, obj.point_actor):
             if actor is not None:
                 actor.SetVisibility(visible)
+
+    def _apply_modeling_selection_styles(self) -> None:
+        for index, obj in enumerate(self._modeling_objects):
+            selected = index == self._modeling_selected_index
+            surface_color = (1.0, 0.08, 0.04) if selected else (1.0, 0.82, 0.08)
+            edge_color = (0.95, 0.0, 0.0) if selected else (0.95, 0.68, 0.0)
+            if obj.actor is not None:
+                obj.actor.GetProperty().SetColor(*surface_color)
+                obj.actor.GetProperty().SetEdgeColor(*edge_color)
+                obj.actor.GetProperty().SetLineWidth(1.4 if selected else 0.8)
+                obj.actor.GetProperty().EdgeVisibilityOn()
+            if obj.wire_actor is not None:
+                obj.wire_actor.GetProperty().SetColor(*edge_color)
+                obj.wire_actor.GetProperty().SetLineWidth(2.2 if selected else 1.15)
+                obj.wire_actor.GetProperty().SetOpacity(1.0 if selected else 0.95)
+            if obj.point_actor is not None:
+                obj.point_actor.GetProperty().SetColor(*surface_color)
+                obj.point_actor.GetProperty().SetPointSize(6.0 if selected else 4.2)
 
     # ------------------------------------------------------------------
     # persistence
@@ -432,6 +451,7 @@ class DrawGeometryLogicMixin:
 
         self._rebuild_tree()
         self._select_object(len(self._modeling_objects) - 1)
+        self._apply_modeling_selection_styles()
         self._modeling_viewport.render()
         self._save_modeling_state_if_ready()
         self._set_modeling_status(f"已创建 {name}")
@@ -443,6 +463,7 @@ class DrawGeometryLogicMixin:
         self._remove_modeling_object_actors(obj)
         self._modeling_selected_index = -1
         self._rebuild_tree()
+        self._apply_modeling_selection_styles()
         self._load_properties()
         self._set_property_enabled(False)
         self._modeling_viewport.render()
@@ -465,8 +486,12 @@ class DrawGeometryLogicMixin:
         stl_header = QTreeWidgetItem([f"STL{stl_marker}", ""])
         stl_header.setData(0, Qt.ItemDataRole.UserRole, -20)
         stl_header.setFlags(stl_header.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+        sketch_header = QTreeWidgetItem(["草图", ""])
+        sketch_header.setData(0, Qt.ItemDataRole.UserRole, -30)
+        sketch_header.setFlags(sketch_header.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
         tree.addTopLevelItem(domain_header)
         tree.addTopLevelItem(stl_header)
+        tree.addTopLevelItem(sketch_header)
         for i, obj in enumerate(self._modeling_objects):
             item = QTreeWidgetItem([obj.name, obj.kind])
             item.setData(0, Qt.ItemDataRole.UserRole, i)
@@ -478,6 +503,13 @@ class DrawGeometryLogicMixin:
                 domain_header.addChild(item)
             else:
                 stl_header.addChild(item)
+        active_sketch = getattr(self, "_active_sketch_index", -1)
+        for si, sketch in enumerate(getattr(self, "_sketches", [])):
+            marker = " ✎" if si == active_sketch else ""
+            sketch_item = QTreeWidgetItem([sketch.name + marker, "草图"])
+            sketch_item.setData(0, Qt.ItemDataRole.UserRole, 1000 + si)
+            sketch_item.setFlags(sketch_item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+            sketch_header.addChild(sketch_item)
         tree.expandAll()
         tree.blockSignals(False)
 
@@ -495,6 +527,11 @@ class DrawGeometryLogicMixin:
             self._rebuild_tree()
             self._set_modeling_status("当前区间：STL")
             return
+        if idx == -30:
+            return
+        if idx >= 1000:
+            self._enter_sketch_mode(int(idx) - 1000)
+            return
         if idx >= 0:
             self._select_object(int(idx))
             obj = self._modeling_objects[int(idx)]
@@ -510,6 +547,7 @@ class DrawGeometryLogicMixin:
             return
         visible = item.checkState(0) == Qt.CheckState.Checked
         self._set_modeling_object_visible(self._modeling_objects[i], visible)
+        self._apply_modeling_selection_styles()
         self._modeling_viewport.render()
         self._save_modeling_state_if_ready()
 
@@ -520,6 +558,9 @@ class DrawGeometryLogicMixin:
         idx = item.data(0, Qt.ItemDataRole.UserRole)
         if idx is None:
             return
+        if int(idx) < 0:
+            self._set_modeling_status("模型树分组不能删除，请右键删除具体几何体或草图")
+            return
         menu = QMenu(self)
         rename_act = menu.addAction("重命名")
         delete_act = menu.addAction("删除")
@@ -527,8 +568,11 @@ class DrawGeometryLogicMixin:
         if action == rename_act:
             self._modeling_tree.editItem(item, 0)
         elif action == delete_act:
-            self._select_object(int(idx))
-            self._delete_selected()
+            if int(idx) >= 1000:
+                self._delete_sketch(int(idx) - 1000)
+            elif int(idx) >= 0:
+                self._select_object(int(idx))
+                self._delete_selected()
 
     # ------------------------------------------------------------------
     # selection
@@ -538,6 +582,7 @@ class DrawGeometryLogicMixin:
         if index < 0 or index >= len(self._modeling_objects):
             return
         self._modeling_selected_index = index
+        self._apply_modeling_selection_styles()
         self._load_properties()
         self._set_property_enabled(True)
         self._set_modeling_status(f"选中 {self._modeling_objects[index].name}")
@@ -545,84 +590,25 @@ class DrawGeometryLogicMixin:
     def _activate_select_mode(self) -> None:
         self._set_modeling_status("选择模式：请在模型树中点击选择模型")
 
-    def _import_stl_file(self) -> None:
-        from PySide6.QtWidgets import QFileDialog
-        from pathlib import Path
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "导入 STL 文件", "", "STL 文件 (*.stl *.STL)"
-        )
-        if not file_path:
-            return
-        reader = vtk.vtkSTLReader()
-        reader.SetFileName(file_path)
-        reader.Update()
-        poly_data = reader.GetOutput()
-        if poly_data.GetNumberOfPoints() == 0:
-            self._set_modeling_status("STL 文件为空或读取失败")
-            return
-        actor, wire_actor, point_actor = self._create_modeling_actor_bundle(poly_data)
-        name = Path(file_path).stem
-        obj = GeometryObject(
-            name=name, kind="stl", actor=actor, source=poly_data,
-            wire_actor=wire_actor, point_actor=point_actor,
-            section=self._modeling_active_section, source_path=file_path,
-        )
-        self._modeling_objects.append(obj)
-        self._add_modeling_object_actors(obj)
-        self._rebuild_tree()
-        self._select_object(len(self._modeling_objects) - 1)
-        self._modeling_viewport.render()
-        self._save_modeling_state_if_ready()
-        self._set_modeling_status(f"已导入 {name}")
-
-    def _export_stl_file(self) -> None:
-        if self._modeling_selected_index < 0:
-            self._set_modeling_status("请先选择一个几何体")
-            return
-        from PySide6.QtWidgets import QFileDialog
-        obj = self._modeling_objects[self._modeling_selected_index]
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "导出 STL 文件", f"{obj.name}.stl", "STL 文件 (*.stl)"
-        )
-        if not file_path:
-            return
-        pd = obj.source if isinstance(obj.source, vtk.vtkPolyData) else obj.source.GetOutput()
-        tf = vtk.vtkTransformPolyDataFilter()
-        tf.SetInputData(pd)
-        t = vtk.vtkTransform()
-        t.Translate(*obj.position)
-        t.RotateX(obj.rotation[0]); t.RotateY(obj.rotation[1]); t.RotateZ(obj.rotation[2])
-        t.Scale(*obj.scale)
-        tf.SetTransform(t)
-        tf.Update()
-        writer = vtk.vtkSTLWriter()
-        writer.SetFileName(file_path)
-        writer.SetInputData(tf.GetOutput())
-        writer.Write()
-        self._set_modeling_status(f"已导出 {obj.name} → {file_path}")
-
     def _finish_draw_geometry(self) -> None:
         if self._current_project is None:
             self._set_modeling_status("请先新建或打开项目")
             return
-        checked_objects = [
-            obj
-            for obj in self._modeling_objects
-            if obj.visible and obj.section == "stl"
-        ]
+        checked_objects = [obj for obj in self._modeling_objects if obj.visible]
         if not checked_objects:
-            self._set_modeling_status("请在 STL 模型树中勾选要导入网格页的几何体")
+            self._set_modeling_status("请在模型树中勾选要导入网格页的几何体")
             return
 
         from pathlib import Path
         from foamdesk.ui.main_window_geometry_logic import MeshImportAsset
 
         cache_dir = self._draw_geometry_cache_dir()
-        self._clear_draw_geometry_cache()
         cache_dir.mkdir(parents=True, exist_ok=True)
-        exported_assets: list[MeshImportAsset] = []
+        exported_stl_assets: list[MeshImportAsset] = []
+        exported_domain_assets: list[MeshImportAsset] = []
         for obj in checked_objects:
-            output_path = self._unique_draw_export_path(cache_dir, f"{obj.name}.stl")
+            export_prefix = "domain_patch" if obj.section == "domain" else "obstacle"
+            output_path = self._unique_draw_export_path(cache_dir, f"{export_prefix}_{obj.name}.stl")
             poly_data = self._transformed_object_polydata(obj)
             if poly_data is None or poly_data.GetNumberOfPoints() == 0:
                 continue
@@ -630,28 +616,50 @@ class DrawGeometryLogicMixin:
             writer.SetFileName(str(output_path))
             writer.SetInputData(poly_data)
             writer.Write()
-            exported_assets.append(
-                MeshImportAsset(
-                    name=Path(output_path).stem,
-                    source_path=output_path,
-                    polydata=poly_data,
-                )
+            asset = MeshImportAsset(
+                name=Path(output_path).stem,
+                source_path=output_path,
+                polydata=poly_data,
             )
-        if not exported_assets:
+            if obj.section == "domain":
+                exported_domain_assets.append(asset)
+            else:
+                exported_stl_assets.append(asset)
+        if not exported_stl_assets and not exported_domain_assets:
             self._set_modeling_status("勾选几何导出失败，请检查模型是否为空")
             return
 
         self._workspace_tabs.setCurrentIndex(self.TAB_MESH_GENERATION)
-        self._mesh_imports = exported_assets
-        self._mesh_import_selected_index = len(exported_assets) - 1
+        if not hasattr(self, "_mesh_imports"):
+            self._init_mesh_import_state()
+        if exported_stl_assets:
+            self._mesh_imports.extend(exported_stl_assets)
+            self._mesh_import_selected_index = len(self._mesh_imports) - 1
+        if exported_domain_assets:
+            self._cad_domain_imports.extend(exported_domain_assets)
+            self._highlighted_domain_face = len(self._cad_domain_imports) - 1
+            if hasattr(self, "_mesh_domain_type_combo"):
+                cad_index = self._mesh_domain_type_combo.findData("cad")
+                if cad_index >= 0:
+                    self._mesh_domain_type_combo.setCurrentIndex(cad_index)
         self._domain_bounds_manual = False
         self._rebuild_mesh_import_combo()
+        if hasattr(self, "_rebuild_cad_domain_file_list"):
+            self._rebuild_cad_domain_file_list()
+        if hasattr(self, "_init_domain_face_table"):
+            self._init_domain_face_table()
         self._auto_fill_domain_bounds()
+        if exported_domain_assets and hasattr(self, "_auto_recommend_location_in_mesh"):
+            self._auto_recommend_location_in_mesh(update_view=False)
+        if hasattr(self, "_update_cad_domain_status"):
+            self._update_cad_domain_status()
         self._redraw_mesh_grid_vtk()
         self._save_mesh_workflow_state()
         self._refresh_geometry_panel()
-        self._set_modeling_status(f"已完成绘制：导入 {len(exported_assets)} 个几何到网格生成页")
-        self._set_status("绘制几何已导入网格生成页。")
+        self._set_modeling_status(
+            f"已完成绘制：追加障碍物 {len(exported_stl_assets)} 个，计算域 {len(exported_domain_assets)} 个到网格生成页"
+        )
+        self._set_status("绘制几何已追加导入网格生成页。")
 
     def _draw_geometry_cache_dir(self):
         return self._current_project.case_dir / ".foamdesk_cache" / "draw_geometry"

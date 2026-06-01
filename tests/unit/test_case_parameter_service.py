@@ -70,6 +70,18 @@ def test_case_parameter_service_saves_control_and_viscosity(tmp_path: Path) -> N
     assert saved_parameters.dynamic_viscosity == pytest.approx(19.964)
 
 
+def test_case_parameter_service_writes_pimple_for_foamrun_simplefoam(tmp_path: Path) -> None:
+    project = ProjectService(AppSettingsService(tmp_path)).create_project("demo")
+    service = OpenFoamCaseParameterService()
+
+    service.save(project, replace(service.defaults(), solver_name="simpleFoam"))
+
+    fv_solution = (project.case_dir / "system" / "fvSolution").read_text(encoding="utf-8")
+    assert "SIMPLE" in fv_solution
+    assert "PIMPLE" in fv_solution
+    assert "nOuterCorrectors 1;" in fv_solution
+
+
 def test_case_parameter_service_material_presets() -> None:
     service = OpenFoamCaseParameterService()
 

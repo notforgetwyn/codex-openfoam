@@ -5,12 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import vtk
-from matplotlib.figure import Figure
-from PySide6.QtWidgets import QMessageBox
 from vtkmodules.util.numpy_support import numpy_to_vtk, vtk_to_numpy
-from vtkmodules.vtkCommonCore import vtkPoints
-from vtkmodules.vtkCommonDataModel import vtkPolyData
-from vtkmodules.vtkCommonMath import vtkRungeKutta45
 from vtkmodules.vtkFiltersFlowPaths import vtkStreamTracer
 
 from foamdesk.ui.visualization_widgets import NativeVtkViewerDialog
@@ -33,16 +28,19 @@ class ResultsLogicMixin:
             return
 
         available = set(case_info.point_arrays) | set(case_info.cell_arrays)
+        supported_fields = [name for name in self.RESULT_FIELDS if name in available]
+        if not supported_fields:
+            supported_fields = list(self.RESULT_FIELDS)
         current_field = self._result_field_combo.currentText().strip()
         self._result_field_combo.blockSignals(True)
         self._result_field_combo.clear()
-        self._result_field_combo.addItems(self.RESULT_FIELDS)
-        if current_field in self.RESULT_FIELDS:
+        self._result_field_combo.addItems(supported_fields)
+        if current_field in supported_fields:
             self._result_field_combo.setCurrentText(current_field)
-        elif "p" in available:
-            self._result_field_combo.setCurrentText("p")
-        elif "U" in available:
+        elif "U" in supported_fields:
             self._result_field_combo.setCurrentText("U")
+        elif supported_fields:
+            self._result_field_combo.setCurrentText(supported_fields[0])
         self._result_field_combo.blockSignals(False)
         self._refresh_result_display_modes()
 
@@ -117,7 +115,7 @@ class ResultsLogicMixin:
 
         color_range = self._selected_result_color_range(field_array)
         self._render_result_display(output, field_array, display_name, selected_time, storage, mode, color_range)
-        if not mode.startswith("Streamline"):
+        if mode != "流线 streamlines":
             self._configure_result_animation_source()
 
     def _compute_inlet_outlet_positions(self):
@@ -224,7 +222,7 @@ class ResultsLogicMixin:
         if io_positions[0] or io_positions[1]:
             self._native_vtk_viewer.set_inlet_outlet_positions(*io_positions)
 
-        if mode.startswith("Surface"):
+        if mode in {"速度云图", "压力云图", "温度云图", "壁面压力分布", "壁面温度"}:
             try:
                 output, field_array = self._ensure_point_field(output, field_array, storage)
             except RuntimeError as error:
@@ -236,7 +234,7 @@ class ResultsLogicMixin:
                 f"Surface 表面云图已加载到原生 VTK 3D 窗口：field={display_name}, time={selected_time}, faces={face_count}, range={color_range}"
             )
             return
-        if mode.startswith("Iso-surface"):
+        if mode == "压力等值面":
             try:
                 output, field_array = self._ensure_point_field(output, field_array, storage)
             except RuntimeError as error:
@@ -252,7 +250,7 @@ class ResultsLogicMixin:
                 f"Iso-surface 等值面已加载到原生 VTK 3D 窗口：field={display_name}, time={selected_time}, range={color_range}"
             )
             return
-        if mode.startswith("Slice"):
+        if mode in {"速度切片", "压力切片", "温度切面"}:
             try:
                 mb = self._context.openfoam_vtk_service.build_case_output(
                     self._current_project,
@@ -260,10 +258,7 @@ class ResultsLogicMixin:
                 )
                 vol_data = mb.GetBlock(0) if mb.GetNumberOfBlocks() > 0 else mb
                 field_name = self._result_field_combo.currentText().strip()
-                source_field = field_name
-                arr = vol_data.GetPointData().GetArray(source_field)
-                if arr is None:
-                    arr = vol_data.GetCellData().GetArray(source_field)
+                arr, display_name, _storage = self._prepare_result_field(vol_data, field_name)
                 if arr is None:
                     self._show_error(f"切片需要字段 {field_name}")
                     return
@@ -282,7 +277,7 @@ class ResultsLogicMixin:
                 f"Slice 切片已加载：field={display_name}, time={selected_time}, axis={resolved_axis}, center={center:.6g}, range={color_range}"
             )
             return
-        if mode.startswith("Streamline"):
+        if mode == "流线 streamlines":
             try:
                 streamline_output, vtu_grid, seed_label, seed_count, speed_range = self._build_streamlines_from_vtu("inlet")
                 stl_streamline_output, _stl_grid, stl_seed_label, stl_seed_count, stl_speed_range = self._build_streamlines_from_vtu("geometry")
@@ -310,10 +305,7 @@ class ResultsLogicMixin:
                 )
                 volume_output = mb.GetBlock(0) if mb.GetNumberOfBlocks() > 0 else mb
                 field_name = self._result_field_combo.currentText().strip()
-                source_field = field_name
-                vol_field = volume_output.GetPointData().GetArray(source_field)
-                if vol_field is None:
-                    vol_field = volume_output.GetCellData().GetArray(source_field)
+                vol_field, display_name, _storage = self._prepare_result_field(volume_output, field_name)
                 if vol_field is None:
                     self._show_error(f"体渲染需要字段 {field_name}")
                     return
@@ -341,15 +333,6 @@ class ResultsLogicMixin:
         if converted_array is None:
             raise RuntimeError(f"{array_name} 当前是单元字段，转换为点字段失败。")
         return converted_output, converted_array
-
-    def _point_vector_field(self, output, array_name: str):
-        vector_array = output.GetPointData().GetArray(array_name)
-        if vector_array is not None:
-            return output, vector_array
-        cell_vector = output.GetCellData().GetArray(array_name)
-        if cell_vector is None:
-            return output, None
-        return self._ensure_point_field(output, cell_vector, "cell")
 
     def _configure_result_animation_source(self) -> None:
         if not hasattr(self, "_result_time_combo"):
@@ -389,16 +372,30 @@ class ResultsLogicMixin:
             time_value=time_value,
         )
         output = geometry.GetOutput()
-        source_field = field_name
-        field_array = output.GetPointData().GetArray(source_field)
-        storage = "point"
-        if field_array is None:
-            field_array = output.GetCellData().GetArray(source_field)
-            storage = "cell"
+        field_array, display_name, storage = self._prepare_result_field(output, field_name)
         if field_array is None:
             raise RuntimeError(f"当前 Case 没有字段 {field_name}")
-        display_name = field_name if field_array is not None and field_array.GetNumberOfComponents() == 1 else f"|{field_name}|"
         return output, field_array, display_name, selected_time, storage
+
+    def _prepare_result_field(self, data_object, field_name: str):
+        display_map = {
+            "p": "压力 p",
+            "U": "|U|",
+            "T": "温度 T",
+        }
+        return self._lookup_result_array(data_object, field_name, display_map.get(field_name, field_name))
+
+    def _lookup_result_array(self, data_object, array_name: str, display_name: str):
+        array = data_object.GetPointData().GetArray(array_name)
+        storage = "point"
+        if array is None:
+            array = data_object.GetCellData().GetArray(array_name)
+            storage = "cell"
+        if array is None:
+            return None, display_name, storage
+        if array.GetNumberOfComponents() > 1 and display_name == array_name:
+            display_name = f"|{array_name}|"
+        return array, display_name, storage
 
     def _selected_result_time_value(self) -> float | None:
         if not hasattr(self, "_result_time_combo"):
@@ -649,85 +646,6 @@ class ResultsLogicMixin:
         if norm <= 1e-12:
             return None
         return direction / norm
-
-    def _keep_streamlines_near_geometry(self, stream_lines, seed_geometry):
-        bounds = seed_geometry.GetBounds()
-        if bounds is None or not all(np.isfinite(bounds)):
-            return stream_lines
-        diagonal = float(
-            np.linalg.norm(
-                [
-                    bounds[1] - bounds[0],
-                    bounds[3] - bounds[2],
-                    bounds[5] - bounds[4],
-                ]
-            )
-        )
-        max_distance = max(diagonal * 0.16, 1e-5)
-        try:
-            distance = vtk.vtkImplicitPolyDataDistance()
-            distance.SetInput(seed_geometry)
-        except Exception:
-            return stream_lines
-
-        source_points = stream_lines.GetPoints()
-        source_lines = stream_lines.GetLines()
-        if source_points is None or source_lines is None:
-            return stream_lines
-        source_point_data = stream_lines.GetPointData()
-        speed_array = source_point_data.GetArray("U_mag") or source_point_data.GetArray("VelocityMagnitude")
-        vector_array = source_point_data.GetArray("U")
-
-        output_points = vtk.vtkPoints()
-        output_lines = vtk.vtkCellArray()
-        output_speeds = vtk.vtkFloatArray()
-        output_speeds.SetName("U_mag")
-        output_vectors = vtk.vtkDoubleArray()
-        output_vectors.SetName("U")
-        output_vectors.SetNumberOfComponents(3)
-
-        raw_lines = vtk_to_numpy(source_lines.GetData())
-        index = 0
-        while index < len(raw_lines):
-            count = int(raw_lines[index])
-            index += 1
-            ids = raw_lines[index : index + count].astype(int)
-            index += count
-            kept_ids = []
-            for point_id in ids:
-                point = source_points.GetPoint(int(point_id))
-                if abs(float(distance.EvaluateFunction(point))) > max_distance:
-                    break
-                kept_ids.append(int(point_id))
-            if len(kept_ids) < 2:
-                continue
-            polyline = vtk.vtkPolyLine()
-            polyline.GetPointIds().SetNumberOfIds(len(kept_ids))
-            for local_index, old_id in enumerate(kept_ids):
-                point = source_points.GetPoint(old_id)
-                new_id = output_points.InsertNextPoint(point)
-                if speed_array is not None:
-                    output_speeds.InsertNextValue(float(speed_array.GetTuple1(old_id)))
-                elif vector_array is not None:
-                    vector = vector_array.GetTuple3(old_id)
-                    output_speeds.InsertNextValue(float(np.linalg.norm(vector)))
-                else:
-                    output_speeds.InsertNextValue(0.0)
-                if vector_array is not None:
-                    output_vectors.InsertNextTuple(vector_array.GetTuple3(old_id))
-                else:
-                    output_vectors.InsertNextTuple((0.0, 0.0, 0.0))
-                polyline.GetPointIds().SetId(local_index, new_id)
-            output_lines.InsertNextCell(polyline)
-
-        clipped = vtk.vtkPolyData()
-        clipped.SetPoints(output_points)
-        clipped.SetLines(output_lines)
-        clipped.GetPointData().AddArray(output_speeds)
-        clipped.GetPointData().SetActiveScalars("U_mag")
-        if output_vectors.GetNumberOfTuples() > 0:
-            clipped.GetPointData().AddArray(output_vectors)
-        return clipped
 
     def _load_geometry_seed_surface(self, vtk_dir: Path):
         assets = [

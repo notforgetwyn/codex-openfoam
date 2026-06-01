@@ -8,11 +8,10 @@ from PySide6.QtCore import Qt
 from PySide6.QtCore import QProcess
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QButtonGroup,
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
-    QFileDialog,
     QFontComboBox,
     QFrame,
     QFormLayout,
@@ -27,12 +26,11 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QMenuBar,
     QPushButton,
-    QRadioButton,
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QStackedWidget,
     QTableWidget,
-    QTableWidgetItem,
     QSplitter,
     QStatusBar,
     QTabWidget,
@@ -43,68 +41,21 @@ from PySide6.QtWidgets import (
 )
 
 from foamdesk.app.bootstrap import ApplicationContext
-from foamdesk.domain.models import SimulationParameters, SimulationProject
+from foamdesk.domain.models import SimulationProject
 from foamdesk.ui.theme import THEMES
-from foamdesk.ui.visualization_widgets import NativeVtkPreviewWidget, NativeVtkViewerDialog, VtkViewerDialog
+from foamdesk.ui.visualization_widgets import NativeVtkPreviewWidget, NativeVtkViewerDialog
 from foamdesk.ui.main_window_geometry_logic import GeometryLogicMixin
 from foamdesk.ui.main_window_results_logic import ResultsLogicMixin
-from foamdesk.ui.main_window_parameters_logic import ParametersLogicMixin
 from foamdesk.ui.main_window_project_logic import ProjectProcessLogicMixin
 from foamdesk.ui.main_window_settings_physics_logic import SettingsPhysicsLogicMixin
 from foamdesk.ui.draw_geometry_tab import DrawGeometryLogicMixin
+from foamdesk.ui.sketch_logic import SketchLogicMixin
+from foamdesk.ui import domain_templates
 
 
-class WindowTitleBar(QFrame):
-    def __init__(self, window: QMainWindow) -> None:
-        super().__init__(window)
-        self._window = window
-        self.setObjectName("customTitleBar")
-        self.setFixedHeight(36)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 0, 4, 0)
-        layout.setSpacing(6)
-
-        title = QLabel("FoamDesk")
-        title.setObjectName("windowTitleLabel")
-        layout.addStretch(1)
-        layout.addWidget(title)
-        layout.addStretch(1)
-
-        minimize_button = QPushButton("—")
-        maximize_button = QPushButton("□")
-        close_button = QPushButton("×")
-        for button in (minimize_button, maximize_button, close_button):
-            button.setObjectName("windowControlButton")
-            button.setFixedSize(42, 30)
-        close_button.setObjectName("windowCloseButton")
-
-        minimize_button.clicked.connect(window.showMinimized)
-        maximize_button.clicked.connect(self._toggle_maximized)
-        close_button.clicked.connect(window.close)
-
-        layout.addWidget(minimize_button)
-        layout.addWidget(maximize_button)
-        layout.addWidget(close_button)
-
-    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._toggle_maximized()
-        super().mouseDoubleClickEvent(event)
-
-    def mousePressEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton and self._window.windowHandle():
-            self._window.windowHandle().startSystemMove()
-        super().mousePressEvent(event)
-
-    def _toggle_maximized(self) -> None:
-        if self._window.isMaximized():
-            self._window.showNormal()
-        else:
-            self._window.showMaximized()
 
 
-class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, SettingsPhysicsLogicMixin, ProjectProcessLogicMixin, DrawGeometryLogicMixin, QMainWindow):
+class MainWindow(GeometryLogicMixin, ResultsLogicMixin, SettingsPhysicsLogicMixin, ProjectProcessLogicMixin, DrawGeometryLogicMixin, SketchLogicMixin, QMainWindow):
     TAB_PROJECT_HOME = 0
     TAB_DRAW_GEOMETRY = 1
     TAB_MESH_GENERATION = 2
@@ -116,30 +67,41 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
     RESULT_FIELDS = [
         "U",
         "p",
+        "T",
     ]
     RESULT_FIELD_UNITS = {
         "U": "m/s",
         "p": "m2/s2 或 Pa",
+        "T": "K",
     }
     RESULT_DISPLAY_MODES = [
-        "Surface 表面云图",
-        "Slice 切片",
-        "Iso-surface 等值面",
-        "Streamline 流线",
-        "Volume 体渲染",
+        "速度云图",
+        "速度切片",
+        "流线 streamlines",
+        "压力云图",
+        "压力等值面",
+        "压力切片",
+        "壁面压力分布",
+        "温度云图",
+        "温度切面",
+        "壁面温度",
     ]
     RESULT_FIELD_DISPLAY_MODES = {
         "U": [
-            "Surface 表面云图",
-            "Slice 切片",
-            "Streamline 流线",
-            "Volume 体渲染",
+            "速度云图",
+            "速度切片",
+            "流线 streamlines",
         ],
         "p": [
-            "Surface 表面云图",
-            "Slice 切片",
-            "Iso-surface 等值面",
-            "Volume 体渲染",
+            "压力云图",
+            "压力等值面",
+            "压力切片",
+            "壁面压力分布",
+        ],
+        "T": [
+            "温度云图",
+            "温度切面",
+            "壁面温度",
         ],
     }
 
@@ -154,11 +116,11 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._current_process_output = ""
         self._last_diagnostic_summary = "暂无诊断。"
         self._suspend_draw_geometry_persist = False
-        self._vtk_viewer: VtkViewerDialog | None = None
         self._native_vtk_viewer: NativeVtkViewerDialog | None = None
         self.setWindowTitle("FoamDesk")
         self.resize(1400, 900)
         self._init_modeling_state()
+        self._init_sketch_state()
         self._build_ui()
         for obj in self._modeling_objects:
             self._add_modeling_object_actors(obj)
@@ -171,6 +133,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._save_modeling_state()
+        self._save_sketches()
         self._clear_draw_geometry_cache()
         self._save_sim_config_state()
         self._save_solver_run_state()
@@ -314,12 +277,12 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
 
     def _on_workspace_tab_changed(self, index: int) -> None:
         if index == self.TAB_DRAW_GEOMETRY:
+            self._init_sketch_state()
             self._init_modeling_state()
         elif index == self.TAB_MESH_GENERATION:
             self._init_mesh_import_state()
             self._load_mesh_workflow_state()
         elif index == self.TAB_SIMULATION_CONFIG:
-            self._load_boundaries_into_table()
             self._load_sim_config_state()
         elif index == self.TAB_SOLVER_RUN:
             self._load_solver_run_state()
@@ -367,6 +330,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         vtk_layout = QVBoxLayout(vtk_group)
         vtk_layout.setContentsMargins(0, 0, 0, 0)
         self._mesh_grid_vtk = NativeVtkPreviewWidget(wrapper, background=(0.12, 0.12, 0.12))
+        self._mesh_grid_vtk.enable_orientation_axes()
         vtk_layout.addWidget(self._mesh_grid_vtk)
 
         # ── top: scrollable parameter panel ──
@@ -403,36 +367,81 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         g1_layout.addWidget(clear_btn)
         scroll_layout.addWidget(g1)
 
-        # Group 2 — domain face boundary configuration
-        g2 = QGroupBox("计算域边界配置（每行对应计算域的一个面）")
+        # Group 3 — domain face boundary configuration
+        g2 = QGroupBox("计算域面 / 边界配置")
         g2_layout = QVBoxLayout(g2)
-        self._domain_face_table = QTableWidget(6, 5)
-        self._domain_face_table.setHorizontalHeaderLabels(["面", "边界类型", "边界名称", "速度 U", "压力 p"])
+        self._domain_face_table = QTableWidget(0, 7)
+        self._domain_face_table.setHorizontalHeaderLabels(["显示", "面/区域", "边界类型", "patch名称", "速度 U", "压力 p", "加密"])
         self._domain_face_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self._domain_face_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self._domain_face_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self._domain_face_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self._domain_face_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self._domain_face_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self._domain_face_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        self._domain_face_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
         self._domain_face_table.verticalHeader().setVisible(False)
         self._domain_face_table.verticalHeader().setDefaultSectionSize(36)
         self._domain_face_table.setMinimumHeight(260)
         g2_layout.addWidget(self._domain_face_table)
+        face_btn_row = QHBoxLayout()
+        infer_btn = QPushButton("从文件名识别")
+        infer_btn.clicked.connect(self._infer_domain_faces_from_filenames)
+        highlight_btn = QPushButton("高亮选中面")
+        highlight_btn.clicked.connect(self._redraw_mesh_grid_vtk)
+        reset_faces_btn = QPushButton("恢复默认边界")
+        reset_faces_btn.clicked.connect(self._init_domain_face_table)
+        face_btn_row.addWidget(infer_btn)
+        face_btn_row.addWidget(highlight_btn)
+        face_btn_row.addWidget(reset_faces_btn)
+        face_btn_row.addStretch(1)
+        g2_layout.addLayout(face_btn_row)
         scroll_layout.addWidget(g2)
         self._init_domain_face_table()
 
-        # Group 3 — background mesh / blockMeshDict
-        g3 = QGroupBox("基础计算域网格（背景网格）")
+        # Group 2 — domain definition (type + parameters, drives blockMeshDict)
+        g3 = QGroupBox("计算域定义")
         g3_layout = QVBoxLayout(g3)
+
+        type_row = QHBoxLayout()
+        type_row.addWidget(QLabel("计算域类型"))
+        self._mesh_domain_type_combo = QComboBox()
+        for key, spec in domain_templates.DOMAIN_TEMPLATES.items():
+            self._mesh_domain_type_combo.addItem(spec["label"], key)
+        self._mesh_domain_type_combo.currentIndexChanged.connect(self._on_domain_template_changed)
+        type_row.addWidget(self._mesh_domain_type_combo)
+        import_domain_btn = QPushButton("导入计算域几何体")
+        import_domain_btn.clicked.connect(self._import_cad_domain_files)
+        type_row.addWidget(import_domain_btn)
+        cad_reimport_btn = QPushButton("重新导入")
+        cad_reimport_btn.clicked.connect(self._import_cad_domain_files)
+        type_row.addWidget(cad_reimport_btn)
+        cad_check_btn = QPushButton("检查封闭性")
+        cad_check_btn.clicked.connect(self._check_cad_domain_closure)
+        type_row.addWidget(cad_check_btn)
+        cad_wrap_btn = QPushButton("自动包围障碍物")
+        cad_wrap_btn.clicked.connect(self._auto_wrap_cad_domain_around_obstacles)
+        type_row.addWidget(cad_wrap_btn)
+        cad_remove_btn = QPushButton("删除选中")
+        cad_remove_btn.clicked.connect(self._remove_selected_cad_domain_file)
+        type_row.addWidget(cad_remove_btn)
+        cad_clear_btn = QPushButton("清空计算域")
+        cad_clear_btn.clicked.connect(self._clear_cad_domain_files)
+        type_row.addWidget(cad_clear_btn)
+        type_row.addStretch(1)
+        g3_layout.addLayout(type_row)
+
+        self._domain_param_stack = QStackedWidget()
+
+        # page 0 — bounds (长方体 / 风洞)
+        bounds_page = QWidget()
+        bp_layout = QVBoxLayout(bounds_page)
+        bp_layout.setContentsMargins(0, 0, 0, 0)
         size_label = QLabel("计算域尺寸（坐标范围）")
         size_label.setStyleSheet("font-weight: 600; color: #cccccc;")
-        g3_layout.addWidget(size_label)
+        bp_layout.addWidget(size_label)
         bounds_grid = QGridLayout()
         bounds_grid.setSpacing(6)
-        axes = [
-            ("X 最小", "X 最大"),
-            ("Y 最小", "Y 最大"),
-            ("Z 最小", "Z 最大"),
-        ]
+        axes = [("X 最小", "X 最大"), ("Y 最小", "Y 最大"), ("Z 最小", "Z 最大")]
         self._domain_bounds_inputs: dict[str, QDoubleSpinBox] = {}
         for row, (min_label, max_label) in enumerate(axes):
             for col, (label_text, key) in enumerate(
@@ -447,42 +456,177 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
                 bounds_grid.addWidget(lbl, row, col * 2)
                 bounds_grid.addWidget(spin, row, col * 2 + 1)
                 self._domain_bounds_inputs[key] = spin
-        g3_layout.addLayout(bounds_grid)
-
-        resolution_label = QLabel("网格分辨率")
-        resolution_label.setStyleSheet("font-weight: 600; color: #cccccc; margin-top: 8px;")
-        g3_layout.addWidget(resolution_label)
+        bp_layout.addLayout(bounds_grid)
+        res_label = QLabel("网格分辨率")
+        res_label.setStyleSheet("font-weight: 600; color: #cccccc; margin-top: 8px;")
+        bp_layout.addWidget(res_label)
         res_row = QHBoxLayout()
         self._domain_cells_inputs: dict[str, QSpinBox] = {}
         for axis in ("X", "Y", "Z"):
-            lbl = QLabel(f"{axis}方向")
+            res_row.addWidget(QLabel(f"{axis}方向"))
             spin = QSpinBox()
             spin.setRange(1, 9999)
             spin.setValue(20)
-            spin.setToolTip(f"{axis}方向网格数量")
-            res_row.addWidget(lbl)
             res_row.addWidget(spin)
             self._domain_cells_inputs[axis] = spin
         res_row.addStretch(1)
-        g3_layout.addLayout(res_row)
+        bp_layout.addLayout(res_row)
+        self._domain_param_stack.addWidget(bounds_page)
 
-        opt_row = QHBoxLayout()
+        # page 1 — cylinder (O-grid)
+        cyl_page = QWidget()
+        cyl_grid = QGridLayout(cyl_page)
+        cyl_grid.setContentsMargins(0, 0, 0, 0)
+        cyl_grid.setSpacing(6)
+        self._cyl_radius = QDoubleSpinBox()
+        self._cyl_radius.setRange(0.0001, 1e6)
+        self._cyl_radius.setDecimals(4)
+        self._cyl_radius.setValue(1.0)
+        self._cyl_length = QDoubleSpinBox()
+        self._cyl_length.setRange(0.0001, 1e6)
+        self._cyl_length.setDecimals(4)
+        self._cyl_length.setValue(3.0)
+        self._cyl_axis_combo = QComboBox()
+        for ax in ("X", "Y", "Z"):
+            self._cyl_axis_combo.addItem(f"{ax} 轴", ax)
+        self._cyl_axis_combo.setCurrentIndex(2)
+        self._cyl_center_x = QDoubleSpinBox(); self._cyl_center_x.setRange(-1e6, 1e6); self._cyl_center_x.setDecimals(4); self._cyl_center_x.setValue(0.0)
+        self._cyl_center_y = QDoubleSpinBox(); self._cyl_center_y.setRange(-1e6, 1e6); self._cyl_center_y.setDecimals(4); self._cyl_center_y.setValue(0.0)
+        self._cyl_center_z = QDoubleSpinBox(); self._cyl_center_z.setRange(-1e6, 1e6); self._cyl_center_z.setDecimals(4); self._cyl_center_z.setValue(1.5)
+        self._cyl_ncirc = QSpinBox(); self._cyl_ncirc.setRange(1, 999); self._cyl_ncirc.setValue(8)
+        self._cyl_nradial = QSpinBox(); self._cyl_nradial.setRange(1, 999); self._cyl_nradial.setValue(5)
+        self._cyl_naxial = QSpinBox(); self._cyl_naxial.setRange(1, 9999); self._cyl_naxial.setValue(20)
+        cyl_grid.addWidget(QLabel("半径 R"), 0, 0); cyl_grid.addWidget(self._cyl_radius, 0, 1)
+        cyl_grid.addWidget(QLabel("长度 L"), 0, 2); cyl_grid.addWidget(self._cyl_length, 0, 3)
+        cyl_grid.addWidget(QLabel("轴向"), 0, 4); cyl_grid.addWidget(self._cyl_axis_combo, 0, 5)
+        cyl_grid.addWidget(QLabel("中心 X"), 1, 0); cyl_grid.addWidget(self._cyl_center_x, 1, 1)
+        cyl_grid.addWidget(QLabel("中心 Y"), 1, 2); cyl_grid.addWidget(self._cyl_center_y, 1, 3)
+        cyl_grid.addWidget(QLabel("中心 Z"), 1, 4); cyl_grid.addWidget(self._cyl_center_z, 1, 5)
+        cyl_grid.addWidget(QLabel("周向网格"), 2, 0); cyl_grid.addWidget(self._cyl_ncirc, 2, 1)
+        cyl_grid.addWidget(QLabel("径向网格"), 2, 2); cyl_grid.addWidget(self._cyl_nradial, 2, 3)
+        cyl_grid.addWidget(QLabel("轴向网格"), 2, 4); cyl_grid.addWidget(self._cyl_naxial, 2, 5)
+        for w in (self._cyl_radius, self._cyl_length, self._cyl_center_x, self._cyl_center_y, self._cyl_center_z,
+                  self._cyl_ncirc, self._cyl_nradial, self._cyl_naxial):
+            w.valueChanged.connect(self._on_domain_param_changed)
+        self._cyl_axis_combo.currentIndexChanged.connect(self._on_domain_param_changed)
+        self._domain_param_stack.addWidget(cyl_page)
+
+        # page 2 — nozzle / diffuser (渐变通道)
+        nozzle_page = QWidget()
+        nz_grid = QGridLayout(nozzle_page)
+        nz_grid.setContentsMargins(0, 0, 0, 0)
+        nz_grid.setSpacing(6)
+        self._nozzle_hin = QDoubleSpinBox(); self._nozzle_hin.setRange(0.0001, 1e6); self._nozzle_hin.setDecimals(4); self._nozzle_hin.setValue(1.0)
+        self._nozzle_hout = QDoubleSpinBox(); self._nozzle_hout.setRange(0.0001, 1e6); self._nozzle_hout.setDecimals(4); self._nozzle_hout.setValue(0.4)
+        self._nozzle_length = QDoubleSpinBox(); self._nozzle_length.setRange(0.0001, 1e6); self._nozzle_length.setDecimals(4); self._nozzle_length.setValue(3.0)
+        self._nozzle_width = QDoubleSpinBox(); self._nozzle_width.setRange(0.0001, 1e6); self._nozzle_width.setDecimals(4); self._nozzle_width.setValue(1.0)
+        self._nozzle_center_x = QDoubleSpinBox(); self._nozzle_center_x.setRange(-1e6, 1e6); self._nozzle_center_x.setDecimals(4); self._nozzle_center_x.setValue(1.5)
+        self._nozzle_center_y = QDoubleSpinBox(); self._nozzle_center_y.setRange(-1e6, 1e6); self._nozzle_center_y.setDecimals(4); self._nozzle_center_y.setValue(0.0)
+        self._nozzle_center_z = QDoubleSpinBox(); self._nozzle_center_z.setRange(-1e6, 1e6); self._nozzle_center_z.setDecimals(4); self._nozzle_center_z.setValue(0.5)
+        self._nozzle_cx = QSpinBox(); self._nozzle_cx.setRange(1, 9999); self._nozzle_cx.setValue(30)
+        self._nozzle_cy = QSpinBox(); self._nozzle_cy.setRange(1, 9999); self._nozzle_cy.setValue(12)
+        self._nozzle_cz = QSpinBox(); self._nozzle_cz.setRange(1, 9999); self._nozzle_cz.setValue(8)
+        nz_grid.addWidget(QLabel("进口高度 H_in"), 0, 0); nz_grid.addWidget(self._nozzle_hin, 0, 1)
+        nz_grid.addWidget(QLabel("出口高度 H_out"), 0, 2); nz_grid.addWidget(self._nozzle_hout, 0, 3)
+        nz_grid.addWidget(QLabel("长度 L (流向X)"), 1, 0); nz_grid.addWidget(self._nozzle_length, 1, 1)
+        nz_grid.addWidget(QLabel("宽度 W (Z)"), 1, 2); nz_grid.addWidget(self._nozzle_width, 1, 3)
+        nz_grid.addWidget(QLabel("中心 X"), 2, 0); nz_grid.addWidget(self._nozzle_center_x, 2, 1)
+        nz_grid.addWidget(QLabel("中心 Y"), 2, 2); nz_grid.addWidget(self._nozzle_center_y, 2, 3)
+        nz_grid.addWidget(QLabel("中心 Z"), 2, 4); nz_grid.addWidget(self._nozzle_center_z, 2, 5)
+        nz_grid.addWidget(QLabel("X网格"), 3, 0); nz_grid.addWidget(self._nozzle_cx, 3, 1)
+        nz_grid.addWidget(QLabel("Y网格"), 3, 2); nz_grid.addWidget(self._nozzle_cy, 3, 3)
+        nz_grid.addWidget(QLabel("Z网格"), 3, 4); nz_grid.addWidget(self._nozzle_cz, 3, 5)
+        for w in (self._nozzle_hin, self._nozzle_hout, self._nozzle_length, self._nozzle_width,
+                  self._nozzle_center_x, self._nozzle_center_y, self._nozzle_center_z,
+                  self._nozzle_cx, self._nozzle_cy, self._nozzle_cz):
+            w.valueChanged.connect(self._on_domain_param_changed)
+        self._domain_param_stack.addWidget(nozzle_page)
+
+        # page 3 — imported CAD domain STL patches
+        cad_page = QWidget()
+        cad_layout = QVBoxLayout(cad_page)
+        cad_layout.setContentsMargins(0, 0, 0, 0)
+        cad_layout.setSpacing(8)
+        self._cad_domain_file_table = QTableWidget(0, 4)
+        self._cad_domain_file_table.setHorizontalHeaderLabels(["序号", "patch名称", "文件名", "路径"])
+        self._cad_domain_file_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self._cad_domain_file_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self._cad_domain_file_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self._cad_domain_file_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self._cad_domain_file_table.verticalHeader().setVisible(False)
+        self._cad_domain_file_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._cad_domain_file_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._cad_domain_file_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._cad_domain_file_table.setMinimumHeight(110)
+        self._cad_domain_file_table.setMaximumHeight(150)
+        self._cad_domain_file_table.itemSelectionChanged.connect(self._on_cad_domain_file_selection_changed)
+        cad_layout.addWidget(self._cad_domain_file_table)
+        transform_grid = QGridLayout()
+        transform_grid.setSpacing(6)
+        self._cad_domain_transform_inputs = {}
+        transform_rows = [
+            ("位置", "translate", -1e6, 1e6, 0.0, ""),
+            ("旋转", "rotate", -360.0, 360.0, 0.0, "°"),
+            ("缩放", "scale", 0.001, 1e6, 1.0, ""),
+        ]
+        for row, (label, prefix, min_v, max_v, default_v, suffix) in enumerate(transform_rows):
+            transform_grid.addWidget(QLabel(label), row, 0)
+            for col, axis in enumerate(("X", "Y", "Z")):
+                spin = QDoubleSpinBox()
+                spin.setRange(min_v, max_v)
+                spin.setDecimals(4 if prefix != "rotate" else 2)
+                spin.setValue(default_v)
+                if suffix:
+                    spin.setSuffix(suffix)
+                spin.valueChanged.connect(self._on_cad_domain_transform_changed)
+                transform_grid.addWidget(QLabel(axis), row, col * 2 + 1)
+                transform_grid.addWidget(spin, row, col * 2 + 2)
+                self._cad_domain_transform_inputs[f"{prefix}_{axis.lower()}"] = spin
+        cad_layout.addLayout(transform_grid)
+        cad_cells = QHBoxLayout()
+        self._cad_domain_cells_inputs = {}
+        for axis, value in (("X", 40), ("Y", 24), ("Z", 24)):
+            cad_cells.addWidget(QLabel(f"背景{axis}网格"))
+            spin = QSpinBox()
+            spin.setRange(1, 9999)
+            spin.setValue(value)
+            spin.valueChanged.connect(self._on_domain_param_changed)
+            cad_cells.addWidget(spin)
+            self._cad_domain_cells_inputs[axis] = spin
+        cad_cells.addSpacing(16)
+        cad_cells.addWidget(QLabel("locationInMesh"))
+        self._cad_location_inputs = {}
+        for axis in ("X", "Y", "Z"):
+            cad_cells.addWidget(QLabel(axis))
+            spin = QDoubleSpinBox()
+            spin.setRange(-1e9, 1e9)
+            spin.setDecimals(5)
+            spin.setValue(0.0)
+            spin.valueChanged.connect(self._on_cad_location_changed)
+            cad_cells.addWidget(spin)
+            self._cad_location_inputs[axis.lower()] = spin
+        auto_loc_btn = QPushButton("自动推荐位置")
+        auto_loc_btn.clicked.connect(self._auto_recommend_location_in_mesh)
+        cad_cells.addWidget(auto_loc_btn)
+        self._cad_domain_status_label = QLabel("包围状态：未导入计算域")
+        self._cad_domain_status_label.setStyleSheet("color: #d7ba7d;")
+        cad_cells.addWidget(self._cad_domain_status_label)
+        cad_cells.addStretch(1)
+        cad_layout.addLayout(cad_cells)
+        self._domain_param_stack.addWidget(cad_page)
+
+        g3_layout.addWidget(self._domain_param_stack)
+
+        # Kept as hidden/default state for existing save/load and unit-conversion code.
         self._domain_orthogonal_check = QCheckBox("正交网格")
-        opt_row.addWidget(self._domain_orthogonal_check)
-        opt_row.addWidget(QLabel("网格单位:"))
         self._domain_unit_combo = QComboBox()
         self._domain_unit_combo.addItem("米 (m)", "m")
         self._domain_unit_combo.addItem("毫米 (mm)", "mm")
-        opt_row.addWidget(self._domain_unit_combo)
-        auto_btn = QPushButton("从几何自动计算")
-        auto_btn.clicked.connect(self._auto_fill_domain_bounds)
-        opt_row.addWidget(auto_btn)
-        opt_row.addStretch(1)
-        g3_layout.addLayout(opt_row)
-        scroll_layout.addWidget(g3)
+        # 计算域定义放在边界面表之前：先选区域，再设边界面
+        scroll_layout.insertWidget(1, g3)
 
-        # Group 4 — snappyHexMesh parameters
-        g4 = QGroupBox("模型贴体网格加密")
+        # Group 4 — snappyHexMesh refinement + quality constraints
+        g4 = QGroupBox("模型贴体网格加密和网格质量约束")
         g4_layout = QVBoxLayout(g4)
 
         refine_row = QHBoxLayout()
@@ -542,34 +686,35 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._snappy_keep_outline = QCheckBox("保留原始边界轮廓")
         self._snappy_keep_outline.setChecked(True)
         g4_layout.addWidget(self._snappy_keep_outline)
-        scroll_layout.addWidget(g4)
 
-        # Group 5 — mesh quality constraints
-        g5 = QGroupBox("网格质量约束")
-        g5_layout = QHBoxLayout(g5)
-        g5_layout.addWidget(QLabel("最大网格畸变率:"))
+        quality_label = QLabel("网格质量约束")
+        quality_label.setStyleSheet("font-weight: 600; color: #cccccc; margin-top: 4px;")
+        g4_layout.addWidget(quality_label)
+        quality_row = QHBoxLayout()
+        quality_row.addWidget(QLabel("最大网格畸变率:"))
         self._quality_max_skew = QDoubleSpinBox()
         self._quality_max_skew.setRange(0.1, 1.0)
         self._quality_max_skew.setDecimals(2)
         self._quality_max_skew.setSingleStep(0.05)
         self._quality_max_skew.setValue(0.8)
         self._quality_max_skew.setToolTip("超过此畸变率的网格将在导出时剔除")
-        g5_layout.addWidget(self._quality_max_skew)
-        g5_layout.addWidget(QLabel("最小网格体积:"))
+        quality_row.addWidget(self._quality_max_skew)
+        quality_row.addWidget(QLabel("最小网格体积:"))
         self._quality_min_volume = QDoubleSpinBox()
         self._quality_min_volume.setRange(0.0, 1.0)
         self._quality_min_volume.setDecimals(8)
         self._quality_min_volume.setValue(1e-12)
         self._quality_min_volume.setToolTip("体积小于此值的网格视为无效")
-        g5_layout.addWidget(self._quality_min_volume)
+        quality_row.addWidget(self._quality_min_volume)
         self._quality_del_negative = QCheckBox("自动删除负体积网格")
         self._quality_del_negative.setChecked(True)
-        g5_layout.addWidget(self._quality_del_negative)
+        quality_row.addWidget(self._quality_del_negative)
         self._quality_smooth = QCheckBox("网格平滑处理")
         self._quality_smooth.setChecked(True)
-        g5_layout.addWidget(self._quality_smooth)
-        g5_layout.addStretch(1)
-        scroll_layout.addWidget(g5)
+        quality_row.addWidget(self._quality_smooth)
+        quality_row.addStretch(1)
+        g4_layout.addLayout(quality_row)
+        scroll_layout.addWidget(g4)
 
         # Group 6 — action button bar
         btn_row = QHBoxLayout()
@@ -643,6 +788,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._cfg_recommended_solver = QLabel("simpleFoam")
         self._cfg_recommended_solver.setStyleSheet("color: #9da5b4;")
         self._cfg_solver_combo = QComboBox()
+        self._cfg_solver_combo.currentIndexChanged.connect(self._refresh_dict_preview)
         self._cfg_end_time = QLineEdit("1.0")
         self._cfg_delta_t = QLineEdit("0.001")
         self._cfg_write_interval = QSpinBox()
@@ -737,10 +883,12 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._cfg_fv_schemes.addItem("稳定 (upwind)", "stable")
         self._cfg_fv_schemes.addItem("平衡 (linearUpwind)", "balanced")
         self._cfg_fv_schemes.addItem("精度 (linear)", "accurate")
+        self._cfg_fv_schemes.currentIndexChanged.connect(self._refresh_dict_preview)
         self._cfg_fv_solution = QComboBox()
         self._cfg_fv_solution.addItem("默认收敛", "default")
         self._cfg_fv_solution.addItem("严格收敛", "strict")
         self._cfg_fv_solution.addItem("快速粗糙", "fast")
+        self._cfg_fv_solution.currentIndexChanged.connect(self._refresh_dict_preview)
         ctrl_form.addRow("残差收敛阈值", self._cfg_residual)
         ctrl_form.addRow("最大迭代步数", self._cfg_max_iters)
         ctrl_form.addRow("松弛因子", self._cfg_relaxation)
@@ -775,120 +923,6 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         root.addWidget(scroll)
         return wrapper
 
-    def _load_boundaries_into_table(self) -> None:
-        if not hasattr(self, "_cfg_boundary_table"):
-            return
-        self._cfg_boundary_table.setRowCount(0)
-        if self._current_project is None:
-            return
-        names = self._read_mesh_patch_names()
-        if not names:
-            bmd = self._current_project.case_dir / "system" / "blockMeshDict"
-            names = self._context.project_service._extract_boundary_names(bmd)
-        if not names:
-            names = ("inlet", "outlet", "fixedWalls")
-        # read existing boundary values from 0/U and 0/p
-        u_boundaries = self._read_boundary_field_values("0/U")
-        p_boundaries = self._read_boundary_field_values("0/p")
-        for i, name in enumerate(names):
-            self._cfg_boundary_table.insertRow(i)
-            self._cfg_boundary_table.setItem(i, 0, QTableWidgetItem(name))
-            role = "入口" if "inlet" in name.lower() else "出口" if "outlet" in name.lower() else "壁面" if "wall" in name.lower() else "对称"
-            self._cfg_boundary_table.setItem(i, 1, QTableWidgetItem(role))
-            u_val = u_boundaries.get(name, "(10 0 0)" if role == "入口" else "noSlip" if role == "壁面" else "zeroGradient")
-            p_val = p_boundaries.get(name, "0" if role == "出口" else "zeroGradient")
-            self._cfg_boundary_table.setItem(i, 2, QTableWidgetItem(u_val))
-            self._cfg_boundary_table.setItem(i, 3, QTableWidgetItem(p_val))
-        if self._cfg_boundary_table.rowCount() > 0:
-            self._cfg_boundary_table.selectRow(0)
-            self._on_boundary_row_selected(0)
-
-    def _read_boundary_field_values(self, field_file: str) -> dict[str, str]:
-        case_dir = self._current_project.case_dir
-        fp = case_dir / field_file
-        if not fp.exists():
-            return {}
-        import re
-        content = fp.read_text(encoding="utf-8")
-        result = {}
-        # find boundaryField section, then parse each patch block
-        bf_m = re.search(r"boundaryField\s*\{(.*)\}\s*(//|\Z)", content, re.DOTALL)
-        if not bf_m:
-            return result
-        bf_body = bf_m.group(1)
-        # each patch: \n\s+name\n\s+{ body }
-        for m in re.finditer(r"(\S+)\s*\n\s*\{([^}]+)\}", bf_body):
-            name = m.group(1).strip()
-            body = m.group(2)
-            # extract value
-            vm = re.search(r"value\s+uniform\s+(\([^)]+\)|\S+)", body)
-            if vm:
-                result[name] = vm.group(1).strip()
-            else:
-                tm = re.search(r"type\s+(\S+);", body)
-                if tm:
-                    result[name] = tm.group(1).strip()
-        return result
-
-    def _read_mesh_patch_names(self) -> list[str]:
-        boundary_file = self._current_project.case_dir / "constant" / "polyMesh" / "boundary"
-        if not boundary_file.exists():
-            return []
-        import re
-        content = boundary_file.read_text(encoding="utf-8")
-        patches = []
-        for m in re.finditer(r"^\s+(\S+)\s*$", content, re.MULTILINE):
-            name = m.group(1).strip()
-            if name and not name.startswith("{") and not name.startswith("}"):
-                patches.append(name)
-        return [p for p in patches if not p.startswith("//") and p not in ("(", ")") and not p.isdigit()]
-
-    def _on_boundary_row_selected(self, row: int) -> None:
-        if row < 0 or row >= self._cfg_boundary_table.rowCount():
-            return
-        name_item = self._cfg_boundary_table.item(row, 0)
-        type_item = self._cfg_boundary_table.item(row, 1)
-        u_item = self._cfg_boundary_table.item(row, 2)
-        p_item = self._cfg_boundary_table.item(row, 3)
-        if name_item:
-            self._cfg_bc_name.setText(name_item.text())
-        if type_item:
-            role = type_item.text()
-            idx = self._cfg_bc_type.findText("inlet" if role == "入口" else "outlet" if role == "出口" else "wall")
-            if idx >= 0:
-                self._cfg_bc_type.setCurrentIndex(idx)
-        if u_item:
-            self._cfg_bc_u_value.setText(u_item.text())
-        if p_item:
-            self._cfg_bc_p_value.setText(p_item.text())
-
-    def _sync_boundary_table_from_ui(self, row: int) -> None:
-        if row < 0 or row >= self._cfg_boundary_table.rowCount():
-            return
-        role_text = {0: "入口", 1: "出口", 2: "壁面", 3: "对称", 4: "empty"}
-        bc_type_idx = self._cfg_bc_type.currentIndex()
-        role = role_text.get(bc_type_idx, "壁面")
-        self._cfg_boundary_table.item(row, 1).setText(role)
-        self._cfg_boundary_table.item(row, 2).setText(self._cfg_bc_u_value.text())
-        self._cfg_boundary_table.item(row, 3).setText(self._cfg_bc_p_value.text())
-
-    def _on_boundary_type_changed(self) -> None:
-        row = self._cfg_boundary_table.currentRow()
-        if row < 0:
-            return
-        role_text = {0: "入口", 1: "出口", 2: "壁面", 3: "对称", 4: "empty"}
-        role = role_text.get(self._cfg_bc_type.currentIndex(), "壁面")
-        if role == "入口":
-            self._cfg_bc_u_value.setText("(10 0 0)")
-            self._cfg_bc_p_value.setText("zeroGradient")
-        elif role == "出口":
-            self._cfg_bc_u_value.setText("zeroGradient")
-            self._cfg_bc_p_value.setText("0")
-        else:
-            self._cfg_bc_u_value.setText("noSlip")
-            self._cfg_bc_p_value.setText("zeroGradient")
-        self._sync_boundary_table_from_ui(row)
-
     def _read_boundary_rows(self) -> list[dict]:
         rows: list[dict] = []
         if hasattr(self, "_domain_face_table"):
@@ -903,16 +937,24 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
                     "u_value": face.get("u_value", "zeroGradient"),
                     "p_value": face.get("p_value", "zeroGradient"),
                 }
+            for asset in getattr(self, "_mesh_imports", []):
+                name = getattr(asset, "name", "").strip()
+                if not name or name in merged:
+                    continue
+                merged[name] = {
+                    "name": name,
+                    "role": "wall",
+                    "u_value": "noSlip",
+                    "p_value": "zeroGradient",
+                }
+            if getattr(self, "_current_domain_template_key", lambda: "")() == "cad" and "background" not in merged:
+                merged["background"] = {
+                    "name": "background",
+                    "role": "patch",
+                    "u_value": "zeroGradient",
+                    "p_value": "zeroGradient",
+                }
             return list(merged.values())
-        if hasattr(self, "_cfg_boundary_table"):
-            for r in range(self._cfg_boundary_table.rowCount()):
-                name = self._cfg_boundary_table.item(r, 0)
-                role = self._cfg_boundary_table.item(r, 1)
-                u_val = self._cfg_boundary_table.item(r, 2)
-                p_val = self._cfg_boundary_table.item(r, 3)
-                if name and role and u_val and p_val:
-                    rows.append({"name": name.text(), "role": role.text(),
-                                 "u_value": u_val.text(), "p_value": p_val.text()})
         return rows
 
     def _build_boundary_block(self, field: str) -> str:
@@ -1040,71 +1082,141 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._set_status("字典预览已刷新")
 
     def _build_fv_schemes_text(self, key: str) -> str:
+        solver = self._cfg_solver_combo.currentData() if hasattr(self, "_cfg_solver_combo") else "simpleFoam"
+        is_compressible = solver in {"rhoSimpleFoam", "rhoPimpleFoam"}
         if key == "stable":
-            return (
-                "ddtSchemes   { default Euler; }\n"
-                "gradSchemes  { default Gauss linear; }\n"
-                "divSchemes   { default Gauss upwind; }\n"
-                "laplacianSchemes { default Gauss linear corrected; }\n"
-                "interpolationSchemes { default linear; }\n"
-                "snGradSchemes { default corrected; }"
-            )
+            div_u = "Gauss upwind"
+            ddt = "Euler"
         elif key == "accurate":
-            return (
-                "ddtSchemes   { default backward; }\n"
-                "gradSchemes  { default Gauss linear; }\n"
-                "divSchemes   { default Gauss linear; }\n"
-                "laplacianSchemes { default Gauss linear corrected; }\n"
-                "interpolationSchemes { default linear; }\n"
-                "snGradSchemes { default corrected; }"
-            )
+            div_u = "Gauss linear"
+            ddt = "backward"
         else:
+            div_u = "Gauss linearUpwind grad(U)"
+            ddt = "Euler"
+        if is_compressible:
+            div_h = "Gauss upwind" if key == "stable" else "Gauss linearUpwind grad(T)" if key == "balanced" else "Gauss linear"
             return (
-                "ddtSchemes   { default Euler; }\n"
-                "gradSchemes  { default Gauss linear; }\n"
-                "divSchemes   { default Gauss linearUpwind grad(U); }\n"
-                "laplacianSchemes { default Gauss linear corrected; }\n"
-                "interpolationSchemes { default linear; }\n"
-                "snGradSchemes { default corrected; }"
+                f"ddtSchemes\n{{\n    default         {ddt};\n}}\n\n"
+                "gradSchemes\n{\n    default         Gauss linear;\n}\n\n"
+                "divSchemes\n{\n"
+                "    default         none;\n"
+                f"    div(phi,U)      {div_u};\n"
+                f"    div(phi,K)      {div_u};\n"
+                f"    div(phi,h)      {div_h};\n"
+                f"    div(phi,e)      {div_h};\n"
+                "    div(((rho*nuEff)*dev2(T(grad(U))))) Gauss linear;\n"
+                "}\n\n"
+                "laplacianSchemes\n{\n    default         Gauss linear corrected;\n}\n\n"
+                "interpolationSchemes\n{\n    default         linear;\n}\n\n"
+                "snGradSchemes\n{\n    default         corrected;\n}"
             )
+        return (
+            f"ddtSchemes\n{{\n    default         {ddt};\n}}\n\n"
+            "gradSchemes\n{\n    default         Gauss linear;\n}\n\n"
+            "divSchemes\n{\n"
+            "    default         none;\n"
+            f"    div(phi,U)      {div_u};\n"
+            "    div((nuEff*dev2(T(grad(U))))) Gauss linear;\n"
+            "}\n\n"
+            "laplacianSchemes\n{\n    default         Gauss linear corrected;\n}\n\n"
+            "interpolationSchemes\n{\n    default         linear;\n}\n\n"
+            "snGradSchemes\n{\n    default         corrected;\n}"
+        )
 
-    def _build_fv_solution_text(self, key: str, residual: str, relaxation: str) -> str:
+    def _build_fv_solution_text(
+        self,
+        key: str,
+        residual: str,
+        relaxation: str,
+        solver_override: str | None = None,
+    ) -> str:
         ncorrectors = "1" if key == "fast" else "2"
         reltol = "0.1" if key == "fast" else "0.01" if key == "default" else "0.001"
-        solver = self._cfg_solver_combo.currentData()
-        is_steady = solver in ("simpleFoam",)
+        smoother = "GaussSeidel" if key == "fast" else "symGaussSeidel"
+        solver = solver_override or self._cfg_solver_combo.currentData()
+        is_simple = solver in {"simpleFoam", "rhoSimpleFoam"}
+        is_piso = solver in {"pisoFoam", "icoFoam"}
+        is_pimple = solver in {"pimpleFoam", "rhoPimpleFoam"}
         is_compressible = solver in {"rhoSimpleFoam", "rhoPimpleFoam"}
-        outer_correctors = "1" if is_steady else ncorrectors
-        # 始终开启动量预测，否则求解器不会求解/打印速度方程，
-        # 残差曲线就只剩压强 p，没有 Ux/Uy/Uz。
-        momentum_predictor = "yes"
+        outer_correctors = "1" if is_simple else ncorrectors
         extra_solvers = ""
         if is_compressible:
             extra_solvers = (
-                f"    T\n    {{\n        solver          smoothSolver;\n        smoother        symGaussSeidel;\n"
+                f"    T\n    {{\n        solver          smoothSolver;\n        smoother        {smoother};\n"
                 f"        tolerance       {residual};\n        relTol          {reltol};\n    }}\n"
                 f"    TFinal\n    {{\n        $T;\n        relTol          0;\n    }}\n"
                 f"    rho\n    {{\n        solver          diagonal;\n    }}\n"
             )
+
+        algorithm_block = ""
+        if is_simple:
+            temp_control = f"        T               {residual};\n" if is_compressible else ""
+            algorithm_block = (
+                "SIMPLE\n"
+                "{\n"
+                "    nNonOrthogonalCorrectors 0;\n"
+                "    residualControl\n"
+                "    {\n"
+                f"        p               {residual};\n"
+                f"        U               {residual};\n"
+                f"{temp_control}"
+                + "    }\n"
+                "}\n"
+                "\n"
+                "PIMPLE\n"
+                "{\n"
+                "    nOuterCorrectors 1;\n"
+                f"    nCorrectors      {ncorrectors};\n"
+                "    nNonOrthogonalCorrectors 0;\n"
+                "    momentumPredictor yes;\n"
+                "    pRefCell         0;\n"
+                "    pRefValue        0;\n"
+                "    residualControl\n"
+                "    {\n"
+                f"        p               {residual};\n"
+                f"        U               {residual};\n"
+                f"{temp_control}"
+                "    }\n"
+                "}\n"
+            )
+        elif is_piso:
+            algorithm_block = (
+                "PISO\n"
+                "{\n"
+                f"    nCorrectors     {ncorrectors};\n"
+                "    nNonOrthogonalCorrectors 0;\n"
+                "    pRefCell        0;\n"
+                "    pRefValue       0;\n"
+                "}\n"
+            )
+        elif is_pimple:
+            algorithm_block = (
+                "PIMPLE\n"
+                "{\n"
+                f"    nOuterCorrectors {outer_correctors};\n"
+                f"    nCorrectors      {ncorrectors};\n"
+                "    nNonOrthogonalCorrectors 0;\n"
+                "    momentumPredictor yes;\n"
+                "    pRefCell         0;\n"
+                "    pRefValue        0;\n"
+                "}\n"
+            )
+
         return (
             f"solvers\n{{\n"
             f"    p\n    {{\n        solver          PCG;\n        preconditioner  DIC;\n"
             f"        tolerance       {residual};\n        relTol          {reltol};\n    }}\n"
             f"    pFinal\n    {{\n        $p;\n        relTol          0;\n    }}\n"
-            f"    U\n    {{\n        solver          smoothSolver;\n        smoother        symGaussSeidel;\n"
+            f"    U\n    {{\n        solver          smoothSolver;\n        smoother        {smoother};\n"
             f"        tolerance       {residual};\n        relTol          {reltol};\n    }}\n"
             f"    UFinal\n    {{\n        $U;\n        relTol          0;\n    }}\n"
             f"{extra_solvers}"
             f"}}\n"
-            f"PIMPLE\n{{\n"
-            f"    nOuterCorrectors {outer_correctors};\n"
-            f"    nCorrectors      {ncorrectors};\n"
-            f"    nNonOrthogonalCorrectors 0;\n"
-            f"    momentumPredictor {momentum_predictor};\n"
-            f"    pRefCell         0;\n"
-            f"    pRefValue        0;\n"
-            f"}}\n"
-            f"relaxationFactors {{ U {relaxation}; }}"
+            f"{algorithm_block}"
+            f"relaxationFactors\n{{\n"
+            f"    fields\n    {{\n        p               0.3;\n    }}\n"
+            f"    equations\n    {{\n        U               {relaxation};\n    }}\n"
+            f"}}"
         )
 
     def _foam_header(self, class_name: str, object_name: str) -> str:
@@ -1281,8 +1393,6 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         end_time = self._cfg_end_time.text().strip()
         delta_t = self._cfg_delta_t.text().strip()
         write_interval = self._cfg_write_interval.value()
-        init_u = self._cfg_init_velocity.text().strip()
-        init_p = self._cfg_init_pressure.text().strip()
         residual = self._cfg_residual.text().strip()
         relaxation = self._cfg_relaxation.text().strip()
         fv_schemes_key = self._cfg_fv_schemes.currentData()
@@ -1290,7 +1400,6 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         rho = self._cfg_density.text().strip()
         nu = self._cfg_nu.text().strip()
         mu = self._cfg_mu.text().strip()
-        turb_model = self._cfg_turb_model.currentData()
 
         control_dict = (
             self._foam_header("dictionary", "controlDict") +
@@ -1313,10 +1422,19 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             (case_dir / "constant" / "thermophysicalProperties").write_text(
                 self._physical_properties_text(rho, nu, mu), encoding="utf-8"
             )
+            for stale in (case_dir / "constant" / "physicalProperties",):
+                if stale.exists():
+                    stale.unlink()
         else:
             (case_dir / "constant" / "physicalProperties").write_text(
                 self._physical_properties_text(rho, nu, mu), encoding="utf-8"
             )
+            for stale in (
+                case_dir / "constant" / "thermophysicalProperties",
+                case_dir / "0" / "T",
+            ):
+                if stale.exists():
+                    stale.unlink()
 
         (case_dir / "constant" / "momentumTransport").write_text(
             self._momentum_transport_text(), encoding="utf-8"
@@ -1338,17 +1456,80 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._set_status(f"字典已导出到 {case_dir}")
         self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_RUN)
 
-    def _make_menu_button(self, title, actions):
-        button = QPushButton(title)
-        menu = QMenu(button)
-        for label, callback in actions:
-            action = menu.addAction(label)
-            action.triggered.connect(lambda _checked=False, cb=callback: cb())
-        button.setMenu(menu)
-        return button
 
 
 
+
+    def _build_sketch_toolbar(self) -> QWidget:
+        bar = QWidget()
+        bar.setStyleSheet("background: #2d2d30;")
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(4)
+
+        layout.addWidget(QLabel("草图平面"))
+        plane_combo = QComboBox()
+        for plane in ("XY", "YZ", "XZ"):
+            plane_combo.addItem(plane, plane)
+        plane_combo.currentTextChanged.connect(self._set_sketch_plane)
+        self._sketch_plane_combo = plane_combo
+        layout.addWidget(plane_combo)
+        layout.addSpacing(10)
+
+        tools = [
+            ("select", "选择"), ("point", "点"), ("line", "直线"),
+            ("circle", "圆"), ("arc", "圆弧"), ("rect", "矩形"),
+            ("polyline", "多段线"),
+        ]
+        for tool, label in tools:
+            btn = QPushButton(label)
+            btn.setFixedHeight(28)
+            btn.clicked.connect(lambda _checked=False, t=tool: self._set_sketch_tool(t))
+            layout.addWidget(btn)
+        layout.addSpacing(10)
+
+        self._sketch_closed_label = QLabel("闭合轮廓：❌ 未闭合")
+        self._sketch_closed_label.setStyleSheet("color: #d7ba7d;")
+        layout.addWidget(self._sketch_closed_label)
+        layout.addSpacing(10)
+
+        extrude_btn = QPushButton("拉伸")
+        extrude_btn.setFixedHeight(28)
+        extrude_btn.clicked.connect(self._extrude_sketch)
+        layout.addWidget(extrude_btn)
+        revolve_btn = QPushButton("旋转成型")
+        revolve_btn.setFixedHeight(28)
+        revolve_btn.clicked.connect(self._revolve_sketch)
+        layout.addWidget(revolve_btn)
+        layout.addSpacing(10)
+
+        layout.addWidget(QLabel("图元"))
+        self._sketch_entity_combo = QComboBox()
+        self._sketch_entity_combo.setMinimumWidth(110)
+        layout.addWidget(self._sketch_entity_combo)
+        edit_dim_btn = QPushButton("编辑尺寸")
+        edit_dim_btn.setFixedHeight(28)
+        edit_dim_btn.clicked.connect(self._edit_selected_sketch_dimension)
+        layout.addWidget(edit_dim_btn)
+        del_entity_btn = QPushButton("删除图元")
+        del_entity_btn.setFixedHeight(28)
+        del_entity_btn.clicked.connect(self._delete_selected_sketch_entity)
+        layout.addWidget(del_entity_btn)
+        clear_btn = QPushButton("清空草图")
+        clear_btn.setFixedHeight(28)
+        clear_btn.clicked.connect(self._clear_sketch_entities)
+        layout.addWidget(clear_btn)
+
+        layout.addStretch(1)
+        exit_btn = QPushButton("退出草图")
+        exit_btn.setFixedHeight(28)
+        exit_btn.setStyleSheet("color: #f48771;")
+        exit_btn.clicked.connect(self._exit_sketch_mode)
+        layout.addWidget(exit_btn)
+
+        self._sketch_toolbar = bar
+        bar.setVisible(False)
+        return bar
 
     def _build_draw_geometry_tab(self) -> QWidget:
         wrapper = QWidget()
@@ -1405,17 +1586,13 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         boolean_btn.setMenu(boolean_menu)
         toolbar.addWidget(boolean_btn)
 
+        sketch_btn = QPushButton("新建草图")
+        sketch_btn.setFixedHeight(30)
+        sketch_btn.setStyleSheet("color: #4fc3f7; font-weight: 600;")
+        sketch_btn.clicked.connect(self._new_sketch)
+        toolbar.addWidget(sketch_btn)
+
         toolbar.addSpacing(12)
-
-        import_btn = QPushButton("导入 STL")
-        import_btn.setFixedHeight(30)
-        import_btn.clicked.connect(self._import_stl_file)
-        toolbar.addWidget(import_btn)
-
-        export_btn = QPushButton("导出 STL")
-        export_btn.setFixedHeight(30)
-        export_btn.clicked.connect(self._export_stl_file)
-        toolbar.addWidget(export_btn)
 
         finish_draw_btn = QPushButton("完成绘制")
         finish_draw_btn.setFixedHeight(30)
@@ -1430,6 +1607,9 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         toolbar.addWidget(reset_btn)
         toolbar.addStretch(1)
         root.addLayout(toolbar)
+
+        # --- sketch sub-toolbar (hidden until 草图 mode) ---
+        root.addWidget(self._build_sketch_toolbar())
 
         # --- body: scene tree | viewport | property panel ---
         body = QSplitter(Qt.Orientation.Horizontal)
@@ -1457,6 +1637,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         vp_layout = QVBoxLayout(viewport_wrapper)
         vp_layout.setContentsMargins(0, 0, 0, 0)
         self._modeling_viewport = NativeVtkPreviewWidget(viewport_wrapper, background=(0.94, 0.94, 0.94))
+        self._modeling_viewport.enable_orientation_axes()
         self._install_interactive_edit_handlers()
         vp_layout.addWidget(self._modeling_viewport, 1)
         body.addWidget(viewport_wrapper)
@@ -1464,7 +1645,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         # property panel
         prop_wrapper = QWidget()
         prop_wrapper.setStyleSheet("background: #252526;")
-        prop_wrapper.setMinimumWidth(300)
+        prop_wrapper.setMinimumWidth(340)
         prop_outer_layout = QVBoxLayout(prop_wrapper)
         prop_outer_layout.setContentsMargins(12, 12, 12, 12)
         prop_outer_layout.setSpacing(10)
@@ -1538,7 +1719,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         prop_layout.addStretch(1)
         body.addWidget(prop_wrapper)
 
-        body.setSizes([220, 760, 320])
+        body.setSizes([200, 720, 380])
         root.addWidget(body, 1)
 
         # --- status bar ---
@@ -1562,19 +1743,22 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         sb.setRange(min_val, max_val)
         sb.setDecimals(2)
         sb.setSingleStep(step)
-        sb.setMinimumWidth(120)
-        sb.setMinimumHeight(28)
+        sb.setMinimumWidth(80)
+        sb.setMinimumHeight(30)
+        sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         if callback is not None:
             sb.valueChanged.connect(callback)
         return sb
 
     def _modeling_group(self, label_text, x, y, z) -> QGroupBox:
         gb = QGroupBox(label_text)
-        gb.setMinimumHeight(96)
+        gb.setMinimumHeight(108)
         form = QFormLayout(gb)
-        form.setContentsMargins(8, 12, 8, 8)
-        form.setVerticalSpacing(6)
-        form.setHorizontalSpacing(8)
+        form.setContentsMargins(10, 14, 10, 10)
+        form.setVerticalSpacing(8)
+        form.setHorizontalSpacing(10)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignVCenter)
         form.addRow("X", x)
         form.addRow("Y", y)
         form.addRow("Z", z)
@@ -1599,7 +1783,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._cfg_continue_btn.setFixedHeight(34)
         self._cfg_continue_btn.setEnabled(False)
         self._cfg_continue_btn.clicked.connect(self._continue_simulation)
-        self._cfg_stop_btn = QPushButton("终止计算")
+        self._cfg_stop_btn = QPushButton("暂停计算")
         self._cfg_stop_btn.setFixedHeight(34)
         self._cfg_stop_btn.setStyleSheet("color: #f48771;")
         self._cfg_stop_btn.clicked.connect(self._stop_current_process)
@@ -1647,7 +1831,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._cfg_run_log = QTextEdit()
         self._cfg_run_log.setReadOnly(True)
         self._cfg_run_log.setStyleSheet("font-family: Consolas, monospace; font-size: 13px;")
-        self._cfg_run_log.setPlaceholderText("点击 [启动计算] 后，OpenFOAM 终端输出将实时显示在这里...")
+        self._cfg_run_log.setPlaceholderText("点击 [启动计算] 从 0 开始，点击 [继续计算] 从暂停时间步继续。")
         root.addWidget(self._cfg_run_log, 1)
 
         return wrapper
@@ -1957,7 +2141,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         if has_mesh and has_dicts:
             self._cfg_status_label.setText(saved.get("status_text", "状态：就绪"))
             self._cfg_status_label.setStyleSheet("font-weight: 600; color: #89d185;")
-            self._cfg_run_log.setPlaceholderText("网格和字典已就绪，点击 [启动计算] 开始仿真。")
+            self._cfg_run_log.setPlaceholderText("网格和字典已就绪，点击 [启动计算] 从 0 开始仿真。")
             self._cfg_start_btn.setEnabled(True)
             self._cfg_continue_btn.setEnabled(bool(saved.get("can_continue")))
         elif has_dicts:
@@ -2005,8 +2189,49 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             content = content.replace("application", f"startFrom       {start_from};\napplication", 1)
         ctrl_dict.write_text(content, encoding="utf-8")
 
+    def _clear_solver_time_dirs_for_fresh_start(self, case_dir) -> None:
+        root = case_dir.resolve()
+        for child in case_dir.iterdir():
+            if not child.is_dir() or not self._is_openfoam_time_dir(child.name) or child.name == "0":
+                continue
+            target = child.resolve()
+            if target == root or root not in target.parents:
+                raise OSError(f"拒绝删除 Case 外路径：{target}")
+            import shutil
+            shutil.rmtree(child)
+        for generated in (case_dir / "postProcessing", case_dir / "VTK"):
+            if generated.exists():
+                target = generated.resolve()
+                if target == root or root not in target.parents:
+                    raise OSError(f"拒绝删除 Case 外路径：{target}")
+                import shutil
+                shutil.rmtree(generated)
+
     def _continue_simulation(self) -> None:
         self._start_simulation(resume=True)
+
+    def _solver_runtime_command(self, solver: str) -> str:
+        if solver == "simpleFoam":
+            return "foamRun -solver incompressibleFluid"
+        if solver == "rhoSimpleFoam":
+            return "foamRun -solver compressibleFluid"
+        return shlex.quote(solver)
+
+    def _ensure_fv_solution_matches_solver(self, case_dir, solver: str) -> None:
+        if solver not in {"simpleFoam", "rhoSimpleFoam", "pimpleFoam", "rhoPimpleFoam"}:
+            return
+        fv_solution = case_dir / "system" / "fvSolution"
+        if fv_solution.exists() and "PIMPLE" in fv_solution.read_text(encoding="utf-8", errors="replace"):
+            return
+        key = self._cfg_fv_solution.currentData() if hasattr(self, "_cfg_fv_solution") else "default"
+        residual = self._cfg_residual.text().strip() if hasattr(self, "_cfg_residual") else "1e-6"
+        relaxation = self._cfg_relaxation.text().strip() if hasattr(self, "_cfg_relaxation") else "0.7"
+        fv_solution.write_text(
+            self._foam_header("dictionary", "fvSolution")
+            + self._build_fv_solution_text(key, residual, relaxation, solver_override=solver)
+            + "\n// ************************************************************************* //\n",
+            encoding="utf-8",
+        )
 
     def _start_simulation(self, resume: bool = False) -> None:
         if self._current_project is None:
@@ -2035,10 +2260,16 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
                 return
             self._set_control_dict_start_from(ctrl_dict, "latestTime")
         else:
+            try:
+                self._clear_solver_time_dirs_for_fresh_start(case_dir)
+            except OSError as error:
+                self._set_status(f"清理旧仿真时间步失败：{error}")
+                return
             self._set_control_dict_start_from(ctrl_dict, "startTime")
         content = ctrl_dict.read_text(encoding="utf-8")
         m = re.search(r"application\s+(\S+);", content)
         solver = m.group(1) if m else "simpleFoam"
+        self._ensure_fv_solution_matches_solver(case_dir, solver)
         end_m = re.search(r"endTime\s+([0-9.e+\-]+);", content)
         dt_m = re.search(r"deltaT\s+([0-9.e+\-]+);", content)
         try:
@@ -2063,7 +2294,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         command = (
             f"source {shlex.quote(status.env_script_path)} >/dev/null 2>&1 && "
             f"cd {shlex.quote(str(case_dir))} && "
-            f"{shlex.quote(solver)}"
+            f"{self._solver_runtime_command(solver)}"
         )
         self._cfg_start_btn.setEnabled(False)
         self._cfg_continue_btn.setEnabled(False)
@@ -2088,7 +2319,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._cfg_run_log.append(f"Case: {case_dir}")
         self._cfg_run_log.append(f"Solver: {solver}")
         self._cfg_run_log.append("")
-        self._residual_data: dict[str, list[float]] = {"Ux": [], "Uy": [], "Uz": [], "p": [], "iter": []}
+        self._residual_data: dict[str, list[float]] = {"iter": []}
 
         self._foam_process = QProcess(self)
         self._active_process_kind = "simulation"
@@ -2118,8 +2349,8 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
 
     def _parse_residual_lines(self, text: str) -> None:
         import re
+        changed = False
         for line in text.splitlines():
-            # Detect time step completion
             tm = re.search(r"^Time\s*=\s*([0-9.e+\-]+)", line)
             if tm:
                 try:
@@ -2132,17 +2363,25 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
                     self._sim_current_step += 1
                 if self._sim_total_steps > 0:
                     self._cfg_progress.setValue(min(self._sim_current_step, self._sim_total_steps))
-                    self._cfg_progress.setFormat(f"%v / %m")
+                    self._cfg_progress.setFormat("%v / %m")
                     self._cfg_progress.setTextVisible(True)
-            # incompressibleFluid: "DICPCG:  Solving for p, Initial residual = X, Final residual = Y, No Iterations Z"
-            m = re.search(r"Solving for (\S+).*Initial residual = ([0-9.e+\-]+)", line)
+            m = re.search(
+                r"Solving for\s+([^,\s]+).*?Initial residual\s*=\s*([0-9.e+\-]+)"
+                r"(?:,\s*Final residual\s*=\s*([0-9.e+\-]+))?",
+                line,
+            )
             if m:
                 field = m.group(1).rstrip(",")
-                initial = float(m.group(2))
-                if field in ("p", "Ux", "Uy", "Uz"):
-                    self._residual_data[field].append(initial)
-                    self._residual_data["iter"].append(len(self._residual_data["p"]))
-        self._redraw_residuals()
+                try:
+                    value = float(m.group(2))
+                except ValueError:
+                    continue
+                self._residual_data.setdefault(field, []).append(value)
+                max_len = max((len(v) for k, v in self._residual_data.items() if k != "iter"), default=0)
+                self._residual_data["iter"] = list(range(1, max_len + 1))
+                changed = True
+        if changed:
+            self._redraw_residuals()
         self._save_solver_run_state()
 
     def _redraw_residuals(self) -> None:
@@ -2151,13 +2390,15 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._cfg_residual_axes.tick_params(colors="#cccccc", labelsize=9)
         for spine in self._cfg_residual_axes.spines.values():
             spine.set_color("#2d2d30")
-        colors = {"Ux": "#569cd6", "Uy": "#6a9955", "Uz": "#dcdcaa", "p": "#ce9178"}
-        for key, color in colors.items():
+        palette = ["#569cd6", "#6a9955", "#dcdcaa", "#ce9178", "#c586c0", "#4ec9b0", "#d7ba7d", "#9cdcfe"]
+        fields = [k for k in self._residual_data.keys() if k != "iter" and self._residual_data.get(k)]
+        order = ["Ux", "Uy", "Uz", "U", "p", "p_rgh", "T", "h", "e", "rho"]
+        fields = [k for k in order if k in fields] + [k for k in fields if k not in order]
+        for index, key in enumerate(fields):
             data = self._residual_data.get(key, [])
             if data:
-                iters = self._residual_data["iter"][:len(data)]
-                if iters:
-                    self._cfg_residual_axes.plot(iters, data, color=color, linewidth=1.5, label=key)
+                iters = list(range(1, len(data) + 1))
+                self._cfg_residual_axes.plot(iters, data, color=palette[index % len(palette)], linewidth=1.5, label=key)
         self._cfg_residual_axes.set_yscale("log")
         self._cfg_residual_axes.grid(True, alpha=0.2, color="#2d2d30")
         if any(data for data in self._residual_data.values() if isinstance(data, list) and data):
@@ -2366,7 +2607,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         display_row.addWidget(self._result_display_combo, 2)
         display_row.addWidget(load_display_button)
         display_hint = QLabel(
-            "已接入：Surface、Slice、Iso-surface、Streamline、Volume。"
+            "只展示速度、压强、温度三类结果：云图、切片/切面、壁面分布、压力等值面和流线。"
         )
         display_hint.setWordWrap(True)
         display_hint.setObjectName("sectionHint")
@@ -2405,16 +2646,23 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
             data = json.loads(rp.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return
-        colors = {"Ux": "#569cd6", "Uy": "#6a9955", "Uz": "#dcdcaa", "p": "#ce9178"}
-        iters = data.get("iter", [])
-        for key, color in colors.items():
+        palette = ["#569cd6", "#6a9955", "#dcdcaa", "#ce9178", "#c586c0", "#4ec9b0", "#d7ba7d", "#9cdcfe"]
+        fields = [k for k, v in data.items() if k != "iter" and v]
+        order = ["Ux", "Uy", "Uz", "U", "p", "p_rgh", "T", "h", "e", "rho"]
+        fields = [k for k in order if k in fields] + [k for k in fields if k not in order]
+        for index, key in enumerate(fields):
             vals = data.get(key, [])
-            if vals and iters:
-                i = iters[:len(vals)]
-                self._results_residual_axes.plot(i, vals, color=color, linewidth=1.5, label=key)
+            if vals:
+                self._results_residual_axes.plot(
+                    list(range(1, len(vals) + 1)),
+                    vals,
+                    color=palette[index % len(palette)],
+                    linewidth=1.5,
+                    label=key,
+                )
         self._results_residual_axes.set_yscale("log")
         self._results_residual_axes.grid(True, alpha=0.2, color="#2d2d30")
-        if any(data.get(k) for k in colors if k in data):
+        if fields:
             self._results_residual_axes.legend(loc="upper right", fontsize=8,
                 facecolor="#1e1e1e", edgecolor="#2d2d30", labelcolor="#cccccc")
         self._results_residual_canvas.draw()
@@ -2468,7 +2716,3 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, ParametersLogicMixin, Se
         self._workspace_tabs.setCurrentIndex(self.TAB_ENVIRONMENT)
         self._refresh_environment_panels()
         self._set_status("已打开环境检查页。")
-
-    def _open_draw_geometry_tab(self) -> None:
-        self._workspace_tabs.setCurrentIndex(self.TAB_DRAW_GEOMETRY)
-        self._set_status("已打开绘制几何页。")

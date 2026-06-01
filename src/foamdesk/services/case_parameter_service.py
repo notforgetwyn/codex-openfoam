@@ -54,6 +54,9 @@ class OpenFoamCaseParameterService:
         "icoFoam": "入门不可压瞬态流，适合先跑通流程。",
         "simpleFoam": "稳态不可压流，适合风洞/绕流的工程入门场景。",
         "pisoFoam": "瞬态不可压流，适合观察随时间变化的流动。",
+        "pimpleFoam": "瞬态不可压流，适合较复杂非稳态流动。",
+        "rhoSimpleFoam": "稳态可压缩流，适合高速/密度变化工况。",
+        "rhoPimpleFoam": "瞬态可压缩流，适合非稳态高速流动。",
     }
 
     def load(self, project: SimulationProject) -> SimulationParameters:
@@ -226,7 +229,7 @@ class OpenFoamCaseParameterService:
 
     def _validate(self, parameters: SimulationParameters) -> None:
         if parameters.solver_name not in self.SOLVERS:
-            raise ValueError("求解器必须是 icoFoam、simpleFoam 或 pisoFoam。")
+            raise ValueError("求解器必须是 icoFoam、simpleFoam、pisoFoam、pimpleFoam、rhoSimpleFoam 或 rhoPimpleFoam。")
         if parameters.end_time <= 0:
             raise ValueError("结束时间必须大于 0。")
         if parameters.delta_t <= 0:
@@ -350,8 +353,90 @@ snGradSchemes
 
     def _fv_solution_text(self, parameters: SimulationParameters) -> str:
         rel_tol = "0" if parameters.fv_solution_preset == "strict" else "0.05"
-        smoother = "symGaussSeidel" if parameters.fv_solution_preset != "fast" else "GaussSeidel"
+        smoother = "GaussSeidel" if parameters.fv_solution_preset == "fast" else "symGaussSeidel"
         tolerance = self._format_float(parameters.residual_tolerance)
+        solver = parameters.solver_name
+        is_simple = solver in {"simpleFoam", "rhoSimpleFoam"}
+        is_piso = solver in {"pisoFoam", "icoFoam"}
+        is_pimple = solver in {"pimpleFoam", "rhoPimpleFoam"}
+        is_compressible = solver in {"rhoSimpleFoam", "rhoPimpleFoam"}
+        ncorrectors = "1" if parameters.fv_solution_preset == "fast" else "2"
+        extra_solvers = ""
+        if is_compressible:
+            extra_solvers = f"""
+    T
+    {{
+        solver          smoothSolver;
+        smoother        {smoother};
+        tolerance       {tolerance};
+        relTol          {rel_tol};
+    }}
+
+    TFinal
+    {{
+        $T;
+        relTol          0;
+    }}
+
+    rho
+    {{
+        solver          diagonal;
+    }}
+"""
+
+        algorithm_block = ""
+        if is_simple:
+            temp_control = f"        T               {tolerance};\n" if is_compressible else ""
+            algorithm_block = f"""
+SIMPLE
+{{
+    nNonOrthogonalCorrectors 0;
+    residualControl
+    {{
+        p               {tolerance};
+        U               {tolerance};
+{temp_control}    }}
+}}
+
+PIMPLE
+{{
+    nOuterCorrectors 1;
+    nCorrectors      {ncorrectors};
+    nNonOrthogonalCorrectors 0;
+    momentumPredictor yes;
+    pRefCell         0;
+    pRefValue        0;
+    residualControl
+    {{
+        p               {tolerance};
+        U               {tolerance};
+{temp_control}    }}
+}}
+"""
+        elif is_piso:
+            algorithm_block = f"""
+PISO
+{{
+    nCorrectors     {ncorrectors};
+    nNonOrthogonalCorrectors 0;
+    pRefCell        0;
+    pRefValue       0;
+}}
+"""
+        elif is_pimple:
+            outer_correctors = "1" if parameters.fv_solution_preset == "fast" else "2"
+            algorithm_block = f"""
+PIMPLE
+{{
+    nOuterCorrectors {outer_correctors};
+    nCorrectors      {ncorrectors};
+    nNonOrthogonalCorrectors 0;
+    momentumPredictor yes;
+    pRefCell         0;
+    pRefValue        0;
+}}
+"""
+
         return f"""FoamFile
 {{
     version     2.0;
@@ -383,26 +468,14 @@ solvers
         tolerance       {tolerance};
         relTol          {rel_tol};
     }}
-}}
 
-PISO
-{{
-    nCorrectors     2;
-    nNonOrthogonalCorrectors 0;
-    pRefCell        0;
-    pRefValue       0;
-}}
-
-SIMPLE
-{{
-    nNonOrthogonalCorrectors 0;
-    residualControl
+    UFinal
     {{
-        p               {tolerance};
-        U               {tolerance};
+        $U;
+        relTol          0;
     }}
-}}
-
+{extra_solvers}}}
+{algorithm_block}
 relaxationFactors
 {{
     fields

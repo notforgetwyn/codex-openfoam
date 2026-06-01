@@ -2,19 +2,17 @@ from __future__ import annotations
 
 import json
 import shlex
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import vtk
 from PySide6.QtCore import QProcess, Qt
-from PySide6.QtWidgets import QComboBox, QFileDialog, QLineEdit, QMessageBox, QTableWidgetItem
-from vtkmodules.util.numpy_support import vtk_to_numpy
+from PySide6.QtWidgets import QComboBox, QFileDialog, QLineEdit, QMessageBox, QSpinBox, QTableWidgetItem
 from vtkmodules.vtkIOGeometry import vtkSTLReader
 
-from foamdesk.domain.models import SimulationParameters
-from foamdesk.services.geometry_import_service import SnappyHexMeshSettings
-from foamdesk.services.project_service import ComputationDomainTemplate
+from foamdesk.ui import domain_templates
 from foamdesk.ui.visualization_widgets import NativeVtkPreviewWidget
 
 
@@ -41,535 +39,40 @@ DOMAIN_FACE_DEFAULTS = [
 
 
 class GeometryLogicMixin:
-    def _read_stl_preview_mesh(self, source_path: Path) -> tuple[np.ndarray, np.ndarray]:
-        reader = vtkSTLReader()
-        reader.SetFileName(str(source_path))
-        reader.Update()
-        poly_data = reader.GetOutput()
-        vtk_points = poly_data.GetPoints()
-        polygons = poly_data.GetPolys()
-        if vtk_points is None or polygons is None:
-            return np.empty((0, 3), dtype=float), np.empty((0,), dtype=object)
-        points = vtk_to_numpy(vtk_points.GetData())
-        raw = vtk_to_numpy(polygons.GetData())
-        faces: list[np.ndarray] = []
-        index = 0
-        while index < len(raw):
-            count = int(raw[index])
-            index += 1
-            if count >= 3:
-                faces.append(raw[index : index + count].astype(int))
-            index += count
-        return points, np.array(faces, dtype=object)
 
-    def _polydata_from_points_faces(self, points: np.ndarray, faces: np.ndarray) -> vtk.vtkPolyData:
-        vtk_points = vtk.vtkPoints()
-        for point in points:
-            vtk_points.InsertNextPoint(float(point[0]), float(point[1]), float(point[2]))
-        cells = vtk.vtkCellArray()
-        for face in faces:
-            ids = np.asarray(face, dtype=int)
-            if len(ids) < 3:
-                continue
-            polygon = vtk.vtkPolygon()
-            polygon.GetPointIds().SetNumberOfIds(len(ids))
-            for index, point_id in enumerate(ids):
-                polygon.GetPointIds().SetId(index, int(point_id))
-            cells.InsertNextCell(polygon)
-        poly_data = vtk.vtkPolyData()
-        poly_data.SetPoints(vtk_points)
-        poly_data.SetPolys(cells)
-        return poly_data
 
-    def _grid_surface_polydata(self, x_grid: np.ndarray, y_grid: np.ndarray, z_grid: np.ndarray) -> vtk.vtkPolyData:
-        rows, cols = x_grid.shape
-        points = np.column_stack([x_grid.reshape(-1), y_grid.reshape(-1), z_grid.reshape(-1)])
-        faces = []
-        for row in range(rows - 1):
-            for col in range(cols - 1):
-                p0 = row * cols + col
-                faces.append(np.array([p0, p0 + 1, p0 + cols + 1, p0 + cols], dtype=int))
-        return self._polydata_from_points_faces(points, np.array(faces, dtype=object))
 
-    def _draw_box_domain_vtk(self, canvas: NativeVtkPreviewWidget, corners_or_bounds: np.ndarray) -> np.ndarray:
-        if corners_or_bounds.shape == (2, 3):
-            mins = corners_or_bounds[0]
-            maxs = corners_or_bounds[1]
-            corners = np.array(
-                [
-                    [mins[0], mins[1], mins[2]],
-                    [maxs[0], mins[1], mins[2]],
-                    [maxs[0], maxs[1], mins[2]],
-                    [mins[0], maxs[1], mins[2]],
-                    [mins[0], mins[1], maxs[2]],
-                    [maxs[0], mins[1], maxs[2]],
-                    [maxs[0], maxs[1], maxs[2]],
-                    [mins[0], maxs[1], maxs[2]],
-                ],
-                dtype=float,
-            )
-        else:
-            corners = np.asarray(corners_or_bounds, dtype=float)
-        faces = [[0, 3, 7, 4], [1, 5, 6, 2], [0, 1, 2, 3], [4, 5, 6, 7], [0, 1, 5, 4], [3, 2, 6, 7]]
-        colors = [(0.54, 0.82, 0.52), (0.96, 0.53, 0.44)] + [(0.31, 0.76, 1.0)] * 4
-        opacities = [0.30, 0.30, 0.10, 0.10, 0.10, 0.10]
-        for face, color, opacity in zip(faces, colors, opacities):
-            canvas.add_polygon(corners[np.asarray(face, dtype=int)], color=color, opacity=opacity, edge_color=color)
-        canvas.add_text("inlet", tuple(corners[0]), color=(0.54, 0.82, 0.52), size=14)
-        canvas.add_text("outlet", tuple(corners[1]), color=(0.96, 0.53, 0.44), size=14)
-        return corners
 
-    def _draw_domain_template_vtk(self, canvas: NativeVtkPreviewWidget, template: ComputationDomainTemplate) -> np.ndarray:
-        if template.shape == "pipe":
-            return self._draw_pipe_domain_vtk(canvas, template)
-        if template.shape == "bend":
-            return self._draw_bend_domain_vtk(canvas, template)
-        return self._draw_box_domain_vtk(canvas, np.array(self._context.project_service.domain_vertices(template), dtype=float))
 
-    def _draw_pipe_domain_vtk(self, canvas: NativeVtkPreviewWidget, template: ComputationDomainTemplate) -> np.ndarray:
-        length_x, length_y, length_z = template.size
-        center_y = length_y / 2.0
-        center_z = length_z / 2.0
-        radius = min(length_y, length_z) * 0.42
-        theta = np.linspace(0.0, 2.0 * np.pi, 96)
-        x_values = np.linspace(0.0, length_x, 18)
-        theta_grid, x_grid = np.meshgrid(theta, x_values)
-        y_grid = center_y + radius * np.cos(theta_grid)
-        z_grid = center_z + radius * np.sin(theta_grid)
-        canvas.add_polydata(self._grid_surface_polydata(x_grid, y_grid, z_grid), color=(0.31, 0.76, 1.0), opacity=0.18, edge_color=None)
-        inlet = np.column_stack([np.zeros_like(theta), center_y + radius * np.cos(theta), center_z + radius * np.sin(theta)])
-        outlet = np.column_stack([np.full_like(theta, length_x), center_y + radius * np.cos(theta), center_z + radius * np.sin(theta)])
-        canvas.add_polyline(inlet, color=(0.54, 0.82, 0.52), width=3.0)
-        canvas.add_polyline(outlet, color=(0.96, 0.53, 0.44), width=3.0)
-        for angle in (0, np.pi / 2, np.pi, 3 * np.pi / 2):
-            y = center_y + radius * np.cos(angle)
-            z = center_z + radius * np.sin(angle)
-            canvas.add_polyline(np.array([[0.0, y, z], [length_x, y, z]], dtype=float), color=(0.31, 0.76, 1.0), width=1.8)
-        canvas.add_text("inlet", (0.0, center_y, center_z), color=(0.54, 0.82, 0.52), size=14)
-        canvas.add_text("outlet", (length_x, center_y, center_z), color=(0.96, 0.53, 0.44), size=14)
-        return np.vstack([inlet, outlet])
 
-    def _draw_bend_domain_vtk(self, canvas: NativeVtkPreviewWidget, template: ComputationDomainTemplate) -> np.ndarray:
-        length_x, length_y, height = template.size
-        inner_radius = min(length_x, length_y) * 0.28
-        outer_radius = min(length_x, length_y) * 0.62
-        theta = np.linspace(0.0, np.pi / 2.0, 96)
-        z_values = np.linspace(0.0, height, 8)
-        theta_grid, z_grid = np.meshgrid(theta, z_values)
-        points: list[np.ndarray] = []
-        for radius in (inner_radius, outer_radius):
-            x_grid = radius * np.cos(theta_grid)
-            y_grid = radius * np.sin(theta_grid)
-            canvas.add_polydata(self._grid_surface_polydata(x_grid, y_grid, z_grid), color=(0.31, 0.76, 1.0), opacity=0.16, edge_color=None)
-        for radius in (inner_radius, outer_radius):
-            for z_value in (0.0, height):
-                curve = np.column_stack([radius * np.cos(theta), radius * np.sin(theta), np.full_like(theta, z_value)])
-                canvas.add_polyline(curve, color=(0.31, 0.76, 1.0), width=1.8)
-                points.append(curve)
-        for angle in (0.0, np.pi / 2.0):
-            color = (0.54, 0.82, 0.52) if angle == 0.0 else (0.96, 0.53, 0.44)
-            for z_value in (0.0, height):
-                canvas.add_polyline(
-                    np.array(
-                        [
-                            [inner_radius * np.cos(angle), inner_radius * np.sin(angle), z_value],
-                            [outer_radius * np.cos(angle), outer_radius * np.sin(angle), z_value],
-                        ],
-                        dtype=float,
-                    ),
-                    color=color,
-                    width=2.4,
-                )
-            for radius in (inner_radius, outer_radius):
-                canvas.add_polyline(
-                    np.array(
-                        [
-                            [radius * np.cos(angle), radius * np.sin(angle), 0.0],
-                            [radius * np.cos(angle), radius * np.sin(angle), height],
-                        ],
-                        dtype=float,
-                    ),
-                    color=color,
-                    width=2.4,
-                )
-        canvas.add_text("inlet", ((inner_radius + outer_radius) / 2.0, 0.0, height / 2.0), color=(0.54, 0.82, 0.52), size=14)
-        canvas.add_text("outlet", (0.0, (inner_radius + outer_radius) / 2.0, height / 2.0), color=(0.96, 0.53, 0.44), size=14)
-        return np.vstack(points)
 
     def _refresh_geometry_panel(self) -> None:
-        if not hasattr(self, "_geometry_text"):
-            return
         if self._current_project is None:
-            self._geometry_text.setPlainText("请先新建或打开项目，然后导入 STL 几何。")
-            self._refresh_domain_preview()
             return
-        self._load_domain_template_into_form()
-        self._load_boundary_conditions_into_form()
-        self._load_snappy_settings_into_form()
-        self._geometry_text.setPlainText(self._context.geometry_import_service.format_assets(self._current_project))
-        self._refresh_domain_preview()
+        if hasattr(self, "_mesh_grid_vtk") and hasattr(self, "_mesh_imports"):
+            self._redraw_mesh_grid_vtk()
+        if hasattr(self, "_domain_face_table"):
+            self._init_domain_face_table()
 
-    def _load_domain_template_into_form(self) -> None:
-        if self._current_project is None or not hasattr(self, "_domain_template_combo"):
-            return
-        key = self._context.project_service.load_domain_template_key(self._current_project)
-        index = self._domain_template_combo.findData(key)
-        if index >= 0:
-            self._domain_template_combo.blockSignals(True)
-            self._domain_template_combo.setCurrentIndex(index)
-            self._domain_template_combo.blockSignals(False)
-        self._load_custom_domain_inputs()
-        self._refresh_domain_template_hint()
 
-    def _load_custom_domain_inputs(self) -> None:
-        if self._current_project is None or not hasattr(self, "_domain_length_x_input"):
-            return
-        config_path = self._current_project.case_dir / "system" / "domain_config.json"
-        if not config_path.exists():
-            return
-        try:
-            payload = json.loads(config_path.read_text(encoding="utf-8"))
-            size = payload.get("size", [1.0, 1.0, 1.0])
-            cells = payload.get("cells", [10, 10, 10])
-            if len(size) == 3 and len(cells) == 3:
-                self._domain_length_x_input.setValue(float(size[0]))
-                self._domain_length_y_input.setValue(float(size[1]))
-                self._domain_length_z_input.setValue(float(size[2]))
-                self._domain_cells_x_input.setValue(int(cells[0]))
-                self._domain_cells_y_input.setValue(int(cells[1]))
-                self._domain_cells_z_input.setValue(int(cells[2]))
-        except (OSError, ValueError, TypeError):
-            return
 
-    def _load_boundary_conditions_into_form(self) -> None:
-        if self._current_project is None or not hasattr(self, "_inlet_velocity_x_input"):
-            return
-        settings = self._context.project_service.load_boundary_conditions(self._current_project)
-        self._inlet_velocity_x_input.setValue(settings.inlet_velocity[0])
-        self._inlet_velocity_y_input.setValue(settings.inlet_velocity[1])
-        self._inlet_velocity_z_input.setValue(settings.inlet_velocity[2])
-        self._outlet_pressure_input.setValue(settings.outlet_pressure)
-        index = self._wall_type_combo.findData(settings.wall_type)
-        if index >= 0:
-            self._wall_type_combo.setCurrentIndex(index)
 
-    def _refresh_domain_template_hint(self) -> None:
-        if not hasattr(self, "_domain_template_combo") or not hasattr(self, "_domain_template_hint"):
-            return
-        key = self._domain_template_combo.currentData()
-        template = next(
-            (
-                item
-                for item in self._context.project_service.domain_templates()
-                if item.key == key
-            ),
-            None,
-        )
-        if template is None:
-            self._domain_template_hint.setText("请选择计算域模板。")
-            self._update_domain_apply_state_label()
-            self._refresh_domain_preview()
-            return
-        self._domain_template_hint.setText(
-            f"{template.description}\n"
-            f"尺寸：{template.size[0]:g} x {template.size[1]:g} x {template.size[2]:g}；"
-            f"网格数：{template.cells[0]} x {template.cells[1]} x {template.cells[2]}；"
-            "边界：左侧 inlet，右侧 outlet，其余 fixedWalls。\n"
-            "建议 STL："
-            + self._domain_template_stl_hint(template.key)
-        )
-        self._update_domain_apply_state_label()
-        self._refresh_domain_preview()
 
-    def _update_domain_apply_state_label(self) -> None:
-        if not hasattr(self, "_domain_apply_state_label"):
-            return
-        if self._current_project is None:
-            self._domain_apply_state_label.setText("预览中：尚未选择项目；选择项目后才能应用计算域。")
-            self._domain_apply_state_label.setStyleSheet("color: #d7ba7d;")
-            return
-        selected = self._selected_domain_template()
-        applied = self._current_domain_template()
-        if applied.key == "custom_domain":
-            self._domain_apply_state_label.setText(
-                f"已应用：当前 Case 使用自定义计算域，尺寸={applied.size}，网格={applied.cells}。"
-            )
-            self._domain_apply_state_label.setStyleSheet("color: #89d185;")
-            return
-        if selected.key == applied.key:
-            self._domain_apply_state_label.setText(
-                f"已应用：当前 Case 正在使用 `{applied.name}`。切换下拉框只会先预览，不会自动改仿真文件。"
-            )
-            self._domain_apply_state_label.setStyleSheet("color: #89d185;")
-            return
-        self._domain_apply_state_label.setText(
-            f"预览中：正在查看 `{selected.name}`；当前 Case 实际仍是 `{applied.name}`。"
-            "需要点击 `应用计算域模板` 后才会写入 OpenFOAM case。"
-        )
-        self._domain_apply_state_label.setStyleSheet("color: #d7ba7d;")
 
-    def _domain_template_stl_hint(self, key: str) -> str:
-        if key == "simple_unit_box":
-            return "small_obstacle_cube.stl 或 simple_center_cube.stl。"
-        if key == "medium_wind_tunnel":
-            return "medium_cylinder_obstacle.stl 或 medium_ramp_wedge.stl。"
-        if key == "advanced_long_wind_tunnel":
-            return "advanced_simplified_vehicle.stl。"
-        if key == "medium_tapered_wind_tunnel":
-            return "medium_cylinder_obstacle.stl，适合放在渐扩段中部。"
-        if key == "advanced_ramp_channel":
-            return "medium_ramp_wedge.stl，适合测试斜坡/地形通道。"
-        if key == "medium_round_pipe":
-            return "不建议放入障碍 STL；适合直接做管道内流。"
-        if key == "advanced_90_bend_channel":
-            return "不建议放入障碍 STL；适合观察弯管转弯流动。"
-        return "请从 assets/test_geometries 选择匹配的 STL。"
 
-    def _refresh_domain_preview(self) -> None:
-        if not hasattr(self, "_domain_preview_canvas"):
-            return
-        canvas = self._domain_preview_canvas
-        if not isinstance(canvas, NativeVtkPreviewWidget):
-            return
-        canvas.clear((0.12, 0.12, 0.12))
-        template = self._selected_domain_template()
-        domain_points = self._draw_domain_template_vtk(canvas, template)
-        points_for_limits = [domain_points]
-        if self._current_project is not None:
-            for asset in self._context.geometry_import_service.list_assets(self._current_project):
-                if asset.format.upper() != "STL" or not asset.stored_path.exists():
-                    continue
-                try:
-                    points, faces = self._read_stl_preview_mesh(asset.stored_path)
-                except (OSError, ValueError):
-                    continue
-                if points.size == 0 or faces.size == 0:
-                    continue
-                canvas.add_polydata(
-                    self._polydata_from_points_faces(points, faces),
-                    color=(0.25, 0.74, 1.0),
-                    opacity=0.42,
-                    edge_color=(0.03, 0.18, 0.28),
-                )
-                points_for_limits.append(points)
-        else:
-            canvas.add_message("Select a project first.")
 
-        canvas.finish(np.vstack(points_for_limits))
 
-    def _current_domain_template(self) -> ComputationDomainTemplate:
-        if self._current_project is not None:
-            config_path = self._current_project.case_dir / "system" / "domain_config.json"
-            if config_path.exists():
-                try:
-                    payload = json.loads(config_path.read_text(encoding="utf-8"))
-                    if payload.get("key") == "custom_domain":
-                        size = payload.get("size", [1.0, 1.0, 1.0])
-                        cells = payload.get("cells", [10, 10, 10])
-                        return ComputationDomainTemplate(
-                            key="custom_domain",
-                            name="自定义计算域",
-                            level="自定义",
-                            size=(float(size[0]), float(size[1]), float(size[2])),
-                            cells=(int(cells[0]), int(cells[1]), int(cells[2])),
-                            suggested_location_in_mesh=(
-                                float(size[0]) * 0.1,
-                                float(size[1]) * 0.5,
-                                float(size[2]) * 0.5,
-                            ),
-                            description="用户自定义计算域。",
-                        )
-                    key = str(payload.get("key", "simple_unit_box"))
-                    for template in self._context.project_service.domain_templates():
-                        if template.key == key:
-                            return template
-                except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                    pass
-        key = None
-        if hasattr(self, "_domain_template_combo"):
-            key = self._domain_template_combo.currentData()
-        for template in self._context.project_service.domain_templates():
-            if template.key == key:
-                return template
-        return self._context.project_service.domain_templates()[0]
 
-    def _selected_domain_template(self) -> ComputationDomainTemplate:
-        if hasattr(self, "_domain_template_combo"):
-            key = self._domain_template_combo.currentData()
-            for template in self._context.project_service.domain_templates():
-                if template.key == key:
-                    return template
-        return self._current_domain_template()
 
-    def _load_snappy_settings_into_form(self) -> None:
-        if self._current_project is None or not hasattr(self, "_snappy_min_refinement_input"):
-            return
-        settings = self._context.geometry_import_service.load_snappy_settings(self._current_project)
-        if settings is None:
-            return
-        self._snappy_min_refinement_input.setValue(settings.min_refinement_level)
-        self._snappy_max_refinement_input.setValue(settings.max_refinement_level)
-        self._snappy_location_x_input.setValue(settings.location_in_mesh[0])
-        self._snappy_location_y_input.setValue(settings.location_in_mesh[1])
-        self._snappy_location_z_input.setValue(settings.location_in_mesh[2])
-        self._snappy_add_layers_checkbox.setChecked(settings.add_layers)
-        self._snappy_layer_thickness_input.setValue(settings.final_layer_thickness)
 
-    def _read_snappy_settings(self) -> SnappyHexMeshSettings:
-        if not hasattr(self, "_snappy_min_refinement_input"):
-            if self._current_project is not None:
-                settings = self._context.geometry_import_service.load_snappy_settings(self._current_project)
-                if settings is not None:
-                    return settings
-            return SnappyHexMeshSettings()
-        min_level = self._snappy_min_refinement_input.value()
-        max_level = self._snappy_max_refinement_input.value()
-        if max_level < min_level:
-            max_level = min_level
-            self._snappy_max_refinement_input.setValue(max_level)
-        return SnappyHexMeshSettings(
-            min_refinement_level=min_level,
-            max_refinement_level=max_level,
-            location_in_mesh=(
-                self._snappy_location_x_input.value(),
-                self._snappy_location_y_input.value(),
-                self._snappy_location_z_input.value(),
-            ),
-            add_layers=self._snappy_add_layers_checkbox.isChecked(),
-            final_layer_thickness=self._snappy_layer_thickness_input.value(),
-        )
 
-    def _auto_stl_asset_for_snappy(self) -> str | None:
-        if self._current_project is None:
-            return None
-        assets = self._context.geometry_import_service.list_assets(self._current_project)
-        stl_assets = [asset for asset in assets if asset.format.upper() == "STL" and asset.stored_path.exists()]
-        if not stl_assets:
-            return None
-        if len(stl_assets) == 1:
-            return stl_assets[0].name
-
-        draw_assets = [
-            asset
-            for asset in stl_assets
-            if asset.name.startswith("body_") or asset.stored_path.name.startswith("body_")
-        ]
-        if draw_assets:
-            newest = max(draw_assets, key=lambda asset: asset.stored_path.stat().st_mtime)
-            return newest.name
-        return None
-
-    def _run_simulation_pipeline(self) -> None:
-        if self._foam_process and self._foam_process.state() != QProcess.ProcessState.NotRunning:
-            self._show_error("已有任务正在运行，请先停止当前任务。")
-            return
-        if self._current_project is None:
-            self._show_error("请先新建或打开项目。")
-            return
-
-        status = self._context.environment_detector.detect()
-        if not status.is_available or not status.env_script_path:
-            self._show_error(f"OpenFOAM 环境不可用：{status.detail}")
-            return
-
-        if not self._save_case_parameters():
-            return
-        try:
-            parameters = self._context.case_parameter_service.load(self._current_project)
-        except (OSError, ValueError) as error:
-            self._show_error(f"读取求解器配置失败：{error}")
-            return
-
-        block_mesh_dict = self._current_project.case_dir / "system" / "blockMeshDict"
-        if not block_mesh_dict.exists():
-            self._show_error("当前 Case 缺少 system/blockMeshDict，一键仿真需要先有背景网格配置。")
-            return
-
-        selected_name = self._auto_stl_asset_for_snappy()
-        has_stl_geometry = selected_name is not None
-        try:
-            if has_stl_geometry:
-                dict_path = self._context.geometry_import_service.generate_snappy_hex_mesh_dict(
-                    self._current_project,
-                    selected_name,
-                    self._read_snappy_settings(),
-                )
-                field_patches = ("movingWall", "fixedWalls", "importedGeometry")
-            else:
-                dict_path = None
-                field_patches = None
-            synced_fields = self._context.project_service.ensure_solver_support_files(
-                self._current_project,
-                parameters,
-                field_patches,
-            )
-            custom_boundary_files = self._apply_boundary_table_to_case(parameters)
-        except (OSError, ValueError) as error:
-            self._show_error(f"一键求解器准备失败：{error}")
-            return
-
-        self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_RUN)
-        self._bottom_tabs.setCurrentIndex(0)
-        self._task_text.setPlainText("任务状态：一键仿真流水线运行中")
-        self._current_process_output = ""
-        self._last_diagnostic_summary = "一键仿真流水线正在运行，暂无失败诊断。"
-        self._active_process_kind = "simulationPipeline"
-        self._refresh_solver_run_panel("一键仿真流水线运行中")
-        self._set_status("一键仿真流水线运行中。")
-        self._refresh_geometry_panel()
-        if synced_fields:
-            relative_fields = [str(path.relative_to(self._current_project.case_dir)) for path in synced_fields]
-            self._append_log("已同步求解边界字段：")
-            self._append_log("\n".join(f"- {path}" for path in relative_fields))
-        if custom_boundary_files:
-            relative_files = [str(path.relative_to(self._current_project.case_dir)) for path in custom_boundary_files]
-            self._append_log("已应用求解器准备页边界表：")
-            self._append_log("\n".join(f"- {path}" for path in relative_files))
-        if dict_path is not None:
-            self._append_log(f"已自动生成 snappyHexMeshDict：{dict_path}")
-        else:
-            self._append_log("当前 Case 没有 STL，流水线将跳过 snappyHexMesh。")
-
-        command_steps = ["echo FOAMDESK_STEP:blockMesh && blockMesh"]
-        if has_stl_geometry:
-            command_steps.append("echo FOAMDESK_STEP:snappyHexMesh && snappyHexMesh -overwrite")
-        command_steps.extend(
-            [
-                "echo FOAMDESK_STEP:checkMesh && checkMesh",
-                f"echo FOAMDESK_STEP:{shlex.quote(parameters.solver_name)} && {shlex.quote(parameters.solver_name)}",
-            ]
-        )
-        command = (
-            f"source {shlex.quote(status.env_script_path)} >/dev/null 2>&1 && "
-            f"cd {shlex.quote(str(self._current_project.case_dir))} && "
-            + " && ".join(command_steps)
-        )
-        if hasattr(self, "_solver_command_label"):
-            display_steps = ["blockMesh"]
-            if has_stl_geometry:
-                display_steps.append("snappyHexMesh -overwrite")
-            display_steps.extend(["checkMesh", parameters.solver_name])
-            self._solver_command_label.setText(
-                "执行命令：" + " && ".join(display_steps)
-            )
-        self._foam_process = QProcess(self)
-        self._foam_process.setProgram("bash")
-        self._foam_process.setArguments(["-lc", command])
-        self._foam_process.readyReadStandardOutput.connect(self._read_process_stdout)
-        self._foam_process.readyReadStandardError.connect(self._read_process_stderr)
-        self._foam_process.finished.connect(self._on_process_finished)
-        self._foam_process.start()
-        self._append_log(f"一键仿真已生成配置：{dict_path}")
-        self._append_log(
-            "执行流程：生成 snappyHexMeshDict -> blockMesh -> snappyHexMesh -overwrite -> "
-            f"checkMesh -> {parameters.solver_name}"
-        )
 
     # ── mesh import / Group 1 logic ──────────────────────────
 
     def _init_mesh_import_state(self) -> None:
         self._mesh_imports: list[MeshImportAsset] = []
         self._mesh_import_selected_index: int = -1
+        self._cad_domain_imports: list[MeshImportAsset] = []
         self._domain_bounds_manual: bool = False
         self._last_checkmesh_output: str = ""
         self._highlighted_domain_face: int = -1
@@ -698,6 +201,563 @@ class GeometryLogicMixin:
         self._append_log(f"已清空导入几何：删除 {removed_count} 个 STL 文件。")
         self._set_status("导入几何已清空。")
 
+
+    def _load_stl_asset(self, source_path: Path, color: tuple[float, float, float] | None = None) -> MeshImportAsset | None:
+        reader = vtkSTLReader()
+        reader.SetFileName(str(source_path))
+        reader.Update()
+        polydata = reader.GetOutput()
+        if polydata is None or polydata.GetNumberOfPoints() == 0:
+            return None
+        out = vtk.vtkPolyData()
+        out.DeepCopy(polydata)
+        return MeshImportAsset(
+            name=source_path.stem,
+            source_path=source_path,
+            polydata=out,
+            color=color or (0.58, 0.62, 0.66),
+        )
+
+    def _split_ascii_stl_asset_by_solids(self, asset: MeshImportAsset) -> list[MeshImportAsset]:
+        """Split an ASCII STL by `solid name` blocks before geometric guessing.
+
+        This supports one file such as:
+            solid inlet
+            ...
+            endsolid inlet
+            solid outlet
+            ...
+            endsolid outlet
+            solid wall
+            ...
+            endsolid wall
+
+        Binary STL and single-solid ASCII STL fall back to connected-region split.
+        """
+        try:
+            text = asset.source_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return []
+        if "\0" in text[:512] or "solid" not in text[:256].lower():
+            return []
+
+        solids: list[tuple[str, list[tuple[float, float, float]]]] = []
+        current_name: str | None = None
+        current_vertices: list[tuple[float, float, float]] = []
+
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            keyword = parts[0].lower()
+            if keyword == "solid":
+                if current_name is not None and current_vertices:
+                    solids.append((current_name, current_vertices))
+                current_name = " ".join(parts[1:]).strip() or asset.name
+                current_vertices = []
+            elif keyword == "vertex" and current_name is not None and len(parts) >= 4:
+                try:
+                    current_vertices.append((float(parts[1]), float(parts[2]), float(parts[3])))
+                except ValueError:
+                    continue
+            elif keyword == "endsolid":
+                if current_name is not None and current_vertices:
+                    solids.append((current_name, current_vertices))
+                current_name = None
+                current_vertices = []
+
+        if current_name is not None and current_vertices:
+            solids.append((current_name, current_vertices))
+
+        named_solids = [(name, verts) for name, verts in solids if len(verts) >= 3]
+        if len(named_solids) <= 1:
+            return []
+
+        assets: list[MeshImportAsset] = []
+        used_names: set[str] = set()
+        for solid_index, (name, vertices) in enumerate(named_solids, start=1):
+            points = vtk.vtkPoints()
+            triangles = vtk.vtkCellArray()
+            tri_count = len(vertices) // 3
+            for tri_i in range(tri_count):
+                ids = []
+                for v in vertices[tri_i * 3: tri_i * 3 + 3]:
+                    ids.append(points.InsertNextPoint(float(v[0]), float(v[1]), float(v[2])))
+                tri = vtk.vtkTriangle()
+                for j, pid in enumerate(ids):
+                    tri.GetPointIds().SetId(j, pid)
+                triangles.InsertNextCell(tri)
+            if tri_count <= 0:
+                continue
+            pd = vtk.vtkPolyData()
+            pd.SetPoints(points)
+            pd.SetPolys(triangles)
+            cleaner = vtk.vtkCleanPolyData()
+            cleaner.SetInputData(pd)
+            cleaner.Update()
+            out = vtk.vtkPolyData()
+            out.DeepCopy(cleaner.GetOutput())
+            clean_name = self._safe_openfoam_patch_name(name) or f"{asset.name}_solid{solid_index}"
+            base_name = clean_name
+            suffix = 2
+            while clean_name in used_names:
+                clean_name = f"{base_name}_{suffix}"
+                suffix += 1
+            used_names.add(clean_name)
+            assets.append(MeshImportAsset(
+                name=clean_name,
+                source_path=asset.source_path,
+                polydata=out,
+                color=asset.color,
+            ))
+        return assets
+
+    def _safe_openfoam_patch_name(self, name: str) -> str:
+        import re
+        cleaned = re.sub(r"[^A-Za-z0-9_]+", "_", (name or "").strip())
+        cleaned = cleaned.strip("_")
+        if not cleaned:
+            return ""
+        if cleaned[0].isdigit():
+            cleaned = f"patch_{cleaned}"
+        return cleaned
+
+    def _split_stl_asset_by_connected_regions(self, asset: MeshImportAsset) -> list[MeshImportAsset]:
+        """Split one STL into CAD-domain boundary rows.
+
+        Priority:
+        1) ASCII STL `solid name` blocks, preserving names such as inlet/outlet/wall.
+        2) VTK connected regions, for files containing disconnected unnamed patches.
+        """
+        solid_assets = self._split_ascii_stl_asset_by_solids(asset)
+        if len(solid_assets) > 1:
+            return solid_assets
+
+        conn = vtk.vtkPolyDataConnectivityFilter()
+        conn.SetInputData(asset.polydata)
+        conn.SetExtractionModeToAllRegions()
+        conn.ColorRegionsOn()
+        conn.Update()
+        region_count = int(conn.GetNumberOfExtractedRegions())
+        if region_count <= 1:
+            return [asset]
+
+        parts: list[MeshImportAsset] = []
+        for region_id in range(region_count):
+            region = vtk.vtkPolyDataConnectivityFilter()
+            region.SetInputData(asset.polydata)
+            region.SetExtractionModeToSpecifiedRegions()
+            region.AddSpecifiedRegion(region_id)
+            region.Update()
+            pd = vtk.vtkPolyData()
+            pd.DeepCopy(region.GetOutput())
+            if pd.GetNumberOfPoints() == 0:
+                continue
+            parts.append(MeshImportAsset(
+                name=f"{asset.name}_part{region_id + 1}",
+                source_path=asset.source_path,
+                polydata=pd,
+                color=asset.color,
+            ))
+        if len(parts) <= 1:
+            return [asset]
+        self._infer_cad_domain_part_names(parts, asset.name)
+        return parts
+
+    def _infer_cad_domain_part_names(self, parts: list[MeshImportAsset], base_name: str) -> None:
+        bounds = [part.polydata.GetBounds() for part in parts]
+        valid = [b for b in bounds if b and all(np.isfinite(b))]
+        if len(valid) < 3:
+            return
+        overall = np.array([
+            min(b[0] for b in valid), max(b[1] for b in valid),
+            min(b[2] for b in valid), max(b[3] for b in valid),
+            min(b[4] for b in valid), max(b[5] for b in valid),
+        ], dtype=float)
+        spans = np.array([overall[1] - overall[0], overall[3] - overall[2], overall[5] - overall[4]], dtype=float)
+        axis = int(np.argmax(spans))
+        centers = []
+        for i, b in enumerate(bounds):
+            if not b or not all(np.isfinite(b)):
+                centers.append((i, 0.0))
+                continue
+            centers.append((i, (float(b[axis * 2]) + float(b[axis * 2 + 1])) * 0.5))
+        ordered = sorted(centers, key=lambda item: item[1])
+        inlet_i = ordered[0][0]
+        outlet_i = ordered[-1][0]
+        wall_count = 0
+        for i, part in enumerate(parts):
+            if i == inlet_i:
+                part.name = "inlet"
+            elif i == outlet_i:
+                part.name = "outlet"
+            else:
+                wall_count += 1
+                part.name = "wall" if wall_count == 1 else f"wall_{wall_count}"
+
+    def _import_cad_domain_files(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "导入计算域 STL 几何体",
+            "/home/shihuayue/codex_project1",
+            "STL 文件 (*.stl *.STL);;所有文件 (*)",
+        )
+        if not paths:
+            return
+        new_assets: list[MeshImportAsset] = []
+        existing_paths = {str(a.source_path.resolve()) for a in self._cad_domain_imports if a.source_path.exists()}
+        existing_names = {a.name for a in self._cad_domain_imports}
+        skipped = 0
+        for fp in paths:
+            source_path = Path(fp)
+            resolved = str(source_path.resolve()) if source_path.exists() else str(source_path)
+            if resolved in existing_paths:
+                skipped += 1
+                continue
+            asset = self._load_stl_asset(source_path, color=(0.28, 0.62, 1.0))
+            if asset is None:
+                continue
+            split_assets = self._split_stl_asset_by_connected_regions(asset)
+            for split_asset in split_assets:
+                base_name = split_asset.name
+                unique_name = base_name
+                suffix = 2
+                while unique_name in existing_names:
+                    unique_name = f"{base_name}_{suffix}"
+                    suffix += 1
+                split_asset.name = unique_name
+                existing_names.add(unique_name)
+                new_assets.append(split_asset)
+            existing_paths.add(resolved)
+        if not new_assets:
+            if skipped:
+                self._set_status("选择的计算域 STL 已经导入过，未重复添加。")
+                return
+            self._show_error("没有读取到有效的计算域 STL。")
+            return
+        self._cad_domain_imports.extend(new_assets)
+        if hasattr(self, "_mesh_domain_type_combo"):
+            idx = self._mesh_domain_type_combo.findData("cad")
+            if idx >= 0:
+                self._mesh_domain_type_combo.setCurrentIndex(idx)
+        self._rebuild_cad_domain_file_list()
+        self._init_domain_face_table()
+        self._auto_recommend_location_in_mesh(update_view=False)
+        self._update_cad_domain_status()
+        self._redraw_mesh_grid_vtk()
+        self._save_mesh_workflow_state()
+        total = len(self._cad_domain_imports)
+        suffix = f"，跳过 {skipped} 个重复文件" if skipped else ""
+        self._set_status(f"本次追加导入 {len(new_assets)} 个计算域 STL，当前共 {total} 个边界面{suffix}。")
+
+    def _rebuild_cad_domain_file_list(self) -> None:
+        table = getattr(self, "_cad_domain_file_table", None)
+        if table is None:
+            return
+        selected_row = table.currentRow()
+        table.blockSignals(True)
+        table.setRowCount(0)
+        for i, asset in enumerate(self._cad_domain_imports):
+            table.insertRow(i)
+            table.setRowHeight(i, 30)
+            values = [str(i + 1), asset.name, asset.source_path.name, str(asset.source_path)]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if col == 0:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(i, col, item)
+        table.blockSignals(False)
+        if table.rowCount() > 0:
+            row = min(max(selected_row, 0), table.rowCount() - 1)
+            table.selectRow(row)
+        else:
+            self._highlighted_domain_face = -1
+
+    def _on_cad_domain_file_selection_changed(self) -> None:
+        table = getattr(self, "_cad_domain_file_table", None)
+        if table is None:
+            return
+        row = table.currentRow()
+        if row < 0 or row >= len(self._cad_domain_imports):
+            return
+        self._highlighted_domain_face = row
+        if hasattr(self, "_domain_face_table") and row < self._domain_face_table.rowCount():
+            self._domain_face_table.blockSignals(True)
+            self._domain_face_table.selectRow(row)
+            self._domain_face_table.blockSignals(False)
+        self._redraw_mesh_grid_vtk()
+
+    def _remove_selected_cad_domain_file(self) -> None:
+        table = getattr(self, "_cad_domain_file_table", None)
+        if table is None:
+            return
+        row = table.currentRow()
+        if row < 0 or row >= len(self._cad_domain_imports):
+            self._set_status("请先在计算域 STL 表格中选中要删除的项。")
+            return
+        removed = self._cad_domain_imports.pop(row)
+        self._rebuild_cad_domain_file_list()
+        self._init_domain_face_table()
+        if self._cad_domain_imports:
+            self._auto_recommend_location_in_mesh(update_view=False)
+        self._update_cad_domain_status()
+        self._redraw_mesh_grid_vtk()
+        self._save_mesh_workflow_state()
+        self._set_status(f"已删除计算域 STL：{removed.source_path.name}")
+
+    def _clear_cad_domain_files(self) -> None:
+        if not self._cad_domain_imports:
+            self._set_status("当前没有已导入的计算域 STL。")
+            return
+        reply = QMessageBox.question(
+            self,
+            "清空计算域 STL",
+            "确定要清空所有已导入的计算域 STL 吗？边界配置表会同步清空。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        count = len(self._cad_domain_imports)
+        self._cad_domain_imports.clear()
+        self._rebuild_cad_domain_file_list()
+        self._init_domain_face_table()
+        self._update_cad_domain_status()
+        self._redraw_mesh_grid_vtk()
+        self._save_mesh_workflow_state()
+        self._set_status(f"已清空 {count} 个计算域 STL。")
+
+    def _cad_domain_patch_type(self, name: str) -> str:
+        lowered = name.lower()
+        if "patch" in lowered or "open" in lowered or "开放" in lowered:
+            return "patch"
+        if "inlet" in lowered or "入口" in lowered or "outlet" in lowered or "出口" in lowered:
+            return "patch"
+        if "sym" in lowered:
+            return "symmetry"
+        if "empty" in lowered:
+            return "empty"
+        return "wall"
+
+    def _cad_domain_faces_from_assets(self) -> list[dict]:
+        return [
+            {"label": a.name, "name": a.name, "type": self._cad_domain_patch_type(a.name)}
+            for a in self._cad_domain_imports
+        ]
+
+    def _cad_domain_transform_values(self) -> dict[str, float]:
+        defaults = {
+            "translate_x": 0.0, "translate_y": 0.0, "translate_z": 0.0,
+            "rotate_x": 0.0, "rotate_y": 0.0, "rotate_z": 0.0,
+            "scale_x": 1.0, "scale_y": 1.0, "scale_z": 1.0,
+        }
+        inputs = getattr(self, "_cad_domain_transform_inputs", {})
+        for key, spin in inputs.items():
+            defaults[key] = float(spin.value())
+        return defaults
+
+    def _cad_domain_transform(self) -> vtk.vtkTransform:
+        vals = self._cad_domain_transform_values()
+        tf = vtk.vtkTransform()
+        tf.PostMultiply()
+        tf.Scale(vals["scale_x"], vals["scale_y"], vals["scale_z"])
+        tf.RotateX(vals["rotate_x"])
+        tf.RotateY(vals["rotate_y"])
+        tf.RotateZ(vals["rotate_z"])
+        tf.Translate(vals["translate_x"], vals["translate_y"], vals["translate_z"])
+        return tf
+
+    def _transformed_cad_domain_polydata(self, asset: MeshImportAsset):
+        flt = vtk.vtkTransformPolyDataFilter()
+        flt.SetInputData(asset.polydata)
+        flt.SetTransform(self._cad_domain_transform())
+        flt.Update()
+        out = vtk.vtkPolyData()
+        out.DeepCopy(flt.GetOutput())
+        return out
+
+    def _cad_domain_has_duplicate_surfaces(self) -> bool:
+        names: set[str] = set()
+        for asset in self._cad_domain_imports:
+            name = self._safe_openfoam_patch_name(asset.name)
+            if not name:
+                continue
+            if name in names:
+                self._show_error(
+                    f"计算域 STL 边界名称重复：{name}\n"
+                    "OpenFOAM patch 名称必须唯一。请在计算域表格中删除重复项，或重新导入。"
+                )
+                return True
+            names.add(name)
+        return False
+
+    def _cad_domain_bounds(self) -> tuple[float, float, float, float, float, float] | None:
+        if not self._cad_domain_imports:
+            return None
+        bbox = [float("inf"), float("-inf"), float("inf"), float("-inf"), float("inf"), float("-inf")]
+        for asset in self._cad_domain_imports:
+            pd = self._transformed_cad_domain_polydata(asset)
+            bounds = pd.GetBounds()
+            if not bounds or not all(np.isfinite(bounds)):
+                continue
+            for i in range(3):
+                bbox[i * 2] = min(bbox[i * 2], bounds[i * 2])
+                bbox[i * 2 + 1] = max(bbox[i * 2 + 1], bounds[i * 2 + 1])
+        if not all(np.isfinite(bbox)):
+            return None
+        return tuple(float(v) for v in bbox)
+
+    def _bbox_contains(self, outer, inner, eps: float = 1e-7) -> bool:
+        return (
+            inner[0] >= outer[0] - eps and inner[1] <= outer[1] + eps and
+            inner[2] >= outer[2] - eps and inner[3] <= outer[3] + eps and
+            inner[4] >= outer[4] - eps and inner[5] <= outer[5] + eps
+        )
+
+    def _update_cad_domain_status(self) -> None:
+        if not hasattr(self, "_cad_domain_status_label"):
+            return
+        if not self._cad_domain_imports:
+            self._cad_domain_status_label.setText("包围状态：未导入计算域")
+            self._cad_domain_status_label.setStyleSheet("color: #d7ba7d;")
+            return
+        domain_bbox = self._cad_domain_bounds()
+        obstacle_bbox = self._domain_geom_bbox()
+        if domain_bbox is None:
+            self._cad_domain_status_label.setText("包围状态：计算域几何无有效包围盒")
+            self._cad_domain_status_label.setStyleSheet("color: #f48771;")
+            return
+        if obstacle_bbox is None:
+            self._cad_domain_status_label.setText("包围状态：已导入计算域，尚未导入障碍物")
+            self._cad_domain_status_label.setStyleSheet("color: #d7ba7d;")
+            return
+        if self._bbox_contains(domain_bbox, obstacle_bbox):
+            self._cad_domain_status_label.setText("包围状态：已包围全部障碍物")
+            self._cad_domain_status_label.setStyleSheet("color: #6a9955;")
+        else:
+            self._cad_domain_status_label.setText("包围状态：未完全包围障碍物，请调整位置或缩放")
+            self._cad_domain_status_label.setStyleSheet("color: #f48771;")
+
+    def _cad_location_values(self) -> tuple[float, float, float] | None:
+        inputs = getattr(self, "_cad_location_inputs", {})
+        if not inputs:
+            return None
+        return (float(inputs["x"].value()), float(inputs["y"].value()), float(inputs["z"].value()))
+
+    def _set_cad_location_values(self, point: tuple[float, float, float], update_view: bool = True) -> None:
+        inputs = getattr(self, "_cad_location_inputs", {})
+        for axis, value in zip(("x", "y", "z"), point):
+            spin = inputs.get(axis)
+            if spin is not None:
+                spin.blockSignals(True)
+                spin.setValue(float(value))
+                spin.blockSignals(False)
+        if update_view:
+            self._save_mesh_workflow_state()
+            self._redraw_mesh_grid_vtk()
+
+    def _point_inside_bbox(self, point, bbox, eps: float = 1e-9) -> bool:
+        return (
+            bbox[0] - eps <= point[0] <= bbox[1] + eps and
+            bbox[2] - eps <= point[1] <= bbox[3] + eps and
+            bbox[4] - eps <= point[2] <= bbox[5] + eps
+        )
+
+    def _auto_location_candidate(self) -> tuple[float, float, float] | None:
+        domain_bbox = self._cad_domain_bounds()
+        if domain_bbox is None:
+            return None
+        center = np.array([
+            (domain_bbox[0] + domain_bbox[1]) * 0.5,
+            (domain_bbox[2] + domain_bbox[3]) * 0.5,
+            (domain_bbox[4] + domain_bbox[5]) * 0.5,
+        ], dtype=float)
+        obstacle_bbox = self._domain_geom_bbox()
+        if obstacle_bbox is None or not self._point_inside_bbox(center, obstacle_bbox):
+            return tuple(float(v) for v in center)
+        size = np.array([domain_bbox[1] - domain_bbox[0], domain_bbox[3] - domain_bbox[2], domain_bbox[5] - domain_bbox[4]], dtype=float)
+        axis = int(np.argmax(size))
+        candidates = []
+        for ratio in (0.25, 0.75, 0.15, 0.85):
+            pt = center.copy()
+            pt[axis] = domain_bbox[axis * 2] + size[axis] * ratio
+            candidates.append(pt)
+        for pt in candidates:
+            if self._point_inside_bbox(pt, domain_bbox) and not self._point_inside_bbox(pt, obstacle_bbox):
+                return tuple(float(v) for v in pt)
+        return tuple(float(v) for v in center)
+
+    def _auto_recommend_location_in_mesh(self, _checked: bool = False, update_view: bool = True) -> None:
+        point = self._auto_location_candidate()
+        if point is None:
+            return
+        self._set_cad_location_values(point, update_view=update_view)
+        if update_view:
+            self._set_status("locationInMesh 已自动推荐，红点已在 3D 预览中标出。")
+
+    def _on_cad_location_changed(self, *_args) -> None:
+        self._save_mesh_workflow_state()
+        if hasattr(self, "_mesh_grid_vtk"):
+            self._redraw_mesh_grid_vtk()
+
+    def _on_cad_domain_transform_changed(self, *_args) -> None:
+        self._update_cad_domain_status()
+        self._save_mesh_workflow_state()
+        if hasattr(self, "_mesh_grid_vtk"):
+            self._redraw_mesh_grid_vtk()
+
+    def _auto_wrap_cad_domain_around_obstacles(self) -> None:
+        domain_bbox = self._cad_domain_bounds()
+        obstacle_bbox = self._domain_geom_bbox()
+        if domain_bbox is None or obstacle_bbox is None:
+            self._show_error("请先导入计算域 STL 和障碍物 STL。")
+            return
+        d_size = np.array([domain_bbox[1] - domain_bbox[0], domain_bbox[3] - domain_bbox[2], domain_bbox[5] - domain_bbox[4]], dtype=float)
+        o_size = np.array([obstacle_bbox[1] - obstacle_bbox[0], obstacle_bbox[3] - obstacle_bbox[2], obstacle_bbox[5] - obstacle_bbox[4]], dtype=float)
+        ratios = np.divide(o_size * 1.25, np.maximum(d_size, 1e-9))
+        factor = max(1.0, float(np.max(ratios)))
+        d_center = np.array([(domain_bbox[0] + domain_bbox[1]) * 0.5, (domain_bbox[2] + domain_bbox[3]) * 0.5, (domain_bbox[4] + domain_bbox[5]) * 0.5])
+        o_center = np.array([(obstacle_bbox[0] + obstacle_bbox[1]) * 0.5, (obstacle_bbox[2] + obstacle_bbox[3]) * 0.5, (obstacle_bbox[4] + obstacle_bbox[5]) * 0.5])
+        inputs = getattr(self, "_cad_domain_transform_inputs", {})
+        for axis_i, axis in enumerate(("x", "y", "z")):
+            s_key = f"scale_{axis}"
+            t_key = f"translate_{axis}"
+            if s_key in inputs:
+                inputs[s_key].setValue(inputs[s_key].value() * factor)
+            if t_key in inputs:
+                inputs[t_key].setValue(inputs[t_key].value() + float(o_center[axis_i] - d_center[axis_i]))
+        self._update_cad_domain_status()
+        self._redraw_mesh_grid_vtk()
+        self._save_mesh_workflow_state()
+
+    def _check_cad_domain_closure(self) -> None:
+        if not self._cad_domain_imports:
+            self._show_error("请先导入计算域 STL。")
+            return
+        msg = []
+        for asset in self._cad_domain_imports:
+            feature = vtk.vtkFeatureEdges()
+            feature.SetInputData(asset.polydata)
+            feature.BoundaryEdgesOn()
+            feature.FeatureEdgesOff()
+            feature.NonManifoldEdgesOn()
+            feature.ManifoldEdgesOff()
+            feature.Update()
+            n_edges = feature.GetOutput().GetNumberOfCells()
+            msg.append(f"{asset.source_path.name}: {'可能封闭' if n_edges == 0 else f'发现 {n_edges} 条开放/非流形边'}")
+        QMessageBox.information(self, "计算域封闭性检查", "\n".join(msg))
+
+    def _infer_domain_faces_from_filenames(self) -> None:
+        if self._current_domain_template_key() == "cad":
+            self._init_domain_face_table()
+            self._set_status("已根据 CAD 计算域 STL 文件名重新识别边界类型。")
+        else:
+            self._init_domain_face_table()
+            self._set_status("已恢复当前计算域模板的默认边界。")
+        self._save_mesh_workflow_state()
+        self._redraw_mesh_grid_vtk()
+
     def _redraw_mesh_grid_vtk(self) -> None:
         canvas = self._mesh_grid_vtk
         camera = canvas._renderer.GetActiveCamera()
@@ -724,39 +784,8 @@ class GeometryLogicMixin:
                 canvas.add_polydata(
                     asset.polydata, color=asset.color, opacity=opacity,
                 )
-        # ── draw domain bounding box ──
-        if self._mesh_imports:
-            bounds = self._get_domain_bounds()
-            if bounds:
-                x0, x1 = bounds["x_min"], bounds["x_max"]
-                y0, y1 = bounds["y_min"], bounds["y_max"]
-                z0, z1 = bounds["z_min"], bounds["z_max"]
-                corners = np.array([
-                    [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
-                    [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1],
-                ])
-                edges = [
-                    (0, 1), (1, 2), (2, 3), (3, 0),
-                    (4, 5), (5, 6), (6, 7), (7, 4),
-                    (0, 4), (1, 5), (2, 6), (3, 7),
-                ]
-                for a, b in edges:
-                    canvas.add_polyline(
-                        np.array([corners[a], corners[b]]),
-                        color=(0.2, 0.8, 0.4), width=2.0, opacity=0.7,
-                    )
-                # highlight selected domain face
-                if 0 <= self._highlighted_domain_face < len(DOMAIN_FACE_DEFAULTS):
-                    face_defs = self._get_domain_face_definitions()
-                    face_def = face_defs[self._highlighted_domain_face] if self._highlighted_domain_face < len(face_defs) else DOMAIN_FACE_DEFAULTS[self._highlighted_domain_face]
-                    face_text = face_def.get("faces") or face_def.get("face") or DOMAIN_FACE_DEFAULTS[self._highlighted_domain_face]["face"]
-                    vi = [int(v) for v in face_text.split()]
-                    face_corners = corners[vi]
-                    canvas.add_polygon(
-                        face_corners, color=(0.96, 0.85, 0.16),
-                        opacity=0.42, edge_color=(1.0, 0.85, 0.0),
-                    )
-                    self._draw_domain_face_velocity_arrows(canvas, face_corners, face_def)
+        # ── draw computational domain (per selected template) ──
+        self._draw_domain_preview(canvas)
 
         if saved is not None:
             camera.SetPosition(*saved[0])
@@ -770,46 +799,78 @@ class GeometryLogicMixin:
     # ── domain face / Group 2 logic ──────────────────────────
 
     def _init_domain_face_table(self) -> None:
-        """Fill domain face table with 6 rows of default/combo widgets."""
+        """Fill the dynamic face table for the current domain template."""
         if not hasattr(self, "_domain_face_table"):
             return
         table = self._domain_face_table
+        previous_faces = []
+        if table.rowCount() > 0:
+            try:
+                previous_faces = self._get_domain_face_definitions()
+            except Exception:
+                previous_faces = []
+        previous_by_label = {f.get("label", ""): f for f in previous_faces}
+        previous_by_name = {f.get("name", ""): f for f in previous_faces}
         table.blockSignals(True)
         table.setRowCount(0)
-        for i, face in enumerate(DOMAIN_FACE_DEFAULTS):
+        for i, face in enumerate(self._current_template_faces()):
+            saved = previous_by_label.get(face["label"]) or previous_by_name.get(face["name"]) or {}
             table.insertRow(i)
             table.setRowHeight(i, 34)
+            show_check = QComboBox()
+            show_check.addItem("✔", True)
+            show_check.addItem("—", False)
+            show_check.setMinimumHeight(28)
+            show_check.setCurrentIndex(0 if saved.get("visible", True) else 1)
+            show_check.currentIndexChanged.connect(self._on_domain_face_field_changed)
+            table.setCellWidget(i, 0, show_check)
+
             label_item = QTableWidgetItem(face["label"])
             label_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            table.setItem(i, 0, label_item)
+            table.setItem(i, 1, label_item)
+
             combo = QComboBox()
             combo.addItems(BOUNDARY_TYPE_OPTIONS)
             combo.setMinimumHeight(28)
-            idx = combo.findText(face["type"])
+            btype = saved.get("type", face["type"])
+            idx = combo.findText(btype)
             if idx >= 0:
                 combo.setCurrentIndex(idx)
             combo.currentIndexChanged.connect(lambda _idx, row=i: self._on_domain_face_type_changed(row))
-            table.setCellWidget(i, 1, combo)
+            table.setCellWidget(i, 2, combo)
+
             name_edit = QLineEdit()
-            name_edit.setText(face["name"])
-            name_edit.setPlaceholderText("边界名称")
+            name_edit.setText(saved.get("name", face["name"]))
+            name_edit.setPlaceholderText("patch 名称")
             name_edit.setMinimumHeight(28)
             name_edit.editingFinished.connect(lambda row=i: self._on_domain_face_name_changed(row))
-            table.setCellWidget(i, 2, name_edit)
-            u_value, p_value = self._default_domain_face_field_values(face["name"], face["type"])
-            u_edit = QLineEdit(u_value)
+            table.setCellWidget(i, 3, name_edit)
+
+            u_default, p_default = self._default_domain_face_field_values(name_edit.text().strip(), btype)
+            u_edit = QLineEdit(saved.get("u_value", u_default))
             u_edit.setPlaceholderText("如 (10 0 0)、noSlip、zeroGradient")
             u_edit.setMinimumHeight(28)
             u_edit.editingFinished.connect(self._on_domain_face_field_changed)
-            table.setCellWidget(i, 3, u_edit)
-            p_edit = QLineEdit(p_value)
+            table.setCellWidget(i, 4, u_edit)
+
+            p_edit = QLineEdit(saved.get("p_value", p_default))
             p_edit.setPlaceholderText("如 0、zeroGradient")
             p_edit.setMinimumHeight(28)
             p_edit.editingFinished.connect(self._on_domain_face_field_changed)
-            table.setCellWidget(i, 4, p_edit)
+            table.setCellWidget(i, 5, p_edit)
+
+            level_spin = QSpinBox()
+            level_spin.setRange(0, 9)
+            level_spin.setValue(int(saved.get("refinement_level", 3 if btype == "wall" else 2)))
+            level_spin.setMinimumHeight(28)
+            level_spin.valueChanged.connect(self._on_domain_face_field_changed)
+            table.setCellWidget(i, 6, level_spin)
         table.blockSignals(False)
-        table.selectRow(0)
-        self._highlighted_domain_face = 0
+        if table.rowCount() > 0:
+            table.selectRow(0)
+            self._highlighted_domain_face = 0
+        else:
+            self._highlighted_domain_face = -1
         try:
             table.selectionModel().selectionChanged.disconnect(
                 self._on_domain_face_selection_changed)
@@ -826,23 +887,27 @@ class GeometryLogicMixin:
         self._redraw_mesh_grid_vtk()
 
     def _get_domain_face_definitions(self) -> list[dict]:
-        """Return list of {label, name, type, faces} from the table."""
+        """Return {label, name, type, u_value, p_value, visible, refinement_level}."""
+        template_faces = self._current_template_faces()
         if not hasattr(self, "_domain_face_table"):
-            return DOMAIN_FACE_DEFAULTS.copy()
+            return [dict(f) for f in template_faces]
         result = []
         table = self._domain_face_table
         for i in range(table.rowCount()):
-            label_item = table.item(i, 0)
+            label_item = table.item(i, 1)
             if label_item is None:
                 continue
             label = label_item.text().strip()
-            face = DOMAIN_FACE_DEFAULTS[i]["face"]
-            combo = table.cellWidget(i, 1)
-            btype = combo.currentText() if combo else DOMAIN_FACE_DEFAULTS[i]["type"]
-            name_edit = table.cellWidget(i, 2)
-            name = name_edit.text().strip() if name_edit else DOMAIN_FACE_DEFAULTS[i]["name"]
-            u_edit = table.cellWidget(i, 3)
-            p_edit = table.cellWidget(i, 4)
+            fallback = template_faces[i] if i < len(template_faces) else {"name": "patch", "type": "patch"}
+            show_combo = table.cellWidget(i, 0)
+            visible = bool(show_combo.currentData()) if show_combo else True
+            combo = table.cellWidget(i, 2)
+            btype = combo.currentText() if combo else fallback["type"]
+            name_edit = table.cellWidget(i, 3)
+            name = name_edit.text().strip() if name_edit else fallback["name"]
+            u_edit = table.cellWidget(i, 4)
+            p_edit = table.cellWidget(i, 5)
+            level_spin = table.cellWidget(i, 6)
             default_u, default_p = self._default_domain_face_field_values(name, btype)
             u_value = u_edit.text().strip() if u_edit and u_edit.text().strip() else default_u
             p_value = p_edit.text().strip() if p_edit and p_edit.text().strip() else default_p
@@ -850,11 +915,189 @@ class GeometryLogicMixin:
                 "label": label,
                 "name": name or btype,
                 "type": btype,
-                "faces": face,
                 "u_value": u_value,
                 "p_value": p_value,
+                "visible": visible,
+                "refinement_level": int(level_spin.value()) if level_spin else (3 if btype == "wall" else 2),
             })
         return result
+
+    def _on_domain_face_type_changed(self, row: int) -> None:
+        if not hasattr(self, "_domain_face_table"):
+            return
+        table = self._domain_face_table
+        if row < 0 or row >= table.rowCount():
+            return
+        combo = table.cellWidget(row, 2)
+        name_edit = table.cellWidget(row, 3)
+        u_edit = table.cellWidget(row, 4)
+        p_edit = table.cellWidget(row, 5)
+        level_spin = table.cellWidget(row, 6)
+        tfaces = self._current_template_faces()
+        fb = tfaces[row] if row < len(tfaces) else {"type": "patch", "name": "patch"}
+        btype = combo.currentText() if combo else fb["type"]
+        name = name_edit.text().strip() if name_edit else fb["name"]
+        u_value, p_value = self._default_domain_face_field_values(name, btype)
+        if u_edit:
+            u_edit.setText(u_value)
+        if p_edit:
+            p_edit.setText(p_value)
+        if level_spin:
+            level_spin.setValue(3 if btype == "wall" else 2)
+        self._save_mesh_workflow_state()
+        self._redraw_mesh_grid_vtk()
+
+    def _on_domain_face_name_changed(self, row: int) -> None:
+        if not hasattr(self, "_domain_face_table"):
+            return
+        table = self._domain_face_table
+        if row < 0 or row >= table.rowCount():
+            return
+        combo = table.cellWidget(row, 2)
+        name_edit = table.cellWidget(row, 3)
+        u_edit = table.cellWidget(row, 4)
+        p_edit = table.cellWidget(row, 5)
+        tfaces = self._current_template_faces()
+        fb = tfaces[row] if row < len(tfaces) else {"type": "patch", "name": "patch"}
+        btype = combo.currentText() if combo else fb["type"]
+        name = name_edit.text().strip() if name_edit else fb["name"]
+        default_u, default_p = self._default_domain_face_field_values(name, btype)
+        if u_edit and not u_edit.text().strip():
+            u_edit.setText(default_u)
+        if p_edit and not p_edit.text().strip():
+            p_edit.setText(default_p)
+        self._save_mesh_workflow_state()
+        self._redraw_mesh_grid_vtk()
+
+    def _on_domain_face_field_changed(self) -> None:
+        self._save_mesh_workflow_state()
+        self._redraw_mesh_grid_vtk()
+
+    # ── domain template helpers ──────────────────────────────
+    def _current_domain_template_key(self) -> str:
+        return getattr(self, "_domain_template_key", "box")
+
+    def _current_template_faces(self) -> list[dict]:
+        if self._current_domain_template_key() == "cad":
+            return self._cad_domain_faces_from_assets()
+        return domain_templates.template_default_faces(self._current_domain_template_key())
+
+    def _get_domain_unit_convert(self) -> float:
+        if hasattr(self, "_domain_unit_combo") and self._domain_unit_combo.currentData() == "mm":
+            return 0.001
+        return 1.0
+
+    def _get_cylinder_params(self) -> dict:
+        return {
+            "radius": self._cyl_radius.value(),
+            "length": self._cyl_length.value(),
+            "axis": self._cyl_axis_combo.currentData(),
+            "center_x": self._cyl_center_x.value(),
+            "center_y": self._cyl_center_y.value(),
+            "center_z": self._cyl_center_z.value(),
+            "n_circ": self._cyl_ncirc.value(),
+            "n_radial": self._cyl_nradial.value(),
+            "n_axial": self._cyl_naxial.value(),
+            "unit": self._domain_unit_combo.currentData(),
+        }
+
+    def _get_nozzle_params(self) -> dict:
+        return {
+            "h_in": self._nozzle_hin.value(),
+            "h_out": self._nozzle_hout.value(),
+            "length": self._nozzle_length.value(),
+            "width": self._nozzle_width.value(),
+            "center_x": self._nozzle_center_x.value(),
+            "center_y": self._nozzle_center_y.value(),
+            "center_z": self._nozzle_center_z.value(),
+            "cells_x": self._nozzle_cx.value(),
+            "cells_y": self._nozzle_cy.value(),
+            "cells_z": self._nozzle_cz.value(),
+            "unit": self._domain_unit_combo.currentData(),
+        }
+
+    def _get_cad_domain_params(self) -> dict:
+        bbox = self._cad_domain_bounds()
+        if bbox is None:
+            bbox = (-1.0, 1.0, -1.0, 1.0, -1.0, 1.0)
+        pad = max(bbox[1] - bbox[0], bbox[3] - bbox[2], bbox[5] - bbox[4], 1.0) * 0.08
+        cells = getattr(self, "_cad_domain_cells_inputs", {})
+        return {
+            "x_min": bbox[0] - pad,
+            "x_max": bbox[1] + pad,
+            "y_min": bbox[2] - pad,
+            "y_max": bbox[3] + pad,
+            "z_min": bbox[4] - pad,
+            "z_max": bbox[5] + pad,
+            "cells_x": cells.get("X").value() if cells.get("X") else 40,
+            "cells_y": cells.get("Y").value() if cells.get("Y") else 24,
+            "cells_z": cells.get("Z").value() if cells.get("Z") else 24,
+            "unit": self._domain_unit_combo.currentData() if hasattr(self, "_domain_unit_combo") else "m",
+            "transform": self._cad_domain_transform_values(),
+        }
+
+    def _get_domain_params(self) -> dict:
+        key = self._current_domain_template_key()
+        if key == "cylinder":
+            return self._get_cylinder_params()
+        if key == "nozzle":
+            return self._get_nozzle_params()
+        if key == "cad":
+            return self._get_cad_domain_params()
+        return self._get_domain_mesh_params()
+
+    def _domain_param_page_index(self, key: str) -> int:
+        return {"box": 0, "cylinder": 1, "nozzle": 2, "cad": 3}.get(key, 0)
+
+    def _domain_bbox(self, key: str, params: dict) -> tuple[float, float, float, float, float, float]:
+        if key == "cad":
+            return (params["x_min"], params["x_max"], params["y_min"],
+                    params["y_max"], params["z_min"], params["z_max"])
+        if key == "cylinder":
+            lines = domain_templates.cylinder_preview_polylines(params)
+            pts = np.vstack(lines) if lines else np.array(domain_templates.cylinder_vertices(params), dtype=float)
+            return (float(pts[:, 0].min()), float(pts[:, 0].max()),
+                    float(pts[:, 1].min()), float(pts[:, 1].max()),
+                    float(pts[:, 2].min()), float(pts[:, 2].max()))
+        if key == "nozzle":
+            pts = domain_templates.nozzle_corners(params)
+            return (float(pts[:, 0].min()), float(pts[:, 0].max()),
+                    float(pts[:, 1].min()), float(pts[:, 1].max()),
+                    float(pts[:, 2].min()), float(pts[:, 2].max()))
+        return (params["x_min"], params["x_max"], params["y_min"],
+                params["y_max"], params["z_min"], params["z_max"])
+
+    def _domain_location_in_mesh(self, key: str, params: dict) -> tuple[float, float, float]:
+        if key == "cad":
+            loc = self._cad_location_values()
+            if loc is not None:
+                return loc
+            x0, x1, y0, y1, z0, z1 = self._domain_bbox(key, params)
+            return ((x0 + x1) / 2.0, (y0 + y1) / 2.0, (z0 + z1) / 2.0)
+        if key in {"cylinder", "nozzle"}:
+            x0, x1, y0, y1, z0, z1 = self._domain_bbox(key, params)
+            return ((x0 + x1) / 2.0, (y0 + y1) / 2.0, (z0 + z1) / 2.0)
+        x0, x1, y0, y1, z0, z1 = self._domain_bbox(key, params)
+        return (x1 - (x1 - x0) * 0.05, (y0 + y1) / 2.0, (z0 + z1) / 2.0)
+
+    def _on_domain_param_changed(self, *_args) -> None:
+        self._update_cad_domain_status()
+        self._save_mesh_workflow_state()
+        if hasattr(self, "_mesh_grid_vtk"):
+            self._redraw_mesh_grid_vtk()
+
+    def _on_domain_template_changed(self) -> None:
+        if not hasattr(self, "_mesh_domain_type_combo"):
+            return
+        self._domain_template_key = self._mesh_domain_type_combo.currentData() or "box"
+        if hasattr(self, "_domain_param_stack"):
+            self._domain_param_stack.setCurrentIndex(
+                self._domain_param_page_index(self._domain_template_key))
+        self._init_domain_face_table()
+        self._rebuild_cad_domain_file_list()
+        self._update_cad_domain_status()
+        self._save_mesh_workflow_state()
+        self._redraw_mesh_grid_vtk()
 
     def _default_domain_face_field_values(self, name: str, boundary_type: str) -> tuple[str, str]:
         lowered = name.lower()
@@ -904,49 +1147,24 @@ class GeometryLogicMixin:
                 start = origin + u_axis * u_ratio + v_axis * v_ratio + offset
                 canvas.add_arrow(start, velocity, arrow_length, color=(0.10, 0.45, 1.0), opacity=0.95)
 
-    def _on_domain_face_type_changed(self, row: int) -> None:
-        if not hasattr(self, "_domain_face_table"):
+    def _draw_cylinder_end_arrows(self, canvas: NativeVtkPreviewWidget, params: dict, at_outlet: bool, face_def: dict) -> None:
+        velocity = self._parse_velocity_vector_value(str(face_def.get("u_value", "")))
+        if velocity is None:
             return
-        table = self._domain_face_table
-        if row < 0 or row >= table.rowCount():
-            return
-        combo = table.cellWidget(row, 1)
-        name_edit = table.cellWidget(row, 2)
-        u_edit = table.cellWidget(row, 3)
-        p_edit = table.cellWidget(row, 4)
-        btype = combo.currentText() if combo else DOMAIN_FACE_DEFAULTS[row]["type"]
-        name = name_edit.text().strip() if name_edit else DOMAIN_FACE_DEFAULTS[row]["name"]
-        u_value, p_value = self._default_domain_face_field_values(name, btype)
-        if u_edit:
-            u_edit.setText(u_value)
-        if p_edit:
-            p_edit.setText(p_value)
-        self._save_mesh_workflow_state()
-        self._redraw_mesh_grid_vtk()
+        centers = domain_templates.cylinder_end_centers(params)
+        center = np.array(centers[1 if at_outlet else 0], dtype=float)
+        ring = domain_templates.cylinder_end_circle_points(params, at_outlet, n=12)
+        radius = float(params["radius"])
+        arrow_length = radius * 0.5
+        axis_dir = domain_templates.cylinder_axis_direction(params)
+        offset = axis_dir * radius * 0.02 * (-1.0 if at_outlet else 1.0)
+        starts = [center]
+        for cp in ring[:-1:2]:
+            starts.append(center + 0.5 * (cp - center))
+            starts.append(center + 0.85 * (cp - center))
+        for start in starts:
+            canvas.add_arrow(start + offset, velocity, arrow_length, color=(0.10, 0.45, 1.0), opacity=0.95)
 
-    def _on_domain_face_name_changed(self, row: int) -> None:
-        if not hasattr(self, "_domain_face_table"):
-            return
-        table = self._domain_face_table
-        if row < 0 or row >= table.rowCount():
-            return
-        combo = table.cellWidget(row, 1)
-        name_edit = table.cellWidget(row, 2)
-        u_edit = table.cellWidget(row, 3)
-        p_edit = table.cellWidget(row, 4)
-        btype = combo.currentText() if combo else DOMAIN_FACE_DEFAULTS[row]["type"]
-        name = name_edit.text().strip() if name_edit else DOMAIN_FACE_DEFAULTS[row]["name"]
-        default_u, default_p = self._default_domain_face_field_values(name, btype)
-        if u_edit and not u_edit.text().strip():
-            u_edit.setText(default_u)
-        if p_edit and not p_edit.text().strip():
-            p_edit.setText(default_p)
-        self._save_mesh_workflow_state()
-        self._redraw_mesh_grid_vtk()
-
-    def _on_domain_face_field_changed(self) -> None:
-        self._save_mesh_workflow_state()
-        self._redraw_mesh_grid_vtk()
 
     # ── domain mesh / Group 3 logic ─────────────────────────
 
@@ -968,10 +1186,39 @@ class GeometryLogicMixin:
         return bbox
 
     def _auto_fill_domain_bounds(self) -> None:
-        if self._domain_bounds_manual:
-            return
         bbox = self._domain_geom_bbox()
         if bbox is None:
+            return
+        center = ((bbox[0] + bbox[1]) * 0.5, (bbox[2] + bbox[3]) * 0.5, (bbox[4] + bbox[5]) * 0.5)
+        if self._current_domain_template_key() == "cylinder" and hasattr(self, "_cyl_radius"):
+            dims = {"X": bbox[1] - bbox[0], "Y": bbox[3] - bbox[2], "Z": bbox[5] - bbox[4]}
+            axis = max(dims, key=dims.get)
+            others = [d for k, d in dims.items() if k != axis]
+            self._cyl_length.setValue(max(dims[axis] * 1.25, 1e-4))
+            self._cyl_radius.setValue(max((max(others) if others else 1.0) * 0.75, 1e-4))
+            self._cyl_center_x.setValue(center[0])
+            self._cyl_center_y.setValue(center[1])
+            self._cyl_center_z.setValue(center[2])
+            ai = self._cyl_axis_combo.findData(axis)
+            if ai >= 0:
+                self._cyl_axis_combo.setCurrentIndex(ai)
+            if hasattr(self, "_mesh_grid_vtk"):
+                self._redraw_mesh_grid_vtk()
+            self._set_status("圆柱计算域已按障碍物中心自动包围（半径/长度/轴向/中心）。")
+            return
+        if self._current_domain_template_key() == "nozzle" and hasattr(self, "_nozzle_hin"):
+            self._nozzle_length.setValue(max((bbox[1] - bbox[0]) * 1.35, 1e-4))
+            self._nozzle_hin.setValue(max((bbox[3] - bbox[2]) * 1.6, 1e-4))
+            self._nozzle_hout.setValue(max((bbox[3] - bbox[2]) * 1.6, 1e-4))
+            self._nozzle_width.setValue(max((bbox[5] - bbox[4]) * 1.35, 1e-4))
+            self._nozzle_center_x.setValue(center[0])
+            self._nozzle_center_y.setValue(center[1])
+            self._nozzle_center_z.setValue(center[2])
+            if hasattr(self, "_mesh_grid_vtk"):
+                self._redraw_mesh_grid_vtk()
+            self._set_status("渐变通道计算域已按障碍物中心自动包围（尺寸/中心）。")
+            return
+        if self._domain_bounds_manual:
             return
         padding = max((bbox[1] - bbox[0]) * 0.1,
                      (bbox[3] - bbox[2]) * 0.1,
@@ -988,21 +1235,122 @@ class GeometryLogicMixin:
         self._domain_bounds_manual = False
         if hasattr(self, "_mesh_grid_vtk"):
             self._redraw_mesh_grid_vtk()
-        if payload.get("mesh_generated") and hasattr(self, "_mesh_grid_vtk"):
-            self._on_preview_mesh()
         self._set_status("计算域范围已从几何包围盒自动计算（含 10% 扩展边距）。")
 
     def _on_domain_manual_override(self) -> None:
         self._domain_bounds_manual = True
         self._redraw_mesh_grid_vtk()
 
-    def _get_domain_bounds(self) -> dict | None:
-        if not hasattr(self, "_domain_bounds_inputs"):
-            return None
-        try:
-            return {key: inp.value() for key, inp in self._domain_bounds_inputs.items()}
-        except Exception:
-            return None
+    def _draw_domain_preview(self, canvas: NativeVtkPreviewWidget) -> None:
+        key = self._current_domain_template_key()
+        params = self._get_domain_params()
+        if key == "cad":
+            faces = self._get_domain_face_definitions()
+            hi = self._highlighted_domain_face
+            for i, asset in enumerate(self._cad_domain_imports):
+                if i < len(faces) and not faces[i].get("visible", True):
+                    continue
+                pd = self._transformed_cad_domain_polydata(asset)
+                btype = faces[i].get("type", self._cad_domain_patch_type(asset.name)) if i < len(faces) else self._cad_domain_patch_type(asset.name)
+                lname = asset.name.lower()
+                if "inlet" in lname or "入口" in lname:
+                    color = (0.12, 0.42, 1.0)
+                elif "outlet" in lname or "出口" in lname:
+                    color = (1.0, 0.18, 0.12)
+                elif btype == "wall":
+                    color = (0.62, 0.66, 0.70)
+                else:
+                    color = (0.72, 0.48, 0.95)
+                edge = (1.0, 0.85, 0.0) if i == hi else tuple(max(c * 0.72, 0.08) for c in color)
+                opacity = 0.68 if i == hi else 0.42
+                line_width = 1.7 if i == hi else 0.45
+                canvas.add_polydata(pd, color=color, opacity=opacity, edge_color=edge, line_width=line_width)
+                bounds = pd.GetBounds()
+                if bounds and all(np.isfinite(bounds)):
+                    label_pos = ((bounds[0]+bounds[1])*0.5, (bounds[2]+bounds[3])*0.5, (bounds[4]+bounds[5])*0.5)
+                    canvas.add_text(asset.name, label_pos, color=color, size=12)
+                    if i == hi and i < len(faces):
+                        velocity = self._parse_velocity_vector_value(str(faces[i].get("u_value", "")))
+                        if velocity is not None:
+                            size = max(bounds[1]-bounds[0], bounds[3]-bounds[2], bounds[5]-bounds[4], 1e-9)
+                            canvas.add_arrow(np.array(label_pos), velocity, size * 0.18, color=(0.10, 0.45, 1.0), opacity=0.95)
+            loc = self._cad_location_values()
+            if loc is not None:
+                bbox = self._cad_domain_bounds() or (-1.0, 1.0, -1.0, 1.0, -1.0, 1.0)
+                marker_radius = max(bbox[1]-bbox[0], bbox[3]-bbox[2], bbox[5]-bbox[4], 1.0) * 0.025
+                canvas.add_sphere_marker(loc, marker_radius, color=(1.0, 0.05, 0.02), opacity=0.98)
+                canvas.add_text("locationInMesh", loc, color=(1.0, 0.05, 0.02), size=13)
+            self._update_cad_domain_status()
+            return
+        if key == "cylinder":
+            highlight_wall = False
+            faces = self._get_domain_face_definitions()
+            hi = self._highlighted_domain_face
+            face_def = faces[hi] if 0 <= hi < len(faces) else None
+            highlight_label = face_def.get("label") if face_def else None
+            highlight_wall = highlight_label == "圆柱壁面"
+            for line in domain_templates.cylinder_preview_polylines(params):
+                color = (1.0, 0.85, 0.0) if highlight_wall else (0.2, 0.8, 0.4)
+                width = 3.6 if highlight_wall else 2.0
+                canvas.add_polyline(line, color=color, width=width, opacity=0.9)
+            inlet_c, outlet_c = domain_templates.cylinder_end_centers(params)
+            canvas.add_text("inlet", tuple(inlet_c), color=(0.54, 0.82, 0.52), size=14)
+            canvas.add_text("outlet", tuple(outlet_c), color=(0.96, 0.53, 0.44), size=14)
+            if highlight_label in ("进口端面", "出口端面"):
+                at_outlet = highlight_label == "出口端面"
+                ring = domain_templates.cylinder_end_circle_points(params, at_outlet)
+                canvas.add_polygon(ring, color=(0.96, 0.85, 0.16), opacity=0.42, edge_color=(1.0, 0.85, 0.0))
+                self._draw_cylinder_end_arrows(canvas, params, at_outlet, face_def)
+            return
+        # box-topology (长方体 / 渐变通道) — wireframe + selected-face highlight
+        corners = domain_templates.template_corners(key, params)
+        edges = [
+            (0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4),
+            (0, 4), (1, 5), (2, 6), (3, 7),
+        ]
+        for a, b in edges:
+            canvas.add_polyline(np.array([corners[a], corners[b]]), color=(0.2, 0.8, 0.4), width=2.0, opacity=0.7)
+        faces = self._get_domain_face_definitions()
+        if 0 <= self._highlighted_domain_face < len(faces):
+            face_def = faces[self._highlighted_domain_face]
+            quad = domain_templates._BOX_FACE_QUADS.get(face_def.get("label", ""))
+            if quad:
+                vi = [int(v) for v in quad.split()]
+                face_corners = corners[vi]
+                canvas.add_polygon(face_corners, color=(0.96, 0.85, 0.16), opacity=0.42, edge_color=(1.0, 0.85, 0.0))
+                self._draw_domain_face_velocity_arrows(canvas, face_corners, face_def)
+
+    def _write_multi_solid_stl(self, dest: Path, regions: list[tuple[str, object]]) -> None:
+        """Write transformed CAD-domain patches as one ASCII STL with named solids."""
+        def _fmt(v: float) -> str:
+            return f"{float(v):.9g}"
+
+        with dest.open("w", encoding="utf-8") as handle:
+            for raw_name, polydata in regions:
+                name = self._safe_openfoam_patch_name(str(raw_name)) or "patch"
+                handle.write(f"solid {name}\n")
+                for cell_i in range(polydata.GetNumberOfCells()):
+                    cell = polydata.GetCell(cell_i)
+                    if cell is None or cell.GetNumberOfPoints() < 3:
+                        continue
+                    p0 = np.array(cell.GetPoints().GetPoint(0), dtype=float)
+                    for local_i in range(1, cell.GetNumberOfPoints() - 1):
+                        p1 = np.array(cell.GetPoints().GetPoint(local_i), dtype=float)
+                        p2 = np.array(cell.GetPoints().GetPoint(local_i + 1), dtype=float)
+                        normal = np.cross(p1 - p0, p2 - p0)
+                        norm = float(np.linalg.norm(normal))
+                        if norm > 1e-14:
+                            normal = normal / norm
+                        else:
+                            normal = np.array([0.0, 0.0, 0.0], dtype=float)
+                        handle.write(f"  facet normal {_fmt(normal[0])} {_fmt(normal[1])} {_fmt(normal[2])}\n")
+                        handle.write("    outer loop\n")
+                        for point in (p0, p1, p2):
+                            handle.write(f"      vertex {_fmt(point[0])} {_fmt(point[1])} {_fmt(point[2])}\n")
+                        handle.write("    endloop\n")
+                        handle.write("  endfacet\n")
+                handle.write(f"endsolid {name}\n")
+
 
     def _get_domain_mesh_params(self) -> dict:
         return {
@@ -1042,81 +1390,109 @@ class GeometryLogicMixin:
     # ── Group 6 button bar handlers ─────────────────────────
 
     def _on_generate_and_execute(self) -> None:
-        if not self._mesh_imports:
-            self._show_error("请先在组1中导入几何。")
+        if not self._mesh_imports and not self._cad_domain_imports:
+            self._show_error("请先在组1中导入障碍物，或在组2中导入计算域几何体。")
             return
         if self._current_project is None:
             self._show_error("请先新建或打开项目。")
             return
-        domain = self._get_domain_mesh_params()
-        if domain["unit"] == "mm":
-            convert = 0.001
-        else:
-            convert = 1.0
+        template_key = self._current_domain_template_key()
+        if template_key == "cad" and not self._cad_domain_imports:
+            self._show_error("当前选择 CAD 导入计算域，请先在组2中导入计算域 STL。")
+            return
+        if template_key == "cad" and self._cad_domain_has_duplicate_surfaces():
+            return
+        params = self._get_domain_params()
+        convert = self._get_domain_unit_convert()
         case_dir = self._current_project.case_dir
         system_dir = case_dir / "system"
         system_dir.mkdir(parents=True, exist_ok=True)
-        # ── write blockMeshDict ──
-        x0, x1 = domain["x_min"], domain["x_max"]
-        y0, y1 = domain["y_min"], domain["y_max"]
-        z0, z1 = domain["z_min"], domain["z_max"]
-        nx, ny, nz = domain["cells_x"], domain["cells_y"], domain["cells_z"]
-        bm = (
-            "FoamFile { version 2.0; format ascii; class dictionary; object blockMeshDict; }\n"
-            f"convertToMeters {convert};\n\n"
-            "vertices\n(\n"
-            f"    ({x0} {y0} {z0})\n"
-            f"    ({x1} {y0} {z0})\n"
-            f"    ({x1} {y1} {z0})\n"
-            f"    ({x0} {y1} {z0})\n"
-            f"    ({x0} {y0} {z1})\n"
-            f"    ({x1} {y0} {z1})\n"
-            f"    ({x1} {y1} {z1})\n"
-            f"    ({x0} {y1} {z1})\n"
-            ");\n\n"
-            f"blocks\n(\n    hex (0 1 2 3 4 5 6 7) ({nx} {ny} {nz})"
-            " simpleGrading (1 1 1)\n);\n\n"
-            "edges\n(\n);\n\n"
-            "boundary\n(\n"
-        )
-        # dynamic boundary from domain face table (Group 2)
+
         face_defs = self._get_domain_face_definitions()
-        merged: dict[tuple[str, str], list[str]] = {}
-        for f in face_defs:
-            key = (f["name"], f["type"])
-            merged.setdefault(key, []).append(f["faces"])
-        for (bname, btype), face_list in merged.items():
-            f_str = " ".join(f"({v})" for v in face_list)
-            bm += f"    {bname}  {{ type {btype}; faces ({f_str}); }}\n"
-        bm += ");\n"
+        bm = domain_templates.build_block_mesh(template_key, params, face_defs, convert)
         (system_dir / "blockMeshDict").write_text(bm, encoding="utf-8")
-        # ── write snappyHexMeshDict ──
+
         snappy = self._get_snappy_params()
         tri_dir = case_dir / "constant" / "triSurface"
         tri_dir.mkdir(parents=True, exist_ok=True)
+
+        import shutil
+        stl_records: list[dict] = []
         for asset in self._mesh_imports:
             if not asset.source_path.exists():
                 continue
             dest = tri_dir / asset.source_path.name
-            if not dest.exists():
-                import shutil
-                shutil.copy2(asset.source_path, dest)
-        stl_names = list(dict.fromkeys(a.source_path.name for a in self._mesh_imports))
+            shutil.copy2(asset.source_path, dest)
+            stl_records.append({
+                "file": dest.name,
+                "name": Path(dest.name).stem,
+                "type": "wall",
+                "level": int(snappy["level"]),
+            })
+
+        if template_key == "cad":
+            cad_regions: list[dict] = []
+            cad_solids: list[tuple[str, object]] = []
+            for i, asset in enumerate(self._cad_domain_imports):
+                fdef = face_defs[i] if i < len(face_defs) else {
+                    "name": asset.name,
+                    "type": self._cad_domain_patch_type(asset.name),
+                    "refinement_level": int(snappy["level"]),
+                    "visible": True,
+                }
+                if not fdef.get("visible", True):
+                    continue
+                patch_name = self._safe_openfoam_patch_name(fdef.get("name") or asset.name) or asset.name
+                pd = self._transformed_cad_domain_polydata(asset)
+                cad_solids.append((patch_name, pd))
+                cad_regions.append({
+                    "name": patch_name,
+                    "type": fdef.get("type") or "patch",
+                    "level": int(fdef.get("refinement_level", snappy["level"])),
+                })
+            if cad_solids:
+                dest = tri_dir / "cad_domain.stl"
+                self._write_multi_solid_stl(dest, cad_solids)
+                stl_records.append({
+                    "file": dest.name,
+                    "name": "cadDomain",
+                    "type": "patch",
+                    "level": int(snappy["level"]),
+                    "regions": cad_regions,
+                })
+
+        # Keep one record per OpenFOAM geometry name so snappy sections stay consistent.
+        deduped: dict[str, dict] = {}
+        for rec in stl_records:
+            deduped[rec["name"]] = rec
+        stl_records = list(deduped.values())
+
+        layers_enabled = bool(snappy["n_layers"] > 0 and template_key != "cad")
         shm = (
             "FoamFile { version 2.0; format ascii; class dictionary; object snappyHexMeshDict; }\n"
             "castellatedMesh true;\n"
             "snap            true;\n"
-            "addLayers       true;\n"
+            f"addLayers       {'true' if layers_enabled else 'false'};\n"
             "mergeTolerance 1e-6;\n\n"
             "geometry\n{\n"
         )
-        for name in stl_names:
-            shm += f'    {Path(name).stem}\n'
+        for rec in stl_records:
+            shm += f'    {rec["name"]}\n'
             shm += "    {\n"
-            shm += "        type triSurface;\n"
-            shm += f'        file "{name}";\n'
+            shm += "        type triSurfaceMesh;\n"
+            shm += f'        file "{rec["file"]}";\n'
+            if rec.get("regions"):
+                shm += "        regions\n"
+                shm += "        {\n"
+                for region in rec["regions"]:
+                    shm += f'            {region["name"]}\n'
+                    shm += "            {\n"
+                    shm += f'                name {region["name"]};\n'
+                    shm += "            }\n"
+                shm += "        }\n"
             shm += "    }\n"
         shm += "};\n\n"
+
         shm += (
             "castellatedMeshControls\n{\n"
             "    maxLocalCells 100000;\n"
@@ -1127,15 +1503,35 @@ class GeometryLogicMixin:
             "    features\n    (\n    );\n"
             "    refinementSurfaces\n    {\n"
         )
-        for name in stl_names:
-            shm += f'        {Path(name).stem}\n'
+        for rec in stl_records:
+            level = int(rec.get("level", snappy["level"]))
+            ptype = rec.get("type", "patch")
+            shm += f'        {rec["name"]}\n'
             shm += "        {\n"
-            shm += f"            level ({snappy['level']} {snappy['level']});\n"
+            shm += f"            level ({level} {level});\n"
+            if rec.get("regions"):
+                shm += "            regions\n"
+                shm += "            {\n"
+                for region in rec["regions"]:
+                    rlevel = int(region.get("level", level))
+                    rtype = region.get("type", "patch")
+                    shm += f'                {region["name"]}\n'
+                    shm += "                {\n"
+                    shm += f"                    level ({rlevel} {rlevel});\n"
+                    shm += "                    patchInfo\n"
+                    shm += "                    {\n"
+                    shm += f"                        type {rtype};\n"
+                    shm += "                    }\n"
+                    shm += "                }\n"
+                shm += "            }\n"
+            else:
+                shm += "            patchInfo\n"
+                shm += "            {\n"
+                shm += f"                type {ptype};\n"
+                shm += "            }\n"
             shm += "        }\n"
         shm += "    }\n"
-        lx = x1 - (x1 - x0) * 0.05
-        ly = (y0 + y1) / 2.0
-        lz = (z0 + z1) / 2.0
+        lx, ly, lz = self._domain_location_in_mesh(template_key, params)
         shm += (
             f"    resolveFeatureAngle 30;\n"
             f"    locationInMesh ({lx:.6g} {ly:.6g} {lz:.6g});\n"
@@ -1152,14 +1548,15 @@ class GeometryLogicMixin:
             "    multiRegionFeatureSnap false;\n"
             "}\n\n"
         )
-        if snappy['n_layers'] > 0:
+        layer_records = [rec for rec in stl_records if str(rec.get("type", "")).lower() == "wall" and not rec.get("regions")]
+        if layers_enabled and layer_records:
             shm += (
                 "addLayersControls\n{\n"
                 "    relativeSizes true;\n"
                 "    layers\n    {\n"
             )
-            for name in stl_names:
-                shm += f'        {Path(name).stem}\n'
+            for rec in layer_records:
+                shm += f'        {rec["name"]}\n'
                 shm += "        {\n"
                 shm += f"            nSurfaceLayers {snappy['n_layers']};\n"
                 shm += "        }\n"
@@ -1199,42 +1596,84 @@ class GeometryLogicMixin:
             "    errorReduction 0.75;\n"
             "}\n\n"
             "writeFlags\n(\n"
-            "    scalarLevels\n"
-            "    layerSets\n"
-            "    layerFields\n"
             ");\n"
         )
         (system_dir / "snappyHexMeshDict").write_text(shm, encoding="utf-8")
         self._write_zero_field_files(case_dir)
         self._append_log("已生成 blockMeshDict 和 snappyHexMeshDict，启动网格流水线。")
-        # execute mesh pipeline via existing infrastructure
         self._run_mesh_pipeline_command()
-        self._set_status("网格文件已生成，正在执行 blockMesh → snappyHexMesh → checkMesh...")
+        self._set_status("网格文件已生成，正在执行 blockMesh → snappyHexMesh -overwrite → checkMesh...")
+
+    def _is_generated_time_dir(self, name: str) -> bool:
+        if name == "0":
+            return False
+        try:
+            float(name)
+        except ValueError:
+            return False
+        return True
+
+    def _clean_case_for_mesh_regeneration(self, case_dir: Path) -> None:
+        root = case_dir.resolve()
+
+        def remove_inside(path: Path) -> None:
+            if not path.exists():
+                return
+            target = path.resolve()
+            if target == root or root not in target.parents:
+                raise OSError(f"拒绝删除 Case 外路径：{target}")
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+
+        remove_inside(case_dir / "constant" / "polyMesh")
+        for name in ("cellLevel", "pointLevel", "nSurfaceLayers", "thickness", "thicknessFraction"):
+            remove_inside(case_dir / "0" / name)
+            remove_inside(case_dir / "constant" / name)
+
+        for child in case_dir.iterdir():
+            if child.is_dir() and self._is_generated_time_dir(child.name):
+                remove_inside(child)
+            elif child.is_dir() and (child.name.startswith("processor") or child.name in {"VTK", "postProcessing"}):
+                remove_inside(child)
+
+        self._append_log("已清理旧网格、旧时间步和后处理缓存，准备重新生成网格。")
 
     def _run_mesh_pipeline_command(self) -> None:
         env_script = self._context.settings_service.load().openfoam_env_script or ""
         case_dir = self._current_project.case_dir
+        try:
+            self._clean_case_for_mesh_regeneration(case_dir)
+        except Exception as error:
+            self._append_log(f"清理旧网格/时间步失败：{error}")
+            self._show_error(f"清理旧网格/时间步失败：{error}")
+            return
         if env_script:
             cmd = (
                 f'source "{env_script}" && '
                 f"cd {shlex.quote(str(case_dir))} && "
-                "blockMesh && snappyHexMesh && checkMesh"
+                "blockMesh && snappyHexMesh -overwrite && checkMesh"
             )
         else:
             cmd = (
                 f"cd {shlex.quote(str(case_dir))} && "
-                "blockMesh && snappyHexMesh && checkMesh"
+                "blockMesh && snappyHexMesh -overwrite && checkMesh"
             )
         self._active_process_kind = "meshPipeline"
         self._foam_process = QProcess(self)
         self._foam_process.setProgram("bash")
         self._foam_process.setArguments(["-lc", cmd])
+        self._current_process_output = ""
         self._foam_process.readyReadStandardOutput.connect(self._read_process_stdout)
         self._foam_process.readyReadStandardError.connect(self._read_process_stderr)
+        self._foam_process.errorOccurred.connect(
+            lambda error: self._append_log(f"网格流水线进程启动/运行错误：{error}")
+        )
         self._foam_process.finished.connect(
             lambda ec, es: self._on_mesh_pipeline_finished(ec, es))
         self._foam_process.start()
-        self._append_log(f"执行网格流水线：blockMesh -> snappyHexMesh -> checkMesh")
+        self._append_log(f"执行网格流水线：blockMesh -> snappyHexMesh -overwrite -> checkMesh")
         self._append_log(f"Case: {case_dir}")
 
     def _on_mesh_pipeline_finished(self, exit_code: int, _es) -> None:
@@ -1395,6 +1834,12 @@ class GeometryLogicMixin:
                  "visible": a.visible, "translucent": a.translucent}
                 for a in self._mesh_imports
             ],
+            "cad_domain_imports": [
+                {"name": a.name, "source_path": str(a.source_path)}
+                for a in getattr(self, "_cad_domain_imports", [])
+            ],
+            "cad_domain_transform": self._cad_domain_transform_values() if hasattr(self, "_cad_domain_transform_inputs") else {},
+            "cad_location": self._cad_location_values() if hasattr(self, "_cad_location_inputs") else None,
             "domain_faces": [
                 {
                     "label": f["label"],
@@ -1402,10 +1847,14 @@ class GeometryLogicMixin:
                     "type": f["type"],
                     "u_value": f.get("u_value", ""),
                     "p_value": f.get("p_value", ""),
+                    "visible": f.get("visible", True),
+                    "refinement_level": f.get("refinement_level", 2),
                 }
                 for f in self._get_domain_face_definitions()
             ],
             "domain": self._get_domain_mesh_params() if self._mesh_imports else {},
+            "domain_template": self._current_domain_template_key(),
+            "domain_params": self._get_domain_params() if hasattr(self, "_domain_unit_combo") else {},
             "snappy": self._get_snappy_params() if hasattr(self, "_snappy_level_combo") else {},
             "quality": self._get_quality_params() if hasattr(self, "_quality_max_skew") else {},
             "mesh_generated": (
@@ -1424,6 +1873,43 @@ class GeometryLogicMixin:
             payload = json.loads(sp.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return
+        # restore domain template selection FIRST (face table depends on it)
+        template_key = payload.get("domain_template", "box")
+        if template_key not in domain_templates.DOMAIN_TEMPLATES:
+            template_key = "box"
+        self._domain_template_key = template_key
+        if hasattr(self, "_mesh_domain_type_combo"):
+            idx = self._mesh_domain_type_combo.findData(template_key)
+            if idx >= 0:
+                self._mesh_domain_type_combo.blockSignals(True)
+                self._mesh_domain_type_combo.setCurrentIndex(idx)
+                self._mesh_domain_type_combo.blockSignals(False)
+        if hasattr(self, "_domain_param_stack"):
+            self._domain_param_stack.setCurrentIndex(self._domain_param_page_index(template_key))
+        dparams = payload.get("domain_params", {})
+        if template_key == "cylinder" and dparams and hasattr(self, "_cyl_radius"):
+            self._cyl_radius.setValue(dparams.get("radius", self._cyl_radius.value()))
+            self._cyl_length.setValue(dparams.get("length", self._cyl_length.value()))
+            self._cyl_center_x.setValue(dparams.get("center_x", self._cyl_center_x.value()))
+            self._cyl_center_y.setValue(dparams.get("center_y", self._cyl_center_y.value()))
+            self._cyl_center_z.setValue(dparams.get("center_z", self._cyl_center_z.value()))
+            ai = self._cyl_axis_combo.findData(dparams.get("axis", "Z"))
+            if ai >= 0:
+                self._cyl_axis_combo.setCurrentIndex(ai)
+            self._cyl_ncirc.setValue(int(dparams.get("n_circ", self._cyl_ncirc.value())))
+            self._cyl_nradial.setValue(int(dparams.get("n_radial", self._cyl_nradial.value())))
+            self._cyl_naxial.setValue(int(dparams.get("n_axial", self._cyl_naxial.value())))
+        if template_key == "nozzle" and dparams and hasattr(self, "_nozzle_hin"):
+            self._nozzle_hin.setValue(dparams.get("h_in", self._nozzle_hin.value()))
+            self._nozzle_hout.setValue(dparams.get("h_out", self._nozzle_hout.value()))
+            self._nozzle_length.setValue(dparams.get("length", self._nozzle_length.value()))
+            self._nozzle_width.setValue(dparams.get("width", self._nozzle_width.value()))
+            self._nozzle_center_x.setValue(dparams.get("center_x", self._nozzle_center_x.value()))
+            self._nozzle_center_y.setValue(dparams.get("center_y", self._nozzle_center_y.value()))
+            self._nozzle_center_z.setValue(dparams.get("center_z", self._nozzle_center_z.value()))
+            self._nozzle_cx.setValue(int(dparams.get("cells_x", self._nozzle_cx.value())))
+            self._nozzle_cy.setValue(int(dparams.get("cells_y", self._nozzle_cy.value())))
+            self._nozzle_cz.setValue(int(dparams.get("cells_z", self._nozzle_cz.value())))
         # restore imports
         for item in payload.get("imports", []):
             source_path = Path(item["source_path"])
@@ -1444,6 +1930,29 @@ class GeometryLogicMixin:
             self._mesh_imports.append(asset)
         if hasattr(self, "_mesh_import_combo"):
             self._rebuild_mesh_import_combo()
+        self._cad_domain_imports = []
+        for item in payload.get("cad_domain_imports", []):
+            source_path = Path(item["source_path"])
+            if not source_path.exists():
+                continue
+            asset = self._load_stl_asset(source_path, color=(0.28, 0.62, 1.0))
+            if asset is not None:
+                asset.name = item.get("name", source_path.stem)
+                self._cad_domain_imports.append(asset)
+        if hasattr(self, "_cad_domain_transform_inputs"):
+            for key, value in payload.get("cad_domain_transform", {}).items():
+                spin = self._cad_domain_transform_inputs.get(key)
+                if spin is not None:
+                    spin.blockSignals(True)
+                    spin.setValue(float(value))
+                    spin.blockSignals(False)
+        self._rebuild_cad_domain_file_list()
+        cad_location = payload.get("cad_location")
+        if cad_location and len(cad_location) == 3:
+            self._set_cad_location_values(tuple(cad_location), update_view=False)
+        elif self._cad_domain_imports:
+            self._auto_recommend_location_in_mesh(update_view=False)
+        self._update_cad_domain_status()
         # restore domain faces (Group 2)
         domain_faces = payload.get("domain_faces", [])
         if domain_faces and hasattr(self, "_domain_face_table"):
@@ -1452,24 +1961,32 @@ class GeometryLogicMixin:
             for i, df in enumerate(domain_faces):
                 if i >= table.rowCount():
                     break
-                combo = table.cellWidget(i, 1)
+                show_combo = table.cellWidget(i, 0)
+                if show_combo and "visible" in df:
+                    show_combo.setCurrentIndex(0 if df.get("visible", True) else 1)
+                combo = table.cellWidget(i, 2)
                 if combo:
                     idx = combo.findText(df.get("type", ""))
                     if idx >= 0:
                         combo.setCurrentIndex(idx)
-                name_edit = table.cellWidget(i, 2)
+                name_edit = table.cellWidget(i, 3)
                 if name_edit:
                     name_edit.setText(df.get("name", ""))
+                fallback_faces = self._current_template_faces()
+                fallback = fallback_faces[i] if i < len(fallback_faces) else {"name": "patch", "type": "patch"}
                 default_u, default_p = self._default_domain_face_field_values(
-                    df.get("name", DOMAIN_FACE_DEFAULTS[i]["name"]),
-                    df.get("type", DOMAIN_FACE_DEFAULTS[i]["type"]),
+                    df.get("name", fallback["name"]),
+                    df.get("type", fallback["type"]),
                 )
-                u_edit = table.cellWidget(i, 3)
+                u_edit = table.cellWidget(i, 4)
                 if u_edit:
                     u_edit.setText(df.get("u_value") or default_u)
-                p_edit = table.cellWidget(i, 4)
+                p_edit = table.cellWidget(i, 5)
                 if p_edit:
                     p_edit.setText(df.get("p_value") or default_p)
+                level_spin = table.cellWidget(i, 6)
+                if level_spin and "refinement_level" in df:
+                    level_spin.setValue(int(df.get("refinement_level", level_spin.value())))
         # restore domain
         domain = payload.get("domain", {})
         if domain and hasattr(self, "_domain_bounds_inputs"):

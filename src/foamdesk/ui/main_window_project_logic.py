@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import re
-import shlex
 from pathlib import Path
 
 from PySide6.QtCore import QProcess, Qt
@@ -68,7 +66,6 @@ class ProjectProcessLogicMixin:
         self._case_label.setText(f"当前 Case: {project.name}/{project.case_name}")
         self._refresh_geometry_panel()
         self._refresh_project_home_summary()
-        self._load_boundaries_into_table()
         self._init_modeling_state()
         self._load_sim_config_state()
         self._load_solver_run_state()
@@ -344,61 +341,6 @@ class ProjectProcessLogicMixin:
             item.setHidden(not visible)
         self._set_status("项目搜索已应用。")
 
-    def _run_minimal_simulation(self) -> None:
-        if self._foam_process and self._foam_process.state() != QProcess.ProcessState.NotRunning:
-            self._show_error("已有任务正在运行，请先停止当前任务。")
-            return
-        if self._current_project is None:
-            self._show_error("请先新建或打开一个项目。")
-            return
-
-        status = self._context.environment_detector.detect()
-        if not status.is_available or not status.env_script_path:
-            self._show_error(f"OpenFOAM 环境不可用：{status.detail}")
-            return
-
-        if not self._save_case_parameters():
-            return
-        try:
-            parameters = self._context.case_parameter_service.load(self._current_project)
-        except (OSError, ValueError) as error:
-            self._show_error(f"读取求解器配置失败：{error}")
-            return
-
-        repaired_files = self._context.project_service.ensure_minimal_case_template(self._current_project)
-        if repaired_files:
-            relative_files = [str(path.relative_to(self._current_project.case_dir)) for path in repaired_files]
-            self._append_log("已补齐旧项目缺失的最小仿真文件：")
-            self._append_log("\n".join(f"- {path}" for path in relative_files))
-
-        block_mesh_dict = self._current_project.case_dir / "system" / "blockMeshDict"
-        if not block_mesh_dict.exists():
-            self._show_error("当前 case 缺少 system/blockMeshDict。")
-            return
-
-        self._workspace_tabs.setCurrentIndex(self.TAB_SOLVER_RUN)
-        self._bottom_tabs.setCurrentIndex(0)
-        self._task_text.setPlainText("任务状态：最小仿真运行中")
-        self._current_process_output = ""
-        self._last_diagnostic_summary = "本次任务正在运行，暂无失败诊断。"
-        self._active_process_kind = "minimal"
-        self._set_status("最小仿真运行中。")
-
-        command = (
-            f"source {shlex.quote(status.env_script_path)} >/dev/null 2>&1 && "
-            f"cd {shlex.quote(str(self._current_project.case_dir))} && "
-            f"blockMesh && {shlex.quote(parameters.solver_name)}"
-        )
-        self._foam_process = QProcess(self)
-        self._foam_process.setProgram("bash")
-        self._foam_process.setArguments(["-lc", command])
-        self._foam_process.readyReadStandardOutput.connect(self._read_process_stdout)
-        self._foam_process.readyReadStandardError.connect(self._read_process_stderr)
-        self._foam_process.finished.connect(self._on_process_finished)
-        self._foam_process.start()
-        self._append_log(f"启动最小仿真：{self._current_project.case_dir}")
-        self._append_log(f"执行流程：blockMesh -> {parameters.solver_name}")
-
     def _stop_current_process(self) -> None:
         if not self._foam_process or self._foam_process.state() == QProcess.ProcessState.NotRunning:
             self._task_text.setPlainText("任务状态：空闲")
@@ -429,166 +371,11 @@ class ProjectProcessLogicMixin:
             self._current_process_output += output
             self._append_log(output)
 
-    def _on_process_finished(self, exit_code: int, _exit_status) -> None:
-        process_kind = self._active_process_kind
-        self._active_process_kind = "idle"
-        if exit_code == 0 and process_kind == "simulationPipeline":
-            self._task_text.setPlainText("任务状态：一键仿真流水线完成")
-            self._last_diagnostic_summary = "一键仿真流水线正常完成，没有失败诊断。"
-            self._refresh_geometry_panel()
-            self._set_status("一键仿真流水线完成。")
-        elif exit_code == 0 and process_kind == "preprocess":
-            summary = self._format_check_mesh_summary(self._current_process_output)
-            self._task_text.setPlainText("任务状态：一键前处理完成")
-            self._last_diagnostic_summary = "一键前处理完成。\n\n" + summary
-            self._problem_text.setPlainText(self._last_diagnostic_summary)
-            self._refresh_geometry_panel()
-            self._set_status("一键前处理完成。")
-        elif exit_code == 0 and process_kind == "checkMesh":
-            summary = self._format_check_mesh_summary(self._current_process_output)
-            self._task_text.setPlainText("任务状态：checkMesh 完成")
-            self._last_diagnostic_summary = summary
-            self._problem_text.setPlainText(summary)
-            self._set_status("checkMesh 完成。")
-        elif exit_code == 0 and process_kind == "snappyHexMesh":
-            self._task_text.setPlainText("任务状态：snappyHexMesh 完成")
-            self._last_diagnostic_summary = "snappyHexMesh 正常完成，没有失败诊断。"
-            self._refresh_geometry_panel()
-            self._set_status("snappyHexMesh 完成。")
-        elif exit_code == 0:
-            self._task_text.setPlainText("任务状态：最小仿真完成")
-            self._last_diagnostic_summary = "本次任务正常完成，没有失败诊断。"
-            self._set_status("最小仿真完成。")
-        else:
-            self._update_diagnostics(exit_code)
-            label = self._process_label(process_kind)
-            failed_step = self._detect_failed_pipeline_step(process_kind, self._current_process_output)
-            if failed_step:
-                advice = self._pipeline_step_advice(failed_step)
-                self._last_diagnostic_summary = (
-                    f"失败步骤：{failed_step}\n\n{advice}\n\n{self._last_diagnostic_summary}"
-                )
-                self._problem_text.setPlainText(self._last_diagnostic_summary)
-                self._bottom_tabs.setCurrentIndex(2)
-            self._task_text.setPlainText(f"任务状态：{label}失败，退出码 {exit_code}")
-    
-            self._set_status(f"{label}失败，退出码 {exit_code}。")
 
-    def _process_label(self, process_kind: str) -> str:
-        labels = {
-            "simulationPipeline": "一键仿真流水线",
-            "preprocess": "一键前处理",
-            "checkMesh": "checkMesh",
-            "snappyHexMesh": "snappyHexMesh",
-            "minimal": "最小仿真",
-        }
-        return labels.get(process_kind, "OpenFOAM 任务")
 
-    def _detect_failed_pipeline_step(self, process_kind: str, output: str) -> str | None:
-        if process_kind not in {"preprocess", "simulationPipeline"}:
-            return None
-        step_names = {
-            "blockMesh": "blockMesh 背景网格生成",
-            "snappyHexMesh": "snappyHexMesh 贴体网格生成",
-            "checkMesh": "checkMesh 网格质量检查",
-            "icoFoam": "icoFoam 最小求解",
-            "simpleFoam": "simpleFoam 稳态求解",
-            "pisoFoam": "pisoFoam 瞬态求解",
-        }
-        matches = re.findall(r"FOAMDESK_STEP:([A-Za-z0-9_]+)", output)
-        if not matches:
-            return "未知步骤，未识别到 FoamDesk 步骤标记"
-        return step_names.get(matches[-1], matches[-1])
 
-    def _pipeline_step_advice(self, failed_step: str) -> str:
-        if "blockMesh" in failed_step:
-            return (
-                "修复建议：\n"
-                "- 检查 `system/blockMeshDict` 是否存在并且语法正确。\n"
-                "- 确认背景网格区域要包住 STL 几何，否则 snappyHexMesh 后续无法贴体。\n"
-                "- 如果你刚新建 Case，可以先运行最小仿真验证 blockMesh 是否能单独通过。"
-            )
-        if "snappyHexMesh" in failed_step:
-            return (
-                "修复建议：\n"
-                "- 检查 STL 是否已经导入到 `constant/triSurface`，文件名是否和 `snappyHexMeshDict` 一致。\n"
-                "- 检查 `locationInMesh` 是否位于流体区域内部；这个点选错会导致网格区域判断失败。\n"
-                "- 先降低最大加密等级，例如从 4 降到 2，减少网格生成压力。\n"
-                "- 如果启用了边界层 addLayers，先关闭边界层再试。"
-            )
-        if "checkMesh" in failed_step:
-            return (
-                "修复建议：\n"
-                "- 查看日志中的 `Failed`、`severely non-orthogonal`、`skewness` 等关键词。\n"
-                "- 降低 snappy 加密等级或关闭边界层，先得到可用网格。\n"
-                "- 如果非正交角或扭曲度过高，需要调整背景网格、STL 几何质量或 snappy 参数。"
-            )
-        if any(solver in failed_step for solver in ("icoFoam", "simpleFoam", "pisoFoam")):
-            return (
-                "修复建议：\n"
-                "- 检查 `0/U` 和 `0/p` 的边界名称是否和网格 boundary 文件一致。\n"
-                "- 如果 snappyHexMesh 生成了新的 patch，求解场文件也必须包含对应边界条件。\n"
-                "- 检查 `system/controlDict`、`fvSchemes`、`fvSolution` 是否完整。\n"
-                "- 先确认 checkMesh 通过，再运行求解器。"
-            )
-        return (
-            "修复建议：\n"
-            "- 查看底部日志中最后一个 OpenFOAM 报错块。\n"
-            "- 优先检查当前 Case 的 system、constant、0 目录是否完整。"
-        )
 
-    def _format_check_mesh_summary(self, output: str) -> str:
-        lines = ["checkMesh 网格质量检查摘要", ""]
-        if "Mesh OK." in output:
-            lines.append("总体结论：通过，OpenFOAM 输出 Mesh OK。")
-        elif "Failed" in output or "failed" in output:
-            lines.append("总体结论：存在失败检查，需要查看日志中的 Failed 项。")
-        else:
-            lines.append("总体结论：未识别到明确 Mesh OK，请查看完整日志。")
 
-        checks = [
-            ("点数量", r"points:\s+([0-9]+)"),
-            ("面数量", r"faces:\s+([0-9]+)"),
-            ("单元数量", r"cells:\s+([0-9]+)"),
-            ("边界 patch 数量", r"boundary patches:\s+([0-9]+)"),
-            ("最大长宽比", r"Max aspect ratio\s*=\s*([0-9.eE+-]+)"),
-            ("最大非正交角", r"Mesh non-orthogonality Max:\s*([0-9.eE+-]+)"),
-            ("最大扭曲度", r"Max skewness\s*=\s*([0-9.eE+-]+)"),
-        ]
-        for label, pattern in checks:
-            match = re.search(pattern, output)
-            if match:
-                lines.append(f"{label}：{match.group(1)}")
-
-        failed_lines = [
-            line.strip()
-            for line in output.splitlines()
-            if "Failed" in line or "failed" in line or "Error" in line
-        ]
-        if failed_lines:
-            lines.extend(["", "需要关注："])
-            lines.extend(f"- {line}" for line in failed_lines[:8])
-
-        lines.extend(
-            [
-                "",
-                "说明：checkMesh 是 OpenFOAM 的网格体检工具。它不是求解流体，而是检查当前网格是否适合后续计算。",
-            ]
-        )
-        return "\n".join(lines)
-
-    def _update_diagnostics(self, exit_code: int) -> None:
-        diagnostics = self._context.log_diagnostic_service.diagnose(self._current_process_output)
-        summary = self._context.log_diagnostic_service.format_diagnostics(diagnostics)
-        fatal_block = self._context.log_diagnostic_service.extract_fatal_error_block(
-            self._current_process_output
-        )
-        if fatal_block:
-            summary = f"{summary}\n\nOpenFOAM 原始致命错误：\n{fatal_block}"
-        self._last_diagnostic_summary = f"退出码：{exit_code}\n\n{summary}"
-        self._problem_text.setPlainText(self._last_diagnostic_summary)
-        self._bottom_tabs.setCurrentIndex(2)
-        self._append_log("已生成失败诊断。")
 
     def _show_current_case_path(self) -> None:
         if self._current_project is None:

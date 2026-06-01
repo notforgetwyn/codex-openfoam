@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Callable
 
 import numpy as np
@@ -12,13 +11,10 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDoubleSpinBox,
-    QFileDialog,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
     QSpinBox,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -66,6 +62,8 @@ class NativeVtkPreviewWidget(QWidget):
         self._renderer.SetBackground(*background)
         self._vtk_widget.GetRenderWindow().AddRenderer(self._renderer)
         self._interactor = self._vtk_widget.GetRenderWindow().GetInteractor()
+        self._orientation_widget = None
+        self._want_orientation_axes = False
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
@@ -76,6 +74,83 @@ class NativeVtkPreviewWidget(QWidget):
             return
         self._interactor.Initialize()
         self._interactor_initialized = True
+        if self._want_orientation_axes and self._orientation_widget is None:
+            self._create_orientation_axes()
+
+    def enable_orientation_axes(self) -> None:
+        """Show a small XYZ orientation indicator (corner axes that follow the camera)."""
+        self._want_orientation_axes = True
+        if self._interactor_initialized and self._orientation_widget is None:
+            self._create_orientation_axes()
+
+    def _create_orientation_axes(self) -> None:
+        axes = vtk.vtkAxesActor()
+        axes.SetTotalLength(1.0, 1.0, 1.0)
+        axes.SetShaftTypeToCylinder()
+        axes.SetCylinderRadius(0.03)
+        axes.SetConeRadius(0.35)
+        for caption in (
+            axes.GetXAxisCaptionActor2D(),
+            axes.GetYAxisCaptionActor2D(),
+            axes.GetZAxisCaptionActor2D(),
+        ):
+            caption.GetTextActor().SetTextScaleModeToNone()
+            text_property = caption.GetCaptionTextProperty()
+            text_property.SetFontSize(12)
+            text_property.BoldOff()
+            text_property.ShadowOff()
+        widget = vtk.vtkOrientationMarkerWidget()
+        widget.SetOrientationMarker(axes)
+        widget.SetInteractor(self._interactor)
+        # top-left corner, ~24% of the viewport, non-interactive
+        widget.SetViewport(0.0, 0.76, 0.24, 1.0)
+        widget.SetEnabled(1)
+        widget.InteractiveOff()
+        self._orientation_axes = axes
+        self._orientation_widget = widget
+        self._create_view_readout()
+
+    def _create_view_readout(self) -> None:
+        annotation = vtk.vtkCornerAnnotation()
+        annotation.SetMaximumFontSize(16)
+        annotation.SetMinimumFontSize(11)
+        annotation.GetTextProperty().SetColor(0.85, 0.9, 1.0)
+        annotation.GetTextProperty().SetFontFamilyToArial()
+        self._renderer.AddViewProp(annotation)
+        self._view_annotation = annotation
+        camera = self._renderer.GetActiveCamera()
+        camera.AddObserver("ModifiedEvent", self._on_view_camera_modified)
+        self._update_view_readout()
+
+    def _on_view_camera_modified(self, *_args) -> None:
+        self._update_view_readout()
+
+    def _update_view_readout(self) -> None:
+        annotation = getattr(self, "_view_annotation", None)
+        if annotation is None:
+            return
+        camera = self._renderer.GetActiveCamera()
+        direction = np.array(camera.GetDirectionOfProjection(), dtype=float)
+        norm = float(np.linalg.norm(direction))
+        if norm < 1e-9:
+            return
+        direction = direction / norm
+        axis_names = ("X", "Y", "Z")
+        plane_names = {0: "YZ", 1: "XZ", 2: "XY"}
+        idx = int(np.argmax(np.abs(direction)))
+        sign = "+" if direction[idx] > 0 else "-"
+        aligned = abs(direction[idx]) > 0.95
+        line1 = f"视线方向: {sign}{axis_names[idx]}"
+        if aligned:
+            if axis_names[idx] == "Z":
+                view_word = "俯视" if sign == "-" else "仰视"
+                line2 = f"正对 {plane_names[idx]} 平面 ({view_word})"
+            else:
+                line2 = f"正对 {plane_names[idx]} 平面"
+        else:
+            line2 = f"斜视角 (接近 {sign}{axis_names[idx]})"
+        # corner 0 = bottom-left (axes are now top-left)
+        annotation.SetText(0, f"{line1}\n{line2}")
 
     def clear(self, background: tuple[float, float, float] | None = None) -> None:
         if background is not None:
@@ -156,6 +231,22 @@ class NativeVtkPreviewWidget(QWidget):
         poly_data.SetPolys(cells)
         self.add_polydata(poly_data, color=color, opacity=opacity, edge_color=edge_color, line_width=1.0)
 
+    def add_sphere_marker(
+        self,
+        center: tuple[float, float, float] | np.ndarray,
+        radius: float,
+        color: tuple[float, float, float] = (1.0, 0.1, 0.1),
+        opacity: float = 0.95,
+    ) -> None:
+        sphere = vtk.vtkSphereSource()
+        sphere.SetCenter(float(center[0]), float(center[1]), float(center[2]))
+        sphere.SetRadius(float(max(radius, 1e-9)))
+        sphere.SetThetaResolution(32)
+        sphere.SetPhiResolution(16)
+        sphere.Update()
+        actor = self.add_polydata(sphere.GetOutput(), color=color, opacity=opacity, edge_color=None)
+        actor.GetProperty().SetSpecular(0.35)
+
     def add_arrow(
         self,
         start: np.ndarray,
@@ -216,14 +307,6 @@ class NativeVtkPreviewWidget(QWidget):
         actor.GetTextProperty().ShadowOff()
         self._renderer.AddActor(actor)
 
-    def add_message(self, message: str) -> None:
-        actor = vtk.vtkTextActor()
-        actor.SetInput(message)
-        actor.SetPosition(24, 34)
-        actor.GetTextProperty().SetColor(0.85, 0.85, 0.85)
-        actor.GetTextProperty().SetFontSize(18)
-        actor.GetTextProperty().ShadowOff()
-        self._renderer.AddActor2D(actor)
 
     def finish(self, points: np.ndarray | None = None) -> None:
         self._renderer.ResetCamera()
@@ -244,176 +327,8 @@ class NativeVtkPreviewWidget(QWidget):
             _log_vtk_render_backend(render_window, "preview widget")
             self._render_backend_logged = True
 
-    def save_png(self, path: Path) -> None:
-        self.render()
-        window_to_image = vtk.vtkWindowToImageFilter()
-        window_to_image.SetInput(self._vtk_widget.GetRenderWindow())
-        window_to_image.SetInputBufferTypeToRGBA()
-        window_to_image.ReadFrontBufferOff()
-        window_to_image.Update()
-        writer = vtk.vtkPNGWriter()
-        writer.SetFileName(str(path))
-        writer.SetInputConnection(window_to_image.GetOutputPort())
-        writer.Write()
 
 
-class VtkViewerDialog(QDialog):
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("FoamDesk 3D 视图")
-        self.resize(920, 680)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
-
-        action_row = QHBoxLayout()
-        action_row.addWidget(QLabel("STL 预览窗口"))
-        action_row.addStretch(1)
-        clear_button = QPushButton("清空视图")
-        clear_button.clicked.connect(self._clear_tabs)
-        export_button = QPushButton("导出 PNG")
-        export_button.clicked.connect(self._export_png)
-        action_row.addWidget(clear_button)
-        action_row.addWidget(export_button)
-        layout.addLayout(action_row)
-
-        self._last_plot_title = "foamdesk_visualization"
-        self._tabs = QTabWidget()
-        self._tabs.setDocumentMode(True)
-        self._tabs.setTabsClosable(True)
-        self._tabs.tabCloseRequested.connect(self._close_tab)
-        layout.addWidget(self._tabs)
-
-    def closeEvent(self, event) -> None:  # noqa: N802
-        self._clear_tabs()
-        super().closeEvent(event)
-
-    def plot_stl_file(self, path: Path) -> tuple[int, int]:
-        reader = vtkSTLReader()
-        reader.SetFileName(str(path))
-        reader.Update()
-        poly_data = reader.GetOutput()
-        points = self._points(poly_data)
-        faces = self._faces(poly_data)
-        canvas = self._reset_view(f"STL {path.name}")
-        if points.size == 0 or faces.size == 0:
-            canvas.add_message("No STL surface data to display.")
-            canvas.finish()
-            self._show()
-            return 0, 0
-        canvas.add_polydata(poly_data, color=(0.58, 0.62, 0.66), opacity=0.92, edge_color=(0.12, 0.12, 0.12))
-        canvas.finish(points)
-        self._show()
-        return len(points), len(faces)
-
-    def _reset_view(self, title: str) -> NativeVtkPreviewWidget:
-        self._last_plot_title = title
-        canvas = NativeVtkPreviewWidget(self, background=(1.0, 1.0, 1.0))
-        self._tabs.addTab(canvas, self._tab_title(title))
-        self._tabs.setCurrentWidget(canvas)
-        return canvas
-
-    def _show(self) -> None:
-        self.show()
-        self.raise_()
-        self.activateWindow()
-
-    def _export_png(self) -> None:
-        current_canvas = self._tabs.currentWidget()
-        if not isinstance(current_canvas, NativeVtkPreviewWidget):
-            QMessageBox.information(self, "暂无视图", "当前没有可导出的 3D 视图。")
-            return
-        current_title = self._tabs.tabText(self._tabs.currentIndex()) or self._last_plot_title
-        safe_title = "".join(
-            character if character.isalnum() or character in ("-", "_") else "_"
-            for character in current_title.strip().lower()
-        ).strip("_") or "foamdesk_visualization"
-        default_name = f"{safe_title}.png"
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "导出当前 3D 图像",
-            default_name,
-            "PNG 图片 (*.png)",
-        )
-        if not file_path:
-            return
-        if not file_path.lower().endswith(".png"):
-            file_path = f"{file_path}.png"
-        try:
-            current_canvas.save_png(Path(file_path))
-        except OSError as error:
-            QMessageBox.warning(self, "导出失败", f"PNG 导出失败：{error}")
-            return
-        QMessageBox.information(self, "导出完成", f"已导出 PNG：\n{file_path}")
-
-    def export_all_pngs(self, output_dir: Path) -> list[Path]:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        paths: list[Path] = []
-        used_names: set[str] = set()
-        for index in range(self._tabs.count()):
-            canvas = self._tabs.widget(index)
-            if not isinstance(canvas, NativeVtkPreviewWidget):
-                continue
-            title = self._tabs.tabText(index) or f"3d_view_{index + 1}"
-            base_name = self._safe_file_stem(title)
-            file_name = f"{base_name}.png"
-            suffix = 2
-            while file_name in used_names:
-                file_name = f"{base_name}_{suffix}.png"
-                suffix += 1
-            used_names.add(file_name)
-            path = output_dir / file_name
-            canvas.save_png(path)
-            paths.append(path)
-        return paths
-
-    def _tab_title(self, title: str) -> str:
-        base = title.strip() or "3D View"
-        existing_titles = {self._tabs.tabText(index) for index in range(self._tabs.count())}
-        if base not in existing_titles:
-            return base
-        suffix = 2
-        while f"{base} {suffix}" in existing_titles:
-            suffix += 1
-        return f"{base} {suffix}"
-
-    def _safe_file_stem(self, title: str) -> str:
-        return "".join(
-            character if character.isalnum() or character in ("-", "_") else "_"
-            for character in title.strip().lower()
-        ).strip("_") or "foamdesk_visualization"
-
-    def _close_tab(self, index: int) -> None:
-        widget = self._tabs.widget(index)
-        self._tabs.removeTab(index)
-        if widget is not None:
-            widget.deleteLater()
-
-    def _clear_tabs(self) -> None:
-        while self._tabs.count():
-            self._close_tab(0)
-
-    def _points(self, poly_data) -> np.ndarray:
-        vtk_points = poly_data.GetPoints()
-        if vtk_points is None:
-            return np.empty((0, 3), dtype=float)
-        return vtk_to_numpy(vtk_points.GetData())
-
-    def _faces(self, poly_data) -> np.ndarray:
-        polygons = poly_data.GetPolys()
-        if polygons is None:
-            return np.empty((0,), dtype=object)
-        raw = vtk_to_numpy(polygons.GetData())
-        faces: list[np.ndarray] = []
-        index = 0
-        while index < len(raw):
-            count = int(raw[index])
-            index += 1
-            if count >= 3:
-                faces.append(raw[index : index + count].astype(int))
-            index += count
-        return np.array(faces, dtype=object)
 
 class NativeVtkViewerDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -747,9 +662,13 @@ class NativeVtkViewerDialog(QDialog):
         mapper.SetResolveCoincidentTopologyToPolygonOffset()
         actor = vtk.vtkActor()
         actor.SetMapper(mapper)
-        actor.GetProperty().SetOpacity(0.6)
+        actor.GetProperty().SetOpacity(0.48)
         actor.GetProperty().SetInterpolationToPhong()
+        actor.GetProperty().SetSpecular(0.18)
+        actor.GetProperty().SetSpecularPower(12)
         self._renderer.AddActor(actor)
+        self._add_outline(display_data)
+        self._add_flow_labels(display_data)
         self._add_scalar_bar(lut, label)
         self._last_plot_fn = (self.plot_volume, (poly_data, field_array, scalar_range, label))
         self._finish_scene(display_data)
@@ -1056,40 +975,6 @@ class NativeVtkViewerDialog(QDialog):
         poly_data.GetPointData().AddArray(scalar_array)
         return scalar_name
 
-    def _add_streamline_tubes(
-        self,
-        streamline_poly_data,
-        source_poly_data,
-        speed_array_name: str,
-        lookup_table,
-        scalar_range: tuple[float, float],
-    ) -> None:
-        if streamline_poly_data is None or streamline_poly_data.GetNumberOfLines() == 0:
-            return
-        tube = vtk.vtkTubeFilter()
-        tube.SetInputData(streamline_poly_data)
-        tube.SetRadius(max(self._streamline_tube_radius(source_poly_data) * 1.45, 1e-6))
-        tube.SetNumberOfSides(12)
-        tube.CappingOn()
-        tube.Update()
-
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputConnection(tube.GetOutputPort())
-        mapper.SetScalarModeToUsePointFieldData()
-        mapper.SelectColorArray(speed_array_name)
-        mapper.SetScalarRange(*scalar_range)
-        mapper.SetLookupTable(lookup_table)
-        mapper.ScalarVisibilityOn()
-
-        actor = vtk.vtkActor()
-        actor.SetMapper(mapper)
-        actor.GetProperty().SetOpacity(0.92)
-        actor.GetProperty().SetAmbient(0.28)
-        actor.GetProperty().SetDiffuse(0.78)
-        actor.GetProperty().SetSpecular(0.32)
-        actor.GetProperty().SetSpecularPower(18)
-        actor.GetProperty().SetInterpolationToPhong()
-        self._renderer.AddActor(actor)
 
     def _configure_streamline_growth_animation(
         self,
@@ -1399,31 +1284,6 @@ class NativeVtkViewerDialog(QDialog):
             return None
         return np.array(outlet_centers, dtype=float).mean(axis=0)
 
-    def _point_and_speed_on_streamline_path(
-        self,
-        path_record: dict[str, np.ndarray | float],
-        distance: float,
-    ) -> tuple[np.ndarray, float]:
-        points = path_record["points"]
-        speeds = path_record["speeds"]
-        if not isinstance(points, np.ndarray) or not isinstance(speeds, np.ndarray):
-            return np.zeros(3, dtype=float), 0.0
-        if len(points) == 1:
-            return points[0], float(speeds[0]) if speeds.size else 0.0
-        segments = np.linalg.norm(np.diff(points, axis=0), axis=1)
-        total = float(path_record["total_length"])
-        if total <= 1e-12:
-            return points[0], 0.0
-        clamped_distance = min(max(float(distance), 0.0), total)
-        cumulative = np.cumsum(segments)
-        segment_index = int(np.searchsorted(cumulative, clamped_distance, side="right"))
-        segment_index = min(segment_index, len(segments) - 1)
-        previous = 0.0 if segment_index == 0 else float(cumulative[segment_index - 1])
-        local_length = max(float(segments[segment_index]), 1e-12)
-        local_phase = (clamped_distance - previous) / local_length
-        point = points[segment_index] * (1.0 - local_phase) + points[segment_index + 1] * local_phase
-        speed = float(speeds[segment_index] * (1.0 - local_phase) + speeds[segment_index + 1] * local_phase)
-        return point, max(speed, 0.0)
 
     def _path_length(self, path: np.ndarray) -> float:
         if len(path) < 2:
