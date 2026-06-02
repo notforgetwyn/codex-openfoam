@@ -77,31 +77,31 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, SettingsPhysicsLogicMixi
     RESULT_DISPLAY_MODES = [
         "速度云图",
         "速度切片",
+        "速度等值线",
         "流线 streamlines",
         "压力云图",
-        "压力等值面",
+        "压力等值线",
         "压力切片",
-        "壁面压力分布",
         "温度云图",
         "温度切面",
-        "壁面温度",
+        "温度等值线",
     ]
     RESULT_FIELD_DISPLAY_MODES = {
         "U": [
             "速度云图",
             "速度切片",
+            "速度等值线",
             "流线 streamlines",
         ],
         "p": [
             "压力云图",
-            "压力等值面",
             "压力切片",
-            "壁面压力分布",
+            "压力等值线",
         ],
         "T": [
             "温度云图",
             "温度切面",
-            "壁面温度",
+            "温度等值线",
         ],
     }
 
@@ -783,7 +783,6 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, SettingsPhysicsLogicMixi
         self._cfg_flow_type_combo.currentIndexChanged.connect(self._on_physics_model_changed)
         self._cfg_time_type_combo = QComboBox()
         self._cfg_time_type_combo.addItem("稳态", "steady")
-        self._cfg_time_type_combo.addItem("瞬态", "transient")
         self._cfg_time_type_combo.currentIndexChanged.connect(self._on_physics_model_changed)
         self._cfg_recommended_solver = QLabel("simpleFoam")
         self._cfg_recommended_solver.setStyleSheet("color: #9da5b4;")
@@ -797,7 +796,6 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, SettingsPhysicsLogicMixi
         self._cfg_init_velocity = QLineEdit("(0 0 0)")
         self._cfg_init_pressure = QLineEdit("0")
         solver_form.addRow("流体类型", self._cfg_flow_type_combo)
-        solver_form.addRow("时间类型", self._cfg_time_type_combo)
         solver_form.addRow("推荐求解器", self._cfg_recommended_solver)
         solver_form.addRow("求解类型", self._cfg_solver_combo)
         solver_form.addRow("总计算时长 (s)", self._cfg_end_time)
@@ -1542,19 +1540,6 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, SettingsPhysicsLogicMixi
         toolbar.setContentsMargins(8, 4, 8, 4)
         toolbar.setSpacing(4)
 
-        primitives = [
-            ("cube", "立方体"), ("sphere", "球体"),
-            ("cylinder", "圆柱"), ("cone", "圆锥"),
-            ("airfoil", "机翼"), ("bend_pipe", "弯管"),
-        ]
-        for kind, label in primitives:
-            btn = QPushButton(label)
-            btn.setFixedHeight(30)
-            btn.clicked.connect(lambda _checked=False, k=kind: self._add_primitive(k))
-            toolbar.addWidget(btn)
-
-        toolbar.addSpacing(12)
-
         for text, handler, extra in [
             ("选择", self._activate_select_mode, ""),
             ("删除", self._delete_selected, "color: #f48771;"),
@@ -1887,8 +1872,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, SettingsPhysicsLogicMixi
                 if solver_match:
                     solver_name = solver_match.group(1)
                     self._cfg_flow_type_combo.setCurrentIndex(1 if solver_name.startswith("rho") else 0)
-                    transient = solver_name in {"pimpleFoam", "pisoFoam", "icoFoam", "rhoPimpleFoam"}
-                    self._cfg_time_type_combo.setCurrentIndex(1 if transient else 0)
+                    self._cfg_time_type_combo.setCurrentIndex(0)
                     self._rebuild_solver_options(solver_name)
                 for key, widget, pattern in [
                     ("solver", self._cfg_solver_combo, r"application\s+(\S+);"),
@@ -2122,8 +2106,47 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, SettingsPhysicsLogicMixi
         else:
             self._cfg_progress.setVisible(False)
 
+    def _clear_solver_run_visuals(self) -> None:
+        if hasattr(self, "_cfg_run_log"):
+            self._cfg_run_log.clear()
+        self._residual_data = {"iter": []}
+        if hasattr(self, "_cfg_residual_axes"):
+            self._cfg_residual_axes.clear()
+            self._cfg_residual_axes.set_facecolor("#1e1e1e")
+            self._cfg_residual_axes.tick_params(colors="#cccccc", labelsize=9)
+            for spine in self._cfg_residual_axes.spines.values():
+                spine.set_color("#2d2d30")
+            self._cfg_residual_axes.set_title("Residuals", color="#cccccc", fontsize=11)
+            self._cfg_residual_axes.set_xlabel("Iteration", color="#9d9d9d", fontsize=9)
+            self._cfg_residual_axes.set_ylabel("Residual", color="#9d9d9d", fontsize=9)
+            self._cfg_residual_axes.set_yscale("log")
+            self._cfg_residual_axes.grid(True, alpha=0.2, color="#2d2d30")
+            self._cfg_residual_canvas.draw()
+
+    def _load_solver_residual_data(self) -> None:
+        import json
+        self._residual_data = {"iter": []}
+        if self._current_project is None:
+            self._clear_solver_run_visuals()
+            return
+        residual_path = self._current_project.case_dir / "residual_data.json"
+        if residual_path.exists():
+            try:
+                loaded = json.loads(residual_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    self._residual_data = {
+                        str(key): value
+                        for key, value in loaded.items()
+                        if isinstance(value, list)
+                    }
+                    self._residual_data.setdefault("iter", [])
+            except (json.JSONDecodeError, OSError):
+                self._residual_data = {"iter": []}
+        self._redraw_residuals(save=False)
+
     def _load_solver_run_state(self) -> None:
         import json
+        self._clear_solver_run_visuals()
         path = self._solver_run_state_path()
         saved = {}
         if path.exists():
@@ -2156,12 +2179,19 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, SettingsPhysicsLogicMixi
             self._cfg_continue_btn.setEnabled(False)
         if saved.get("log"):
             self._cfg_run_log.setHtml(saved["log"])
+        else:
+            self._cfg_run_log.setPlainText(
+                f"当前 Case：{self._current_project.case_name}\n"
+                f"目录：{self._current_project.case_dir}\n"
+                "暂无本 Case 的求解运行日志。"
+            )
         self._sim_latest_time = saved.get("latest_time")
         self._sim_current_step = int(saved.get("current_step") or 0)
         self._sim_total_steps = int(saved.get("total_steps") or 0)
         self._sim_delta_t = float(saved.get("delta_t") or 0.0)
         self._sim_end_time = float(saved.get("end_time") or 0.0)
         self._restore_solver_progress(saved)
+        self._load_solver_residual_data()
 
     def _save_solver_run_state(self) -> None:
         import json
@@ -2384,7 +2414,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, SettingsPhysicsLogicMixi
             self._redraw_residuals()
         self._save_solver_run_state()
 
-    def _redraw_residuals(self) -> None:
+    def _redraw_residuals(self, save: bool = True) -> None:
         self._cfg_residual_axes.clear()
         self._cfg_residual_axes.set_facecolor("#1e1e1e")
         self._cfg_residual_axes.tick_params(colors="#cccccc", labelsize=9)
@@ -2405,7 +2435,8 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, SettingsPhysicsLogicMixi
             self._cfg_residual_axes.legend(loc="upper right", fontsize=8,
                 facecolor="#1e1e1e", edgecolor="#2d2d30", labelcolor="#cccccc")
         self._cfg_residual_canvas.draw()
-        self._save_residual_data()
+        if save:
+            self._save_residual_data()
 
     def _save_residual_data(self) -> None:
         if self._current_project is None:

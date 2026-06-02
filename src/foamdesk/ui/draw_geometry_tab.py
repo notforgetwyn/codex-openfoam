@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 @dataclass
 class GeometryObject:
     name: str
-    kind: str  # cube, sphere, cylinder, cone, airfoil, bend_pipe
+    kind: str
     actor: object  # vtkActor
     source: object  # vtk source
     visible: bool = True
@@ -32,163 +32,6 @@ class GeometryObject:
     point_actor: object | None = None
 
 
-def _create_cube_source() -> vtk.vtkCubeSource:
-    src = vtk.vtkCubeSource()
-    src.SetXLength(1.0)
-    src.SetYLength(1.0)
-    src.SetZLength(1.0)
-    src.SetCenter(0.0, 0.0, 0.0)
-    src.Update()
-    return src
-
-
-def _create_sphere_source() -> vtk.vtkSphereSource:
-    src = vtk.vtkSphereSource()
-    src.SetRadius(0.5)
-    src.SetThetaResolution(24)
-    src.SetPhiResolution(24)
-    src.SetCenter(0.0, 0.0, 0.0)
-    src.Update()
-    return src
-
-
-def _create_cylinder_source() -> vtk.vtkCylinderSource:
-    src = vtk.vtkCylinderSource()
-    src.SetRadius(0.3)
-    src.SetHeight(1.0)
-    src.SetResolution(24)
-    src.SetCenter(0.0, 0.0, 0.0)
-    src.Update()
-    return src
-
-
-def _create_cone_source() -> vtk.vtkConeSource:
-    src = vtk.vtkConeSource()
-    src.SetRadius(0.3)
-    src.SetHeight(1.0)
-    src.SetResolution(24)
-    src.SetCenter(0.0, 0.0, 0.0)
-    src.Update()
-    return src
-
-
-def _polydata_from_points_faces(points: list[tuple[float, float, float]], faces: list[list[int]]) -> vtk.vtkPolyData:
-    vtk_points = vtk.vtkPoints()
-    for point in points:
-        vtk_points.InsertNextPoint(float(point[0]), float(point[1]), float(point[2]))
-    cells = vtk.vtkCellArray()
-    for face in faces:
-        if len(face) < 3:
-            continue
-        polygon = vtk.vtkPolygon()
-        polygon.GetPointIds().SetNumberOfIds(len(face))
-        for index, point_id in enumerate(face):
-            polygon.GetPointIds().SetId(index, int(point_id))
-        cells.InsertNextCell(polygon)
-    poly_data = vtk.vtkPolyData()
-    poly_data.SetPoints(vtk_points)
-    poly_data.SetPolys(cells)
-    normals = vtk.vtkPolyDataNormals()
-    normals.SetInputData(poly_data)
-    normals.ConsistencyOn()
-    normals.AutoOrientNormalsOn()
-    normals.SplittingOff()
-    normals.Update()
-    return normals.GetOutput()
-
-
-def _create_airfoil_source() -> vtk.vtkPolyData:
-    chord = 1.4
-    span = 2.4
-    thickness = 0.12
-    x_values = np.linspace(0.0, 1.0, 42)
-    yt = 5.0 * thickness * (
-        0.2969 * np.sqrt(np.maximum(x_values, 1e-6))
-        - 0.1260 * x_values
-        - 0.3516 * x_values**2
-        + 0.2843 * x_values**3
-        - 0.1015 * x_values**4
-    )
-    upper = np.column_stack([(x_values - 0.5) * chord, yt * chord])
-    lower = np.column_stack([(x_values[::-1] - 0.5) * chord, -yt[::-1] * chord])
-    profile = np.vstack([upper, lower])
-    points: list[tuple[float, float, float]] = []
-    for y_value in (-span / 2.0, span / 2.0):
-        for x_value, z_value in profile:
-            points.append((float(x_value), float(y_value), float(z_value)))
-    count = len(profile)
-    faces: list[list[int]] = []
-    faces.append(list(range(count - 1, -1, -1)))
-    faces.append(list(range(count, count * 2)))
-    for index in range(count):
-        next_index = (index + 1) % count
-        faces.append([index, next_index, count + next_index, count + index])
-    return _polydata_from_points_faces(points, faces)
-
-
-def _create_bend_pipe_source() -> vtk.vtkPolyData:
-    major_radius = 0.65
-    tube_radius = 0.18
-    bend_angle = np.pi / 2.0
-    straight_length = 0.55
-    bend_segments = 40
-    ring_segments = 28
-    centerline: list[np.ndarray] = []
-    pre_count = 10
-    for index in range(pre_count):
-        x_value = -straight_length + straight_length * index / max(pre_count - 1, 1)
-        centerline.append(np.array([x_value, 0.0, 0.0], dtype=float))
-    for angle in np.linspace(0.0, bend_angle, bend_segments):
-        centerline.append(np.array([major_radius * np.sin(angle), major_radius * (1.0 - np.cos(angle)), 0.0], dtype=float))
-    post_start = centerline[-1].copy()
-    post_count = 10
-    for index in range(1, post_count + 1):
-        y_value = post_start[1] + straight_length * index / post_count
-        centerline.append(np.array([post_start[0], y_value, 0.0], dtype=float))
-
-    points: list[tuple[float, float, float]] = []
-    for center_index, center in enumerate(centerline):
-        if center_index == 0:
-            tangent = centerline[1] - center
-        elif center_index == len(centerline) - 1:
-            tangent = center - centerline[center_index - 1]
-        else:
-            tangent = centerline[center_index + 1] - centerline[center_index - 1]
-        tangent_norm = max(float(np.linalg.norm(tangent)), 1e-9)
-        tangent = tangent / tangent_norm
-        normal = np.array([-tangent[1], tangent[0], 0.0], dtype=float)
-        if float(np.linalg.norm(normal)) <= 1e-9:
-            normal = np.array([1.0, 0.0, 0.0], dtype=float)
-        normal = normal / max(float(np.linalg.norm(normal)), 1e-9)
-        binormal = np.array([0.0, 0.0, 1.0], dtype=float)
-        for theta in np.linspace(0.0, 2.0 * np.pi, ring_segments, endpoint=False):
-            point = center + tube_radius * np.cos(theta) * normal + tube_radius * np.sin(theta) * binormal
-            points.append((float(point[0]), float(point[1]), float(point[2])))
-
-    faces: list[list[int]] = []
-    ring_count = len(centerline)
-    for ring_index in range(ring_count - 1):
-        base = ring_index * ring_segments
-        next_base = (ring_index + 1) * ring_segments
-        for segment_index in range(ring_segments):
-            next_segment = (segment_index + 1) % ring_segments
-            faces.append([base + segment_index, base + next_segment, next_base + next_segment, next_base + segment_index])
-    faces.append(list(range(ring_segments - 1, -1, -1)))
-    end_base = (ring_count - 1) * ring_segments
-    faces.append([end_base + index for index in range(ring_segments)])
-    return _polydata_from_points_faces(points, faces)
-
-
-_PRIMITIVE_FACTORIES = {
-    "cube": (_create_cube_source, "立方体"),
-    "sphere": (_create_sphere_source, "球体"),
-    "cylinder": (_create_cylinder_source, "圆柱"),
-    "cone": (_create_cone_source, "圆锥"),
-    "airfoil": (_create_airfoil_source, "机翼"),
-    "bend_pipe": (_create_bend_pipe_source, "弯管"),
-}
-
-
 class DrawGeometryLogicMixin:
     """Mixin providing all modeling logic methods for MainWindow."""
 
@@ -198,7 +41,6 @@ class DrawGeometryLogicMixin:
                 self._remove_modeling_object_actors(obj)
         self._modeling_objects: list[GeometryObject] = []
         self._modeling_selected_index: int = -1
-        self._modeling_counter: dict[str, int] = {}
         self._modeling_active_section: str = "stl"
         self._interactive_edit_mode: str | None = None
         self._interactive_edit_drag: dict | None = None
@@ -404,9 +246,6 @@ class DrawGeometryLogicMixin:
                 src = reader.GetOutput()
                 if src.GetNumberOfPoints() == 0:
                     continue
-            elif kind in _PRIMITIVE_FACTORIES:
-                factory, _ = _PRIMITIVE_FACTORIES[kind]
-                src = factory()
             else:
                 continue
             actor, wire_actor, point_actor = self._create_modeling_actor_bundle(
@@ -428,33 +267,6 @@ class DrawGeometryLogicMixin:
                 source_path=source_path,
             )
             self._modeling_objects.append(obj)
-
-    # ------------------------------------------------------------------
-    # primitive management
-    # ------------------------------------------------------------------
-
-    def _add_primitive(self, kind: str) -> None:
-        factory, label = _PRIMITIVE_FACTORIES[kind]
-        self._modeling_counter[kind] = self._modeling_counter.get(kind, 0) + 1
-        name = f"{label}{self._modeling_counter[kind]}"
-
-        source = factory()
-        actor, wire_actor, point_actor = self._create_modeling_actor_bundle(source)
-
-        obj = GeometryObject(
-            name=name, kind=kind, actor=actor, source=source,
-            wire_actor=wire_actor, point_actor=point_actor,
-            section=self._modeling_active_section,
-        )
-        self._modeling_objects.append(obj)
-        self._add_modeling_object_actors(obj)
-
-        self._rebuild_tree()
-        self._select_object(len(self._modeling_objects) - 1)
-        self._apply_modeling_selection_styles()
-        self._modeling_viewport.render()
-        self._save_modeling_state_if_ready()
-        self._set_modeling_status(f"已创建 {name}")
 
     def _delete_selected(self) -> None:
         if self._modeling_selected_index < 0 or self._modeling_selected_index >= len(self._modeling_objects):
@@ -612,6 +424,11 @@ class DrawGeometryLogicMixin:
             poly_data = self._transformed_object_polydata(obj)
             if poly_data is None or poly_data.GetNumberOfPoints() == 0:
                 continue
+            if obj.section == "domain":
+                exported_domain_assets.extend(
+                    self._domain_face_assets_from_polydata(obj.name, poly_data, cache_dir)
+                )
+                continue
             writer = vtk.vtkSTLWriter()
             writer.SetFileName(str(output_path))
             writer.SetInputData(poly_data)
@@ -621,10 +438,7 @@ class DrawGeometryLogicMixin:
                 source_path=output_path,
                 polydata=poly_data,
             )
-            if obj.section == "domain":
-                exported_domain_assets.append(asset)
-            else:
-                exported_stl_assets.append(asset)
+            exported_stl_assets.append(asset)
         if not exported_stl_assets and not exported_domain_assets:
             self._set_modeling_status("勾选几何导出失败，请检查模型是否为空")
             return
@@ -636,18 +450,25 @@ class DrawGeometryLogicMixin:
             self._mesh_imports.extend(exported_stl_assets)
             self._mesh_import_selected_index = len(self._mesh_imports) - 1
         if exported_domain_assets:
+            first_new_domain_row = len(self._cad_domain_imports)
             self._cad_domain_imports.extend(exported_domain_assets)
-            self._highlighted_domain_face = len(self._cad_domain_imports) - 1
             if hasattr(self, "_mesh_domain_type_combo"):
                 cad_index = self._mesh_domain_type_combo.findData("cad")
                 if cad_index >= 0:
                     self._mesh_domain_type_combo.setCurrentIndex(cad_index)
+        else:
+            first_new_domain_row = -1
         self._domain_bounds_manual = False
         self._rebuild_mesh_import_combo()
         if hasattr(self, "_rebuild_cad_domain_file_list"):
             self._rebuild_cad_domain_file_list()
         if hasattr(self, "_init_domain_face_table"):
             self._init_domain_face_table()
+        if first_new_domain_row >= 0 and hasattr(self, "_domain_face_table"):
+            row = min(first_new_domain_row, self._domain_face_table.rowCount() - 1)
+            if row >= 0:
+                self._domain_face_table.selectRow(row)
+                self._highlighted_domain_face = row
         self._auto_fill_domain_bounds()
         if exported_domain_assets and hasattr(self, "_auto_recommend_location_in_mesh"):
             self._auto_recommend_location_in_mesh(update_view=False)
@@ -692,6 +513,122 @@ class DrawGeometryLogicMixin:
         clean.SetInputData(transform_filter.GetOutput())
         clean.Update()
         return clean.GetOutput()
+
+    def _domain_face_assets_from_polydata(self, object_name: str, poly_data, cache_dir) -> list:
+        """Split a drawn domain into planar face assets for boundary editing.
+
+        A closed cube-like domain should appear in Group 2 as one row per face,
+        so users can later turn any face into inlet/outlet/wall. Curved or
+        highly tessellated surfaces fall back to the whole surface if no stable
+        planar grouping is found.
+        """
+        from pathlib import Path
+        from foamdesk.ui.main_window_geometry_logic import MeshImportAsset
+
+        face_groups = self._split_polydata_by_planar_faces(poly_data)
+        if not face_groups:
+            face_groups = [("face1", poly_data)]
+
+        assets: list[MeshImportAsset] = []
+        for index, (face_label, face_poly_data) in enumerate(face_groups, start=1):
+            if face_poly_data is None or face_poly_data.GetNumberOfPoints() == 0:
+                continue
+            output_path = self._unique_draw_export_path(
+                cache_dir,
+                f"domain_patch_{object_name}_{face_label or f'face{index}'}.stl",
+            )
+            writer = vtk.vtkSTLWriter()
+            writer.SetFileName(str(output_path))
+            writer.SetInputData(face_poly_data)
+            writer.Write()
+            assets.append(
+                MeshImportAsset(
+                    name=Path(output_path).stem,
+                    source_path=output_path,
+                    polydata=face_poly_data,
+                )
+            )
+        return assets
+
+    def _split_polydata_by_planar_faces(self, poly_data) -> list[tuple[str, object]]:
+        triangle = vtk.vtkTriangleFilter()
+        triangle.SetInputData(poly_data)
+        triangle.Update()
+        clean = vtk.vtkCleanPolyData()
+        clean.SetInputConnection(triangle.GetOutputPort())
+        clean.Update()
+        source = clean.GetOutput()
+        if source is None or source.GetNumberOfCells() == 0:
+            return []
+
+        bounds = source.GetBounds()
+        diag = 1.0
+        if bounds and all(np.isfinite(bounds)):
+            diag = max(
+                float(np.linalg.norm([bounds[1] - bounds[0], bounds[3] - bounds[2], bounds[5] - bounds[4]])),
+                1e-9,
+            )
+        distance_scale = max(diag * 0.001, 1e-8)
+        groups: dict[tuple[float, float, float, int], list[int]] = {}
+        id_list = vtk.vtkIdList()
+        points = source.GetPoints()
+        for cell_id in range(source.GetNumberOfCells()):
+            source.GetCellPoints(cell_id, id_list)
+            if id_list.GetNumberOfIds() < 3:
+                continue
+            pts = [np.array(points.GetPoint(id_list.GetId(i)), dtype=float) for i in range(id_list.GetNumberOfIds())]
+            normal = None
+            for i in range(1, len(pts) - 1):
+                candidate = np.cross(pts[i] - pts[0], pts[i + 1] - pts[0])
+                norm = float(np.linalg.norm(candidate))
+                if norm > 1e-12:
+                    normal = candidate / norm
+                    break
+            if normal is None:
+                continue
+            if tuple(normal) < tuple(-normal):
+                normal = -normal
+            centroid = np.mean(pts, axis=0)
+            offset = float(np.dot(normal, centroid))
+            key = (
+                round(float(normal[0]), 3),
+                round(float(normal[1]), 3),
+                round(float(normal[2]), 3),
+                int(round(offset / distance_scale)),
+            )
+            groups.setdefault(key, []).append(cell_id)
+
+        if len(groups) <= 1 or len(groups) > 64:
+            return []
+
+        result: list[tuple[str, object]] = []
+        for face_index, (_key, cell_ids) in enumerate(sorted(groups.items(), key=lambda item: item[0]), start=1):
+            if not cell_ids:
+                continue
+            new_points = vtk.vtkPoints()
+            new_polys = vtk.vtkCellArray()
+            point_map: dict[int, int] = {}
+            for cell_id in cell_ids:
+                source.GetCellPoints(cell_id, id_list)
+                polygon = vtk.vtkPolygon()
+                polygon.GetPointIds().SetNumberOfIds(id_list.GetNumberOfIds())
+                for i in range(id_list.GetNumberOfIds()):
+                    old_id = int(id_list.GetId(i))
+                    if old_id not in point_map:
+                        point_map[old_id] = new_points.InsertNextPoint(points.GetPoint(old_id))
+                    polygon.GetPointIds().SetId(i, point_map[old_id])
+                new_polys.InsertNextCell(polygon)
+            face_poly_data = vtk.vtkPolyData()
+            face_poly_data.SetPoints(new_points)
+            face_poly_data.SetPolys(new_polys)
+            face_clean = vtk.vtkCleanPolyData()
+            face_clean.SetInputData(face_poly_data)
+            face_clean.Update()
+            out = vtk.vtkPolyData()
+            out.DeepCopy(face_clean.GetOutput())
+            if out.GetNumberOfPoints() > 0:
+                result.append((f"face{face_index}", out))
+        return result
 
     def _unique_draw_export_path(self, directory, filename: str):
         from pathlib import Path

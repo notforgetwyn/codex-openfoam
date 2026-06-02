@@ -76,6 +76,7 @@ class GeometryLogicMixin:
         self._domain_bounds_manual: bool = False
         self._last_checkmesh_output: str = ""
         self._highlighted_domain_face: int = -1
+        self._mesh_preview_force_reset_camera: bool = True
 
     def _import_geometry_file(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
@@ -664,37 +665,113 @@ class GeometryLogicMixin:
             bbox[4] - eps <= point[2] <= bbox[5] + eps
         )
 
+    def _point_inside_polydata(self, point, polydata) -> bool | None:
+        if polydata is None or polydata.GetNumberOfPoints() == 0 or polydata.GetNumberOfPolys() == 0:
+            return None
+        points = vtk.vtkPoints()
+        points.InsertNextPoint(float(point[0]), float(point[1]), float(point[2]))
+        probe = vtk.vtkPolyData()
+        probe.SetPoints(points)
+        selector = vtk.vtkSelectEnclosedPoints()
+        selector.SetInputData(probe)
+        selector.SetSurfaceData(polydata)
+        selector.SetTolerance(1e-6)
+        try:
+            selector.Update()
+        except Exception:
+            return None
+        return bool(selector.IsInside(0))
+
+    def _combined_cad_domain_surface(self):
+        if not self._cad_domain_imports:
+            return None
+        append = vtk.vtkAppendPolyData()
+        count = 0
+        for asset in self._cad_domain_imports:
+            pd = self._transformed_cad_domain_polydata(asset)
+            if pd is not None and pd.GetNumberOfPoints() > 0:
+                append.AddInputData(pd)
+                count += 1
+        if count == 0:
+            return None
+        append.Update()
+        clean = vtk.vtkCleanPolyData()
+        clean.SetInputData(append.GetOutput())
+        clean.Update()
+        return clean.GetOutput()
+
+    def _point_inside_cad_domain(self, point, domain_surface=None) -> bool:
+        domain_bbox = self._cad_domain_bounds()
+        if domain_bbox is None or not self._point_inside_bbox(point, domain_bbox):
+            return False
+        domain_surface = domain_surface or self._combined_cad_domain_surface()
+        inside_surface = self._point_inside_polydata(point, domain_surface)
+        if inside_surface is None:
+            return True
+        return inside_surface
+
+    def _point_inside_any_obstacle(self, point) -> bool:
+        for asset in self._mesh_imports:
+            bounds = asset.polydata.GetBounds()
+            if bounds and all(np.isfinite(bounds)) and not self._point_inside_bbox(point, bounds):
+                continue
+            inside = self._point_inside_polydata(point, asset.polydata)
+            if inside is True:
+                return True
+            if inside is None and bounds and all(np.isfinite(bounds)) and self._point_inside_bbox(point, bounds):
+                return True
+        return False
+
+    def _location_candidate_points(self, domain_bbox) -> list[np.ndarray]:
+        ratios = (0.5, 0.25, 0.75, 0.15, 0.85, 0.35, 0.65)
+        candidates: list[np.ndarray] = []
+        seen: set[tuple[float, float, float]] = set()
+
+        def add(rx: float, ry: float, rz: float) -> None:
+            point = np.array([
+                domain_bbox[0] + (domain_bbox[1] - domain_bbox[0]) * rx,
+                domain_bbox[2] + (domain_bbox[3] - domain_bbox[2]) * ry,
+                domain_bbox[4] + (domain_bbox[5] - domain_bbox[4]) * rz,
+            ], dtype=float)
+            key = tuple(round(float(v), 9) for v in point)
+            if key not in seen:
+                seen.add(key)
+                candidates.append(point)
+
+        add(0.5, 0.5, 0.5)
+        for axis in range(3):
+            for ratio in ratios[1:]:
+                coords = [0.5, 0.5, 0.5]
+                coords[axis] = ratio
+                add(coords[0], coords[1], coords[2])
+        for rx in ratios:
+            for ry in ratios:
+                for rz in ratios:
+                    add(rx, ry, rz)
+        return candidates
+
     def _auto_location_candidate(self) -> tuple[float, float, float] | None:
         domain_bbox = self._cad_domain_bounds()
         if domain_bbox is None:
             return None
-        center = np.array([
-            (domain_bbox[0] + domain_bbox[1]) * 0.5,
-            (domain_bbox[2] + domain_bbox[3]) * 0.5,
-            (domain_bbox[4] + domain_bbox[5]) * 0.5,
-        ], dtype=float)
-        obstacle_bbox = self._domain_geom_bbox()
-        if obstacle_bbox is None or not self._point_inside_bbox(center, obstacle_bbox):
-            return tuple(float(v) for v in center)
-        size = np.array([domain_bbox[1] - domain_bbox[0], domain_bbox[3] - domain_bbox[2], domain_bbox[5] - domain_bbox[4]], dtype=float)
-        axis = int(np.argmax(size))
-        candidates = []
-        for ratio in (0.25, 0.75, 0.15, 0.85):
-            pt = center.copy()
-            pt[axis] = domain_bbox[axis * 2] + size[axis] * ratio
-            candidates.append(pt)
-        for pt in candidates:
-            if self._point_inside_bbox(pt, domain_bbox) and not self._point_inside_bbox(pt, obstacle_bbox):
-                return tuple(float(v) for v in pt)
-        return tuple(float(v) for v in center)
+        domain_surface = self._combined_cad_domain_surface()
+        for pt in self._location_candidate_points(domain_bbox):
+            if not self._point_inside_cad_domain(pt, domain_surface):
+                continue
+            if self._point_inside_any_obstacle(pt):
+                continue
+            return tuple(float(v) for v in pt)
+        return None
 
     def _auto_recommend_location_in_mesh(self, _checked: bool = False, update_view: bool = True) -> None:
         point = self._auto_location_candidate()
         if point is None:
+            if update_view:
+                self._show_error("没有找到合适的 locationInMesh：请确认计算域封闭，且障碍物没有填满计算域。")
             return
         self._set_cad_location_values(point, update_view=update_view)
         if update_view:
-            self._set_status("locationInMesh 已自动推荐，红点已在 3D 预览中标出。")
+            self._set_status("locationInMesh 已自动推荐到流体区域内（计算域内、障碍物外），红点已在 3D 预览中标出。")
 
     def _on_cad_location_changed(self, *_args) -> None:
         self._save_mesh_workflow_state()
@@ -760,10 +837,13 @@ class GeometryLogicMixin:
 
     def _redraw_mesh_grid_vtk(self) -> None:
         canvas = self._mesh_grid_vtk
+        if hasattr(canvas, "ensure_interaction_enabled"):
+            canvas.ensure_interaction_enabled()
         camera = canvas._renderer.GetActiveCamera()
         has_actors = bool(canvas._renderer.GetActors().GetNumberOfItems())
         saved = None
-        if has_actors:
+        force_reset = bool(getattr(self, "_mesh_preview_force_reset_camera", False))
+        if has_actors and not force_reset:
             saved = (
                 camera.GetPosition(),
                 camera.GetFocalPoint(),
@@ -795,6 +875,7 @@ class GeometryLogicMixin:
             canvas.render()
         else:
             canvas.finish()
+        self._mesh_preview_force_reset_camera = False
 
     # ── domain face / Group 2 logic ──────────────────────────
 
@@ -1422,7 +1503,8 @@ class GeometryLogicMixin:
             if not asset.source_path.exists():
                 continue
             dest = tri_dir / asset.source_path.name
-            shutil.copy2(asset.source_path, dest)
+            if asset.source_path.resolve() != dest.resolve():
+                shutil.copy2(asset.source_path, dest)
             stl_records.append({
                 "file": dest.name,
                 "name": Path(dest.name).stem,
@@ -2038,4 +2120,5 @@ class GeometryLogicMixin:
             if "smooth" in quality:
                 self._quality_smooth.setChecked(quality["smooth"])
         self._domain_bounds_manual = False
+        self._mesh_preview_force_reset_camera = True
         self._redraw_mesh_grid_vtk()

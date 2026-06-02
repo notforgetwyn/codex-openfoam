@@ -20,6 +20,15 @@ class ResultsLogicMixin:
             if show_errors:
                 self._show_error("请先新建或打开项目。")
             return
+        if not self._result_mesh_available():
+            self._result_field_combo.blockSignals(True)
+            self._result_field_combo.clear()
+            self._result_field_combo.addItems(self.RESULT_FIELDS)
+            self._result_field_combo.blockSignals(False)
+            self._refresh_result_display_modes()
+            self._result_minmax_label.setText("最大/最小值：未生成网格")
+            self._set_status("当前 case 还没有生成网格，请先在网格生成页面点击生成网格。")
+            return
         try:
             case_info = self._context.openfoam_vtk_service.inspect(self._current_project)
         except (OSError, RuntimeError) as error:
@@ -100,6 +109,9 @@ class ResultsLogicMixin:
     def _load_selected_result_display(self) -> None:
         if self._current_project is None:
             self._show_error("请先新建或打开项目。")
+            return
+        if not self._result_mesh_available():
+            self._show_error("当前 case 还没有生成网格，请先在“网格生成”页面点击“生成网格”。")
             return
         mode = self._result_display_combo.currentText().strip()
         field_name = self._result_field_combo.currentText().strip()
@@ -221,9 +233,16 @@ class ResultsLogicMixin:
         io_positions = self._compute_inlet_outlet_positions()
         if io_positions[0] or io_positions[1]:
             self._native_vtk_viewer.set_inlet_outlet_positions(*io_positions)
+        self._native_vtk_viewer.set_domain_boundary_polydata(
+            self._build_domain_boundary_patch_surface(time_value=self._selected_result_time_value())
+        )
 
-        if mode in {"速度云图", "压力云图", "温度云图", "壁面压力分布", "壁面温度"}:
+        if mode in {"速度云图", "压力云图", "温度云图"}:
             try:
+                geometry_surface = self._build_geometry_patch_surface(
+                    time_value=self._selected_result_time_value()
+                )
+                self._native_vtk_viewer.set_geometry_polydata(geometry_surface)
                 output, field_array = self._ensure_point_field(output, field_array, storage)
             except RuntimeError as error:
                 self._show_error(str(error))
@@ -234,23 +253,7 @@ class ResultsLogicMixin:
                 f"Surface 表面云图已加载到原生 VTK 3D 窗口：field={display_name}, time={selected_time}, faces={face_count}, range={color_range}"
             )
             return
-        if mode == "压力等值面":
-            try:
-                output, field_array = self._ensure_point_field(output, field_array, storage)
-            except RuntimeError as error:
-                self._show_error(str(error))
-                return
-            self._native_vtk_viewer.plot_iso_surface(
-                output,
-                field_array,
-                color_range,
-                display_name,
-            )
-            self._finish_result_visualization(
-                f"Iso-surface 等值面已加载到原生 VTK 3D 窗口：field={display_name}, time={selected_time}, range={color_range}"
-            )
-            return
-        if mode in {"速度切片", "压力切片", "温度切面"}:
+        if mode in {"速度切片", "压力切片", "温度切面", "速度等值线", "压力等值线", "温度等值线"}:
             try:
                 mb = self._context.openfoam_vtk_service.build_case_output(
                     self._current_project,
@@ -265,17 +268,30 @@ class ResultsLogicMixin:
             except (OSError, RuntimeError, ValueError) as error:
                 self._show_error(str(error))
                 return
-            resolved_axis, center = self._native_vtk_viewer.plot_slice(
-                vol_data,
-                arr,
-                color_range,
-                display_name,
-                None,
-                0.5,
-            )
-            self._finish_result_visualization(
-                f"Slice 切片已加载：field={display_name}, time={selected_time}, axis={resolved_axis}, center={center:.6g}, range={color_range}"
-            )
+            if mode in {"速度等值线", "压力等值线", "温度等值线"}:
+                resolved_axis, center = self._native_vtk_viewer.plot_contour_slice(
+                    vol_data,
+                    arr,
+                    color_range,
+                    display_name,
+                    None,
+                    0.5,
+                )
+                self._finish_result_visualization(
+                    f"Contour 等值线已加载：field={display_name}, time={selected_time}, axis={resolved_axis}, center={center:.6g}, range={color_range}"
+                )
+            else:
+                resolved_axis, center = self._native_vtk_viewer.plot_slice(
+                    vol_data,
+                    arr,
+                    color_range,
+                    display_name,
+                    None,
+                    0.5,
+                )
+                self._finish_result_visualization(
+                    f"Slice 切片已加载：field={display_name}, time={selected_time}, axis={resolved_axis}, center={center:.6g}, range={color_range}"
+                )
             return
         if mode == "流线 streamlines":
             try:
@@ -364,6 +380,8 @@ class ResultsLogicMixin:
     def _load_result_field_data(self):
         if self._current_project is None:
             raise RuntimeError("未选择项目")
+        if not self._result_mesh_available():
+            raise RuntimeError("当前 case 还没有生成网格，请先在“网格生成”页面点击“生成网格”。")
         field_name = self._result_field_combo.currentText().strip()
         selected_time = self._result_time_combo.currentText().strip() or "默认"
         time_value = self._selected_result_time_value()
@@ -376,6 +394,12 @@ class ResultsLogicMixin:
         if field_array is None:
             raise RuntimeError(f"当前 Case 没有字段 {field_name}")
         return output, field_array, display_name, selected_time, storage
+
+    def _result_mesh_available(self) -> bool:
+        if self._current_project is None:
+            return False
+        mesh_dir = self._current_project.case_dir / "constant" / "polyMesh"
+        return (mesh_dir / "points").exists()
 
     def _prepare_result_field(self, data_object, field_name: str):
         display_map = {
@@ -648,39 +672,10 @@ class ResultsLogicMixin:
         return direction / norm
 
     def _load_geometry_seed_surface(self, vtk_dir: Path):
-        assets = [
-            asset
-            for asset in self._context.geometry_import_service.list_assets(self._current_project)
-            if asset.format.upper() == "STL" and asset.stored_path.exists()
-        ]
-        if not assets:
-            raise RuntimeError("未找到已导入的 STL 几何体。")
-
-        pieces = []
-        labels = []
-        for asset in assets:
-            poly_data = self._read_exported_geometry_surface(vtk_dir, asset)
-            source_label = asset.stored_path.stem
-            if poly_data is None or poly_data.GetNumberOfPoints() == 0:
-                poly_data = self._read_stl_seed_surface(asset.stored_path)
-                source_label = f"{asset.stored_path.stem} (STL)"
-            if poly_data is None or poly_data.GetNumberOfPoints() == 0:
-                continue
-            pieces.append(poly_data)
-            labels.append(source_label)
-
-        if not pieces:
-            return None, ""
-        if len(pieces) == 1:
-            return pieces[0], labels[0]
-        append_filter = vtk.vtkAppendPolyData()
-        for piece in pieces:
-            append_filter.AddInputData(piece)
-        append_filter.Update()
-        clean = vtk.vtkCleanPolyData()
-        clean.SetInputConnection(append_filter.GetOutputPort())
-        clean.Update()
-        return clean.GetOutput(), " + ".join(labels)
+        poly_data = self._build_geometry_patch_surface()
+        if poly_data is None or poly_data.GetNumberOfPoints() == 0:
+            raise RuntimeError("未能从 constant/polyMesh 中提取几何体表面，请先生成网格并确认障碍物 patch 存在。")
+        return poly_data, "polyMesh 几何体表面"
 
     def _read_exported_geometry_surface(self, vtk_dir: Path, asset):
         names = {
@@ -796,14 +791,130 @@ class ResultsLogicMixin:
             self._native_vtk_viewer = NativeVtkViewerDialog(self)
             self._native_vtk_viewer.destroyed.connect(self._clear_native_vtk_viewer)
         if self._current_project is not None:
-            try:
-                assets = self._context.geometry_import_service.list_assets(self._current_project)
-            except (OSError, ValueError):
-                assets = []
-            self._native_vtk_viewer.set_geometry_assets(assets)
+            self._native_vtk_viewer.set_geometry_assets([])
+            self._native_vtk_viewer.set_domain_boundary_polydata(
+                self._build_domain_boundary_patch_surface()
+            )
+            self._native_vtk_viewer.set_geometry_polydata(self._build_geometry_patch_surface())
         self._native_vtk_viewer.show()
         self._native_vtk_viewer.raise_()
         self._native_vtk_viewer.activateWindow()
+
+    def _build_domain_boundary_patch_surface(self, time_value: float | None = None):
+        """Extract the real meshed computational-domain boundary patches.
+
+        This is the snappyHexMesh result boundary (for example pipe/cylinder
+        inlet, outlet and wall), not the rectangular blockMesh background box.
+        """
+        if self._current_project is None:
+            return None
+        boundary_path = (
+            self._current_project.case_dir / "constant" / "polyMesh" / "boundary"
+        )
+        if not boundary_path.exists():
+            return None
+        patch_names = self._result_domain_boundary_patch_names()
+        if not patch_names:
+            return None
+        try:
+            return self._context.openfoam_vtk_service.build_patch_surfaces(
+                self._current_project,
+                include_patches=patch_names,
+                time_value=time_value,
+            )
+        except (OSError, RuntimeError, ValueError):
+            return None
+
+    def _build_geometry_patch_surface(self, time_value: float | None = None):
+        """Extract the meshed geometry surface from constant/polyMesh.
+
+        Domain boundary faces (inlet/outlet/walls + the 6 computational-domain
+        faces named in the mesh-generation table) are excluded so only the
+        immersed geometry patches remain. Returns None when no mesh exists."""
+        if self._current_project is None:
+            return None
+        boundary_path = (
+            self._current_project.case_dir / "constant" / "polyMesh" / "boundary"
+        )
+        if not boundary_path.exists():
+            return None
+        try:
+            return self._context.openfoam_vtk_service.build_patch_surfaces(
+                self._current_project,
+                exclude_patches=self._domain_boundary_patch_names(),
+                time_value=time_value,
+            )
+        except (OSError, RuntimeError, ValueError):
+            return None
+
+    def _result_domain_boundary_patch_names(self) -> tuple[str, ...]:
+        """Patch names that represent the user-defined CFD domain surface."""
+        names: set[str] = set()
+        getter = getattr(self, "_get_domain_face_definitions", None)
+        if callable(getter):
+            try:
+                for face in getter():
+                    name = str(face.get("name", "")).strip()
+                    if name:
+                        names.add(name)
+            except (AttributeError, KeyError, TypeError):
+                pass
+        names.update({"inlet", "outlet", "wall", "walls"})
+        blocked_background_names = {
+            "background", "front", "back", "top", "bottom", "left", "right",
+            "empty", "sym", "symmetry", "symmetryplane",
+        }
+        return tuple(sorted(name for name in names if name.lower() not in blocked_background_names))
+
+    def _domain_boundary_patch_names(self) -> tuple[str, ...]:
+        """Names of computational-domain boundary patches (not geometry)."""
+        names = {
+            "inlet", "outlet", "walls", "wall", "background",
+            "front", "back", "top", "bottom", "left", "right",
+        }
+        getter = getattr(self, "_get_domain_face_definitions", None)
+        if callable(getter):
+            try:
+                for face in getter():
+                    name = str(face.get("name", "")).strip()
+                    if name:
+                        names.add(name)
+            except (AttributeError, KeyError, TypeError):
+                pass
+        return tuple(names)
+
+    def _is_domain_boundary_stl_asset(self, asset) -> bool:
+        """Return True for CAD-domain STL files that should not be shown as geometry.
+
+        The result viewer should render and seed streamlines from the immersed
+        geometry only. Mesh generation writes CAD/imported domain boundaries as
+        `cad_domain.stl` or named inlet/outlet/wall patches in triSurface, so
+        those files must be excluded from the "仅显示STL附近" path.
+        """
+        candidates = {
+            str(getattr(asset, "name", "")).lower(),
+            Path(str(getattr(asset, "name", ""))).stem.lower(),
+        }
+        stored_path = getattr(asset, "stored_path", None)
+        if stored_path is not None:
+            candidates.add(stored_path.name.lower())
+            candidates.add(stored_path.stem.lower())
+        source_path = getattr(asset, "source_path", "")
+        if source_path:
+            source = Path(str(source_path))
+            candidates.add(source.name.lower())
+            candidates.add(source.stem.lower())
+
+        domain_names = {name.lower() for name in self._domain_boundary_patch_names()}
+        domain_names.update({"cad_domain", "caddomain", "domain", "inlet", "outlet", "wall", "walls", "sym", "empty"})
+        for name in candidates:
+            if not name:
+                continue
+            if name in domain_names:
+                return True
+            if name.startswith("domain_patch") or name.startswith("cad_domain"):
+                return True
+        return False
 
     def _clear_native_vtk_viewer(self, *_args) -> None:
         self._native_vtk_viewer = None

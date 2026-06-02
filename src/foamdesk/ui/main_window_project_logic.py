@@ -15,6 +15,8 @@ class ProjectProcessLogicMixin:
             return
         if hasattr(self, "_save_modeling_state_if_ready"):
             self._save_modeling_state_if_ready()
+        if hasattr(self, "_save_solver_run_state") and hasattr(self, "_cfg_run_log"):
+            self._save_solver_run_state()
         if hasattr(self, "_clear_draw_geometry_cache"):
             self._clear_draw_geometry_cache()
 

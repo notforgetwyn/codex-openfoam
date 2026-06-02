@@ -89,6 +89,7 @@ class SketchLogicMixin:
         self._sketch_pending: list[tuple[float, float]] = []
         self._sketch_cursor_uv: tuple[float, float] | None = None
         self._sketch_drag_start_uv: tuple[float, float] | None = None
+        self._sketch_drag_start_screen: tuple[int, int] | None = None
         self._sketch_origin: np.ndarray = np.array([0.0, 0.0, 0.0], dtype=float)
         self._sketch_actors: list[object] = []
         self._sketch_observer_tags: list[int] = []
@@ -170,6 +171,12 @@ class SketchLogicMixin:
         try:
             payload = json.loads(Path(path).read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
+            return
+        if isinstance(payload, list):
+            self._sketch_counter = 0
+            self._sketches = []
+            return
+        if not isinstance(payload, dict):
             return
         self._sketch_counter = int(payload.get("counter", 0))
         self._sketches = [self._deserialize_sketch(d) for d in payload.get("sketches", [])]
@@ -260,6 +267,7 @@ class SketchLogicMixin:
         self._sketch_pending = []
         self._sketch_cursor_uv = None
         self._sketch_drag_start_uv = None
+        self._sketch_drag_start_screen = None
         self._sketch_origin = np.array(sketch.origin, dtype=float)
         if hasattr(self, "_sketch_plane_combo"):
             self._sketch_plane_combo.blockSignals(True)
@@ -299,6 +307,7 @@ class SketchLogicMixin:
         self._sketch_pending = []
         self._sketch_cursor_uv = None
         self._sketch_drag_start_uv = None
+        self._sketch_drag_start_screen = None
         interactor = self._modeling_viewport._interactor
         for tag in self._sketch_observer_tags:
             interactor.RemoveObserver(tag)
@@ -378,14 +387,31 @@ class SketchLogicMixin:
         self._sketch_pending = []
         self._sketch_cursor_uv = None
         self._sketch_drag_start_uv = None
+        self._sketch_drag_start_screen = None
         self._render_sketch()
         if tool == "select":
-            self._set_modeling_status("选择：按住草图平面拖动，可移动整张草图")
+            self._set_modeling_status("选择：按住草图视图拖动，可平移观察范围")
             return
         if tool == "polyline":
             self._set_modeling_status("多段线：依次左键点击顶点，右键结束")
         else:
             self._set_modeling_status(f"绘制工具：{_SKETCH_TOOL_LABELS.get(tool, tool)}")
+
+    def _pan_sketch_camera(self, dx: int, dy: int) -> None:
+        """Pan the camera over the current sketch plane without moving sketch data."""
+        renderer = self._modeling_viewport._renderer
+        camera = renderer.GetActiveCamera()
+        _origin, u_axis, v_axis, _normal = self._sketch_basis()
+        size = self._modeling_viewport._vtk_widget.size()
+        height = max(int(size.height()), 1)
+        world_per_pixel = float(camera.GetParallelScale()) * 2.0 / float(height)
+        delta = u_axis * (float(dx) * world_per_pixel) + v_axis * (float(dy) * world_per_pixel)
+        position = np.array(camera.GetPosition(), dtype=float) + delta
+        focal = np.array(camera.GetFocalPoint(), dtype=float) + delta
+        camera.SetPosition(float(position[0]), float(position[1]), float(position[2]))
+        camera.SetFocalPoint(float(focal[0]), float(focal[1]), float(focal[2]))
+        renderer.ResetCameraClippingRange()
+        self._modeling_viewport.render()
 
     # ------------------------------------------------------------------
     # mouse handlers
@@ -400,7 +426,8 @@ class SketchLogicMixin:
             return
         if self._sketch_tool == "select":
             self._sketch_drag_start_uv = uv
-            self._set_modeling_status("正在移动草图平面")
+            self._sketch_drag_start_screen = (int(x), int(y))
+            self._set_modeling_status("正在平移草图视图")
             return
         self._sketch_pending.append(uv)
         needed = _SKETCH_TOOL_CLICKS.get(self._sketch_tool, 2)
@@ -417,20 +444,15 @@ class SketchLogicMixin:
         if uv is None:
             return
         if self._sketch_tool == "select":
-            if self._sketch_drag_start_uv is None:
+            if self._sketch_drag_start_screen is None:
                 return
-            du = float(uv[0] - self._sketch_drag_start_uv[0])
-            dv = float(uv[1] - self._sketch_drag_start_uv[1])
-            if abs(du) < 1e-9 and abs(dv) < 1e-9:
+            last_x, last_y = self._sketch_drag_start_screen
+            dx = int(x) - last_x
+            dy = int(y) - last_y
+            if dx == 0 and dy == 0:
                 return
-            _origin, u_axis, v_axis, _normal = self._sketch_basis()
-            self._sketch_origin = self._sketch_origin + u_axis * du + v_axis * dv
-            if 0 <= self._active_sketch_index < len(self._sketches):
-                self._sketches[self._active_sketch_index].origin = [float(v) for v in self._sketch_origin]
-            self._sketch_drag_start_uv = uv
-            self._save_sketches()
-            self._orient_camera_to_plane()
-            self._render_sketch()
+            self._pan_sketch_camera(dx, dy)
+            self._sketch_drag_start_screen = (int(x), int(y))
             return
         if not self._sketch_pending:
             return
@@ -442,14 +464,15 @@ class SketchLogicMixin:
             return
         if self._sketch_tool == "select" and self._sketch_drag_start_uv is not None:
             self._sketch_drag_start_uv = None
-            self._save_sketches()
-            self._set_modeling_status("草图平面位置已更新")
+            self._sketch_drag_start_screen = None
+            self._set_modeling_status("草图视图已平移")
 
     def _on_sketch_right(self, _obj, _event) -> None:
         if not self._sketch_active:
             return
         if self._sketch_tool == "select":
             self._sketch_drag_start_uv = None
+            self._sketch_drag_start_screen = None
             self._render_sketch()
             return
         if self._sketch_tool == "polyline" and len(self._sketch_pending) >= 2:

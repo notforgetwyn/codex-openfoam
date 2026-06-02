@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
-from vtkmodules.vtkIOGeometry import vtkSTLReader
 from vtkmodules.util.numpy_support import numpy_to_vtk, vtk_to_numpy
 
 
@@ -57,11 +56,15 @@ class NativeVtkPreviewWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         self._vtk_widget = QVTKRenderWindowInteractor(self)
         self._vtk_widget.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self._vtk_widget.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._vtk_widget.setMouseTracking(True)
         layout.addWidget(self._vtk_widget, 1)
         self._renderer = vtk.vtkRenderer()
         self._renderer.SetBackground(*background)
         self._vtk_widget.GetRenderWindow().AddRenderer(self._renderer)
         self._interactor = self._vtk_widget.GetRenderWindow().GetInteractor()
+        self._interactor_style = vtk.vtkInteractorStyleTrackballCamera()
+        self._interactor.SetInteractorStyle(self._interactor_style)
         self._orientation_widget = None
         self._want_orientation_axes = False
 
@@ -73,9 +76,20 @@ class NativeVtkPreviewWidget(QWidget):
         if self._interactor_initialized or not self._vtk_widget.isVisible():
             return
         self._interactor.Initialize()
+        self._interactor.Enable()
         self._interactor_initialized = True
+        self._vtk_widget.setFocus()
         if self._want_orientation_axes and self._orientation_widget is None:
             self._create_orientation_axes()
+
+    def ensure_interaction_enabled(self) -> None:
+        if not self._vtk_widget.isVisible():
+            return
+        if not self._interactor_initialized:
+            self._initialize_interactor()
+        self._interactor.SetInteractorStyle(self._interactor_style)
+        self._interactor.Enable()
+        self._vtk_widget.setFocus()
 
     def enable_orientation_axes(self) -> None:
         """Show a small XYZ orientation indicator (corner axes that follow the camera)."""
@@ -320,7 +334,7 @@ class NativeVtkPreviewWidget(QWidget):
     def render(self) -> None:
         if not self.isVisible() or not self._vtk_widget.isVisible():
             return
-        self._initialize_interactor()
+        self.ensure_interaction_enabled()
         render_window = self._vtk_widget.GetRenderWindow()
         render_window.Render()
         if not self._render_backend_logged:
@@ -344,6 +358,8 @@ class NativeVtkViewerDialog(QDialog):
         self._animation_interval_ms = 800
         self._animation_loop = True
         self._geometry_assets = []
+        self._geometry_polydata = None
+        self._domain_boundary_polydata = None
         self._slice_data = None
         self._combined_stl_polydata = None
         self._last_plot_fn = None
@@ -358,6 +374,11 @@ class NativeVtkViewerDialog(QDialog):
         self._near_stl_check.setToolTip("仅显示 STL 几何表面附近的场数据")
         self._near_stl_check.toggled.connect(self._on_near_stl_toggled)
         toolbar.addWidget(self._near_stl_check)
+        self._show_domain_check = QCheckBox("显示计算域")
+        self._show_domain_check.setToolTip("显示 snappyHexMesh 生成后的真实 inlet/outlet/wall 计算域边界")
+        self._show_domain_check.setChecked(True)
+        self._show_domain_check.toggled.connect(self._on_domain_boundary_toggled)
+        toolbar.addWidget(self._show_domain_check)
         toolbar.addSpacing(8)
         self._streamline_count_label = QLabel("基线数")
         self._streamline_count_label.setVisible(False)
@@ -365,7 +386,7 @@ class NativeVtkViewerDialog(QDialog):
         self._streamline_count_spin = QSpinBox()
         self._streamline_count_spin.setRange(50, 12000)
         self._streamline_count_spin.setSingleStep(100)
-        self._streamline_count_spin.setValue(2600)
+        self._streamline_count_spin.setValue(400)
         self._streamline_count_spin.setVisible(False)
         toolbar.addWidget(self._streamline_count_spin)
         self._streamline_count_apply_button = QPushButton("确定")
@@ -442,6 +463,22 @@ class NativeVtkViewerDialog(QDialog):
             and asset.stored_path.exists()
         ]
 
+    def set_geometry_polydata(self, polydata) -> None:
+        """Set the meshed geometry surface (extracted from constant/polyMesh).
+        When set, it is rendered instead of the raw triSurface STL files."""
+        if polydata is not None and polydata.GetNumberOfPoints() > 0:
+            self._geometry_polydata = polydata
+        else:
+            self._geometry_polydata = None
+        self._combined_stl_polydata = self._geometry_polydata
+
+    def set_domain_boundary_polydata(self, polydata) -> None:
+        """Set the meshed computational-domain boundary from snappyHexMesh patches."""
+        if polydata is not None and polydata.GetNumberOfPoints() > 0:
+            self._domain_boundary_polydata = polydata
+        else:
+            self._domain_boundary_polydata = None
+
     def closeEvent(self, event) -> None:  # noqa: N802
         self.pause_animation()
         self._animation_render_callback = None
@@ -513,7 +550,11 @@ class NativeVtkViewerDialog(QDialog):
         self._reset_scene(f"Surface 表面云图：{label}")
         self._set_near_stl_control_visible(True)
         self._set_streamline_controls_visible(False)
-        display_data = self._maybe_clip_near_stl(poly_data)
+        display_data = poly_data
+        if self._near_stl_check.isChecked() and self._geometry_polydata is not None:
+            mapped_geometry = self._map_field_to_geometry_surface(self._geometry_polydata, poly_data, field_array, label)
+            if mapped_geometry is not None and mapped_geometry.GetNumberOfPoints() > 0:
+                display_data = mapped_geometry
         array_name = self._scalar_array_name(display_data, field_array, label)
         display_data.GetPointData().SetActiveScalars(array_name)
         mapper = vtk.vtkPolyDataMapper()
@@ -529,11 +570,37 @@ class NativeVtkViewerDialog(QDialog):
         actor.GetProperty().SetSpecularPower(18)
         actor.GetProperty().SetOpacity(0.62)
         self._renderer.AddActor(actor)
-        self._add_outline(display_data)
-        self._add_flow_labels(display_data)
+        if not self._near_stl_check.isChecked():
+            self._add_outline(display_data)
+            self._add_flow_labels(display_data)
         self._add_scalar_bar(mapper.GetLookupTable(), label)
         self._last_plot_fn = (self.plot_surface, (poly_data, field_array, scalar_range, label))
         self._finish_scene(display_data)
+
+    def _map_field_to_geometry_surface(self, geometry_polydata, source_data, field_array, label: str):
+        array_name = field_array.GetName() or label
+        if geometry_polydata.GetPointData().GetArray(array_name) is not None:
+            return geometry_polydata
+        if geometry_polydata.GetCellData().GetArray(array_name) is not None:
+            converter = vtk.vtkCellDataToPointData()
+            converter.SetInputData(geometry_polydata)
+            converter.PassCellDataOn()
+            converter.Update()
+            return converter.GetOutput()
+        try:
+            probe = vtk.vtkProbeFilter()
+            probe.SetInputData(geometry_polydata)
+            probe.SetSourceData(source_data)
+            probe.Update()
+            probed = probe.GetOutput()
+            if probed is not None and (
+                probed.GetPointData().GetArray(array_name) is not None
+                or probed.GetCellData().GetArray(array_name) is not None
+            ):
+                return probed
+        except Exception:
+            return None
+        return None
 
     def _on_slice_ctrl_changed(self) -> None:
         if self._slice_data is None:
@@ -541,7 +608,8 @@ class NativeVtkViewerDialog(QDialog):
         data = self._slice_data
         axis_name = self._slice_axis_combo.currentText().strip()
         pos = self._slice_pos_spin.value()
-        self.plot_slice(
+        plotter = self.plot_contour_slice if data.get("mode") == "contour" else self.plot_slice
+        plotter(
             data["poly_data"], data["field_array"], data["scalar_range"],
             data["label"], None if axis_name == "自动" else axis_name, pos,
         )
@@ -557,7 +625,7 @@ class NativeVtkViewerDialog(QDialog):
     ) -> tuple[str, float]:
         self._current_plot_mode = "slice"
         self._slice_data = {
-            "poly_data": poly_data, "field_array": field_array,
+            "mode": "slice", "poly_data": poly_data, "field_array": field_array,
             "scalar_range": scalar_range, "label": label,
         }
         self._show_slice_ctrls()
@@ -604,6 +672,82 @@ class NativeVtkViewerDialog(QDialog):
         self._add_flow_labels(poly_data)
         self._add_scalar_bar(mapper.GetLookupTable(), label)
         self._last_plot_fn = (self.plot_slice, (poly_data, field_array, scalar_range, label, axis_name, normalized_position))
+        self._finish_scene(poly_data)
+        return "XYZ"[axis], center
+
+    def plot_contour_slice(
+        self,
+        poly_data,
+        field_array,
+        scalar_range: tuple[float, float],
+        label: str,
+        axis_name: str | None,
+        normalized_position: float,
+    ) -> tuple[str, float]:
+        self._current_plot_mode = "contour_slice"
+        self._slice_data = {
+            "mode": "contour", "poly_data": poly_data, "field_array": field_array,
+            "scalar_range": scalar_range, "label": label,
+        }
+        self._show_slice_ctrls()
+        self._slice_axis_combo.blockSignals(True)
+        self._slice_pos_spin.blockSignals(True)
+        if axis_name:
+            idx = self._slice_axis_combo.findText(axis_name)
+            if idx >= 0:
+                self._slice_axis_combo.setCurrentIndex(idx)
+        self._slice_pos_spin.setValue(normalized_position)
+        self._slice_axis_combo.blockSignals(False)
+        self._slice_pos_spin.blockSignals(False)
+
+        self._reset_scene(f"Contour 等值线：{label}")
+        self._set_near_stl_control_visible(False)
+        self._set_streamline_controls_visible(False)
+        array_name = self._scalar_array_name(poly_data, field_array, label)
+        axis, center = self._axis_and_center(poly_data, axis_name, normalized_position)
+        plane = vtk.vtkPlane()
+        origin = [(poly_data.GetBounds()[0] + poly_data.GetBounds()[1]) * 0.5,
+                  (poly_data.GetBounds()[2] + poly_data.GetBounds()[3]) * 0.5,
+                  (poly_data.GetBounds()[4] + poly_data.GetBounds()[5]) * 0.5]
+        origin[axis] = center
+        normal = [0.0, 0.0, 0.0]
+        normal[axis] = 1.0
+        plane.SetOrigin(*origin)
+        plane.SetNormal(*normal)
+
+        cutter = vtk.vtkCutter()
+        cutter.SetInputDataObject(poly_data)
+        cutter.SetCutFunction(plane)
+        cutter.Update()
+        slice_data = cutter.GetOutput()
+        slice_data.GetPointData().SetActiveScalars(array_name)
+
+        value_min, value_max = scalar_range
+        if value_max <= value_min:
+            value_max = value_min + 1.0
+        contour = vtk.vtkContourFilter()
+        contour.SetInputData(slice_data)
+        contour.SetInputArrayToProcess(0, 0, 0, vtk.vtkDataObject.FIELD_ASSOCIATION_POINTS, array_name)
+        levels = np.linspace(value_min, value_max, 12)[1:-1]
+        for index, value in enumerate(levels):
+            contour.SetValue(index, float(value))
+
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputConnection(contour.GetOutputPort())
+        mapper.SetScalarModeToUsePointFieldData()
+        mapper.SelectColorArray(array_name)
+        mapper.SetScalarRange(value_min, value_max)
+        mapper.SetLookupTable(self._lookup_table((value_min, value_max), color_scale=0.68))
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetColor(0.06, 0.08, 0.10)
+        actor.GetProperty().SetLineWidth(2.8)
+        actor.GetProperty().SetOpacity(0.98)
+        self._renderer.AddActor(actor)
+        self._add_outline(poly_data)
+        self._add_flow_labels(poly_data)
+        self._add_scalar_bar(mapper.GetLookupTable(), label)
+        self._last_plot_fn = (self.plot_contour_slice, (poly_data, field_array, scalar_range, label, axis_name, normalized_position))
         self._finish_scene(poly_data)
         return "XYZ"[axis], center
 
@@ -712,8 +856,15 @@ class NativeVtkViewerDialog(QDialog):
             lookup_table,
             (value_min, value_max),
         )
+        if not use_stl:
+            self._add_outline(source_poly_data)
+            self._add_flow_labels(source_poly_data)
         self._add_scalar_bar(lookup_table, "|U| (m/s)")
-        camera_target = self._combined_stl_polydata if self._combined_stl_polydata is not None else source_poly_data
+        camera_target = (
+            self._combined_stl_polydata
+            if use_stl and self._combined_stl_polydata is not None
+            else source_poly_data
+        )
         self._last_plot_fn = (self._plot_current_streamline_dataset, ())
         self._finish_scene(camera_target, zoom=1.55)
 
@@ -721,9 +872,10 @@ class NativeVtkViewerDialog(QDialog):
         self._status_label.setText(status)
         self._renderer.RemoveAllViewProps()
         self._renderer.SetBackground(1.0, 1.0, 1.0)
+        self._add_domain_boundary_surface()
         self._add_geometry_assets()
-        # Only hide slice controls if switching to non-slice mode
-        if not status.startswith("Slice"):
+        # Slice and contour modes share the same cutting-plane controls.
+        if self._current_plot_mode not in {"slice", "contour_slice"}:
             self._hide_slice_ctrls()
             self._slice_data = None
 
@@ -753,55 +905,65 @@ class NativeVtkViewerDialog(QDialog):
             _log_vtk_render_backend(render_window, "native result viewer")
             self._render_backend_logged = True
 
-    def _lookup_table(self, scalar_range: tuple[float, float]):
+    def _lookup_table(self, scalar_range: tuple[float, float], color_scale: float = 1.0):
         table = vtk.vtkLookupTable()
         table.SetNumberOfTableValues(256)
         table.SetRange(*scalar_range)
         cmap = colormaps["turbo"]
         for index in range(256):
             r, g, b, a = cmap(index / 255.0)
+            r = max(0.0, min(1.0, r * color_scale))
+            g = max(0.0, min(1.0, g * color_scale))
+            b = max(0.0, min(1.0, b * color_scale))
             table.SetTableValue(index, float(r), float(g), float(b), float(a))
         table.Build()
         return table
 
     def _add_outline(self, poly_data) -> None:
-        outline = vtk.vtkOutlineFilter()
-        outline.SetInputData(poly_data)
+        """Do not draw a rectangular data bounds box in result views.
+
+        The visible CFD domain should come from snappyHexMesh boundary patches
+        such as inlet/outlet/wall, not from the blockMesh bounding volume.
+        """
+        return
+
+    def _add_domain_boundary_surface(self) -> None:
+        if not self._show_domain_check.isChecked():
+            return
+        if self._domain_boundary_polydata is None or self._domain_boundary_polydata.GetNumberOfPoints() == 0:
+            return
+        if self._current_plot_mode in {"surface", "streamline"} and self._near_stl_check.isChecked():
+            return
         mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputConnection(outline.GetOutputPort())
+        mapper.SetInputData(self._domain_boundary_polydata)
+        mapper.ScalarVisibilityOff()
         actor = vtk.vtkActor()
         actor.SetMapper(mapper)
         actor.GetProperty().SetColor(0.05, 0.10, 0.18)
         actor.GetProperty().SetOpacity(0.55)
-        actor.GetProperty().SetLineWidth(1.4)
+        actor.GetProperty().SetLineWidth(1.2)
+        actor.GetProperty().SetRepresentationToWireframe()
         self._renderer.AddActor(actor)
 
     def _add_geometry_assets(self) -> None:
         stl_pieces = []
-        for asset in self._geometry_assets:
-            try:
-                reader = vtkSTLReader()
-                reader.SetFileName(str(asset.stored_path))
-                reader.Update()
-                poly_data = reader.GetOutput()
-                if poly_data is None or poly_data.GetNumberOfPoints() == 0:
-                    continue
-                stl_pieces.append(poly_data)
-                mapper = vtk.vtkPolyDataMapper()
-                mapper.SetInputData(poly_data)
-                actor = vtk.vtkActor()
-                actor.SetMapper(mapper)
-                actor.GetProperty().SetColor(0.58, 0.62, 0.66)
-                actor.GetProperty().SetOpacity(0.35)
-                actor.GetProperty().SetInterpolationToPhong()
-                actor.GetProperty().SetSpecular(0.2)
-                actor.GetProperty().SetSpecularPower(12)
-                actor.GetProperty().EdgeVisibilityOn()
-                actor.GetProperty().SetEdgeColor(0.12, 0.12, 0.12)
-                actor.GetProperty().SetLineWidth(0.7)
-                self._renderer.AddActor(actor)
-            except (OSError, ValueError, RuntimeError):
-                continue
+        if self._geometry_polydata is not None and self._geometry_polydata.GetNumberOfPoints() > 0:
+            poly_data = self._geometry_polydata
+            stl_pieces.append(poly_data)
+            mapper = vtk.vtkPolyDataMapper()
+            mapper.SetInputData(poly_data)
+            mapper.ScalarVisibilityOff()
+            actor = vtk.vtkActor()
+            actor.SetMapper(mapper)
+            actor.GetProperty().SetColor(0.58, 0.62, 0.66)
+            actor.GetProperty().SetOpacity(0.35)
+            actor.GetProperty().SetInterpolationToPhong()
+            actor.GetProperty().SetSpecular(0.2)
+            actor.GetProperty().SetSpecularPower(12)
+            actor.GetProperty().EdgeVisibilityOn()
+            actor.GetProperty().SetEdgeColor(0.12, 0.12, 0.12)
+            actor.GetProperty().SetLineWidth(0.7)
+            self._renderer.AddActor(actor)
         if stl_pieces:
             append_filter = vtk.vtkAppendPolyData()
             for pd in stl_pieces:
@@ -818,6 +980,12 @@ class NativeVtkViewerDialog(QDialog):
         if self._current_plot_mode == "streamline":
             self._on_streamline_near_stl_toggled(_checked)
             return
+        if self._last_plot_fn is not None:
+            fn, args = self._last_plot_fn
+            fn(*args)
+
+    def _on_domain_boundary_toggled(self, _checked: bool) -> None:
+        """Re-render the current result view with/without the CFD domain boundary."""
         if self._last_plot_fn is not None:
             fn, args = self._last_plot_fn
             fn(*args)
