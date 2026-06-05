@@ -83,6 +83,7 @@ class NativeVtkPreviewWidget(QWidget):
             self._create_orientation_axes()
 
     def ensure_interaction_enabled(self) -> None:
+        """确保 VTK 预览窗口可以旋转、缩放和平移。"""
         if not self._vtk_widget.isVisible():
             return
         if not self._interactor_initialized:
@@ -323,6 +324,7 @@ class NativeVtkPreviewWidget(QWidget):
 
 
     def finish(self, points: np.ndarray | None = None) -> None:
+        """完成预览绘制并重置相机。"""
         self._renderer.ResetCamera()
         camera = self._renderer.GetActiveCamera()
         camera.Azimuth(-35)
@@ -506,6 +508,7 @@ class NativeVtkViewerDialog(QDialog):
         interval_ms: int = 800,
         loop: bool = True,
     ) -> None:
+        """注册结果动画帧源；播放时按帧号回调外部绘制函数。"""
         self.pause_animation()
         self._animation_frame_count = max(0, int(frame_count))
         self._animation_frame_index = 0
@@ -546,6 +549,7 @@ class NativeVtkViewerDialog(QDialog):
             self._animation_render_callback(frame_index)
 
     def plot_surface(self, poly_data, field_array, scalar_range: tuple[float, float], label: str) -> None:
+        """绘制表面云图，可按“仅显示 STL 附近”切换到几何表面映射显示。"""
         self._current_plot_mode = "surface"
         self._reset_scene(f"Surface 表面云图：{label}")
         self._set_near_stl_control_visible(True)
@@ -578,6 +582,7 @@ class NativeVtkViewerDialog(QDialog):
         self._finish_scene(display_data)
 
     def _map_field_to_geometry_surface(self, geometry_polydata, source_data, field_array, label: str):
+        """把结果场字段 probe 到几何表面，用于仅显示 STL 附近。"""
         array_name = field_array.GetName() or label
         if geometry_polydata.GetPointData().GetArray(array_name) is not None:
             return geometry_polydata
@@ -603,6 +608,7 @@ class NativeVtkViewerDialog(QDialog):
         return None
 
     def _on_slice_ctrl_changed(self) -> None:
+        """切片/等值线工具栏参数变化后，按新的轴向和位置重新绘制。"""
         if self._slice_data is None:
             return
         data = self._slice_data
@@ -623,6 +629,7 @@ class NativeVtkViewerDialog(QDialog):
         axis_name: str | None,
         normalized_position: float,
     ) -> tuple[str, float]:
+        """绘制切片云图：先用 vtkPlane 定位切面，再用 vtkCutter 切出二维截面。"""
         self._current_plot_mode = "slice"
         self._slice_data = {
             "mode": "slice", "poly_data": poly_data, "field_array": field_array,
@@ -684,6 +691,7 @@ class NativeVtkViewerDialog(QDialog):
         axis_name: str | None,
         normalized_position: float,
     ) -> tuple[str, float]:
+        """绘制切片等值线：先切片，再在切片结果上提取相同数值组成的线。"""
         self._current_plot_mode = "contour_slice"
         self._slice_data = {
             "mode": "contour", "poly_data": poly_data, "field_array": field_array,
@@ -825,6 +833,7 @@ class NativeVtkViewerDialog(QDialog):
         inlet_label: str = "",
         stl_streamline_data=None,
     ) -> None:
+        """初始化流线数据，保存入口面流线和几何近壁流线供界面开关切换。"""
         self._current_plot_mode = "streamline"
         self._streamline_display_state = {
             "source_poly_data": source_poly_data,
@@ -834,6 +843,7 @@ class NativeVtkViewerDialog(QDialog):
         self._plot_current_streamline_dataset()
 
     def _plot_current_streamline_dataset(self) -> None:
+        """按当前开关状态绘制流线，并配置逐步生长动画。"""
         if not self._streamline_display_state:
             return
         source_poly_data = self._streamline_display_state["source_poly_data"]
@@ -869,6 +879,7 @@ class NativeVtkViewerDialog(QDialog):
         self._finish_scene(camera_target, zoom=1.55)
 
     def _reset_scene(self, status: str) -> None:
+        """清空 VTK 场景，并重新添加计算域、几何体等通用图层。"""
         self._status_label.setText(status)
         self._renderer.RemoveAllViewProps()
         self._renderer.SetBackground(1.0, 1.0, 1.0)
@@ -906,6 +917,7 @@ class NativeVtkViewerDialog(QDialog):
             self._render_backend_logged = True
 
     def _lookup_table(self, scalar_range: tuple[float, float], color_scale: float = 1.0):
+        """生成 turbo 色标表；color_scale 用于把等值线颜色压暗。"""
         table = vtk.vtkLookupTable()
         table.SetNumberOfTableValues(256)
         table.SetRange(*scalar_range)
@@ -928,6 +940,7 @@ class NativeVtkViewerDialog(QDialog):
         return
 
     def _add_domain_boundary_surface(self) -> None:
+        """显示 snappyHexMesh 后的真实计算域边界线框。"""
         if not self._show_domain_check.isChecked():
             return
         if self._domain_boundary_polydata is None or self._domain_boundary_polydata.GetNumberOfPoints() == 0:
@@ -1069,6 +1082,7 @@ class NativeVtkViewerDialog(QDialog):
         self._outlet_positions = outlet_centers
 
     def _add_flow_labels(self, poly_data=None) -> None:
+        """在 3D 视图中标注 INLET/OUTLET，辅助用户辨认流向。"""
         inlet_centers = getattr(self, '_inlet_positions', None) or []
         outlet_centers = getattr(self, '_outlet_positions', None) or []
         if inlet_centers or outlet_centers:
@@ -1118,6 +1132,7 @@ class NativeVtkViewerDialog(QDialog):
         self._renderer.AddActor(actor)
 
     def _axis_and_center(self, poly_data, axis_name: str | None, normalized_position: float) -> tuple[int, float]:
+        """把“自动/X/Y/Z + 0-1 位置”转换为实际切片轴和物理坐标。"""
         bounds = poly_data.GetBounds()
         axis = "XYZ".find(axis_name or "")
         if axis < 0:
@@ -1152,6 +1167,7 @@ class NativeVtkViewerDialog(QDialog):
         lookup_table,
         scalar_range: tuple[float, float],
     ) -> None:
+        """把完整流线拆成逐帧增长的管状流线动画。"""
         paths = self._streamline_path_records(streamline_poly_data, source_poly_data)
         if not paths:
             self.set_animation_source(0, None)
@@ -1303,6 +1319,7 @@ class NativeVtkViewerDialog(QDialog):
         return max(min(section_scale * 0.006, max_span * 0.0014), max_span * 0.00035)
 
     def _streamline_path_records(self, streamline_poly_data, source_poly_data=None) -> list[dict[str, np.ndarray | float]]:
+        """把 VTK polyline 流线整理成 numpy 路径，便于筛选、排序和动画裁剪。"""
         vtk_points = streamline_poly_data.GetPoints()
         lines = streamline_poly_data.GetLines()
         if vtk_points is None or lines is None:
@@ -1366,6 +1383,7 @@ class NativeVtkViewerDialog(QDialog):
         path_speeds: np.ndarray,
         source_poly_data=None,
     ) -> tuple[np.ndarray, np.ndarray]:
+        """将流出计算域的流线沿末端方向外推，避免动画半路突然断掉。"""
         if len(path_points) < 3:
             return path_points, path_speeds
         tail_direction = path_points[-1] - path_points[-3]
@@ -1390,6 +1408,7 @@ class NativeVtkViewerDialog(QDialog):
         self,
         paths: list[dict[str, np.ndarray | float]],
     ) -> list[dict[str, np.ndarray | float]]:
+        """过滤过短、零速度或几乎不移动的流线，避免画面杂乱。"""
         if not paths:
             return []
         lengths = np.array([float(path["total_length"]) for path in paths], dtype=float)
@@ -1421,6 +1440,7 @@ class NativeVtkViewerDialog(QDialog):
         streamline_poly_data,
         ids: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
+        """统一流线方向，使动画尽量朝出口方向生长。"""
         if len(path_points) < 2:
             return path_points, path_speeds
         outlet_target = self._streamline_outlet_target()

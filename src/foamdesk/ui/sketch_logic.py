@@ -82,6 +82,7 @@ class SketchLogicMixin:
     # ------------------------------------------------------------------
 
     def _init_sketch_state(self) -> None:
+        """初始化草图列表、当前草图索引和草图绘制交互状态。"""
         self._sketch_active = False
         self._sketch_plane = "XY"
         self._sketch_tool = "select"
@@ -110,6 +111,7 @@ class SketchLogicMixin:
         return str(Path(__file__).parent.parent.parent.parent / "config" / "sketch_state.json")
 
     def _serialize_sketch(self, sketch: Sketch) -> dict:
+        """把草图对象转换成 JSON 可保存的数据结构。"""
         return {
             "name": sketch.name,
             "plane": sketch.plane,
@@ -127,6 +129,7 @@ class SketchLogicMixin:
         }
 
     def _deserialize_sketch(self, data: dict) -> Sketch:
+        """从 JSON 数据恢复草图对象，兼容旧版本 list 格式。"""
         entities: list[SketchEntity] = []
         for e in data.get("entities", []):
             entities.append(
@@ -149,6 +152,7 @@ class SketchLogicMixin:
         )
 
     def _save_sketches(self) -> None:
+        """保存当前 Case 的草图数据，保证切换页面或重启后可恢复。"""
         if getattr(self, "_suspend_draw_geometry_persist", False):
             return
         import json
@@ -163,6 +167,7 @@ class SketchLogicMixin:
             pass
 
     def _load_sketches(self) -> None:
+        """加载当前 Case 的草图数据，并处理旧格式兼容。"""
         import json
         from pathlib import Path
         path = self._sketch_state_path()
@@ -195,6 +200,7 @@ class SketchLogicMixin:
         return origin + u_axis * float(u) + v_axis * float(v)
 
     def _screen_to_sketch_uv(self, x: float, y: float) -> tuple[float, float] | None:
+        """把屏幕鼠标坐标投影到当前草图平面的二维 UV 坐标。"""
         renderer = self._modeling_viewport._renderer
         origin, u_axis, v_axis, normal = self._sketch_basis()
 
@@ -243,6 +249,7 @@ class SketchLogicMixin:
         self._set_modeling_status(f"已创建 {sketch.name}，开始绘制")
 
     def _enter_sketch_mode(self, index: int | None = None) -> None:
+        """进入草图编辑模式，切换相机、事件回调和草图工具状态。"""
         if not hasattr(self, "_modeling_viewport") or self._modeling_viewport is None:
             return
         if index is None:
@@ -398,6 +405,7 @@ class SketchLogicMixin:
             self._set_modeling_status(f"绘制工具：{_SKETCH_TOOL_LABELS.get(tool, tool)}")
 
     def _pan_sketch_camera(self, dx: int, dy: int) -> None:
+        """在选择工具下平移草图视角，不改变草图几何本身。"""
         """Pan the camera over the current sketch plane without moving sketch data."""
         renderer = self._modeling_viewport._renderer
         camera = renderer.GetActiveCamera()
@@ -487,6 +495,7 @@ class SketchLogicMixin:
     # ------------------------------------------------------------------
 
     def _commit_pending_entity(self, force: bool = False) -> None:
+        """把正在预览的线段/圆弧/圆等实体正式写入草图。"""
         tool = self._sketch_tool
         pts = list(self._sketch_pending)
         entity: SketchEntity | None = None
@@ -628,6 +637,7 @@ class SketchLogicMixin:
         return actor
 
     def _entity_uv_polyline(self, entity: SketchEntity) -> list[tuple[float, float]]:
+        """将草图实体转换为 UV 折线，用于显示、闭合检测和实体生成。"""
         """Sample one entity into an ordered list of (u, v) points (for drawing)."""
         if entity.kind in ("line", "polyline"):
             return list(entity.points)
@@ -752,6 +762,7 @@ class SketchLogicMixin:
     # ------------------------------------------------------------------
 
     def _sketch_closed_loop_uv(self) -> list[tuple[float, float]] | None:
+        """检测草图线段是否能组成闭合轮廓。"""
         """Return an ordered closed loop of (u, v) points, or None if no closed contour."""
         # Highest priority: a single closed primitive.
         for entity in self._sketch_entities:
@@ -793,6 +804,7 @@ class SketchLogicMixin:
         return max(scale * 0.02, 1e-4)
 
     def _chain_segments(self, segments: list[list[tuple[float, float]]]) -> list[tuple[float, float]] | None:
+        """把零散线段按端点连接成有序闭合轮廓。"""
         if len(segments) < 3:
             return None
         tol = self._sketch_loop_tol()
@@ -839,6 +851,7 @@ class SketchLogicMixin:
     # ------------------------------------------------------------------
 
     def _loop_polygon_polydata(self, loop_uv: list[tuple[float, float]]) -> vtk.vtkPolyData:
+        """把闭合草图轮廓转换为可拉伸/旋转的 vtkPolyData 面。"""
         """Build a polydata containing the closed loop as a single polygon (for capping)."""
         world = self._uv_list_to_world(loop_uv)
         points = vtk.vtkPoints()
@@ -855,6 +868,7 @@ class SketchLogicMixin:
         return poly_data
 
     def _finalize_solid(self, poly_data: vtk.vtkPolyData) -> vtk.vtkPolyData:
+        """三角化并清理生成的实体网格，保证后续布尔运算和导出稳定。"""
         triangle = vtk.vtkTriangleFilter()
         triangle.SetInputData(poly_data)
         triangle.Update()
@@ -872,6 +886,7 @@ class SketchLogicMixin:
         return output
 
     def _extrude_sketch(self) -> None:
+        """将闭合草图沿法向拉伸生成三维实体。"""
         loop_uv = self._sketch_closed_loop_uv()
         if not loop_uv or len(loop_uv) < 3:
             QMessageBox.warning(self, "拉伸", "没有检测到闭合轮廓，无法拉伸。\n请先画一个闭合的圆/矩形/多边形。")
@@ -895,6 +910,7 @@ class SketchLogicMixin:
         self._bake_sketch_solid(solid, "拉伸体")
 
     def _revolve_sketch(self) -> None:
+        """将草图轮廓绕指定轴旋转生成回转实体。"""
         loop_uv = self._sketch_closed_loop_uv()
         profile_uv: list[tuple[float, float]]
         if loop_uv and len(loop_uv) >= 3:
@@ -982,6 +998,7 @@ class SketchLogicMixin:
         points.Modified()
 
     def _bake_sketch_solid(self, poly_data: vtk.vtkPolyData, label: str) -> None:
+        """把草图生成的实体写入绘制几何对象列表。"""
         from foamdesk.ui.draw_geometry_tab import GeometryObject
 
         self._modeling_counter[label] = self._modeling_counter.get(label, 0) + 1

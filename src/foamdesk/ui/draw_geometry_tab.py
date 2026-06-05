@@ -36,6 +36,7 @@ class DrawGeometryLogicMixin:
     """Mixin providing all modeling logic methods for MainWindow."""
 
     def _init_modeling_state(self) -> None:
+        """初始化绘制几何页的模型对象、选择状态和 VTK 交互状态。"""
         if hasattr(self, "_modeling_viewport") and self._modeling_viewport is not None:
             for obj in self._modeling_objects:
                 self._remove_modeling_object_actors(obj)
@@ -61,6 +62,7 @@ class DrawGeometryLogicMixin:
             self._modeling_viewport.render()
 
     def _modeling_display_polydata(self, source):
+        """把不同 VTK source/数据对象统一转换成可显示的 polydata。"""
         if isinstance(source, vtk.vtkPolyData):
             source_poly_data = source
         else:
@@ -142,6 +144,7 @@ class DrawGeometryLogicMixin:
                 actor.SetVisibility(visible)
 
     def _apply_modeling_selection_styles(self) -> None:
+        """根据当前选中对象刷新颜色、高亮边线和可见状态。"""
         for index, obj in enumerate(self._modeling_objects):
             selected = index == self._modeling_selected_index
             surface_color = (1.0, 0.08, 0.04) if selected else (1.0, 0.82, 0.08)
@@ -170,6 +173,7 @@ class DrawGeometryLogicMixin:
         return str(Path(__file__).parent.parent.parent.parent / "config" / "modeling_state.json")
 
     def _save_modeling_state(self) -> None:
+        """保存当前 Case 的绘制几何对象列表和变换参数。"""
         import json
         data = []
         for obj_index, obj in enumerate(self._modeling_objects):
@@ -224,6 +228,7 @@ class DrawGeometryLogicMixin:
             pass
 
     def _load_modeling_state(self) -> None:
+        """加载当前 Case 之前保存的绘制几何对象。"""
         import json
         from pathlib import Path
         path = self._modeling_state_path()
@@ -269,6 +274,7 @@ class DrawGeometryLogicMixin:
             self._modeling_objects.append(obj)
 
     def _delete_selected(self) -> None:
+        """删除模型树中当前选中的几何对象或草图对象。"""
         if self._modeling_selected_index < 0 or self._modeling_selected_index >= len(self._modeling_objects):
             return
         obj = self._modeling_objects.pop(self._modeling_selected_index)
@@ -287,6 +293,8 @@ class DrawGeometryLogicMixin:
     # ------------------------------------------------------------------
 
     def _rebuild_tree(self) -> None:
+        if not hasattr(self, "_modeling_tree") or self._modeling_tree is None:
+            return
         tree = self._modeling_tree
         tree.blockSignals(True)
         tree.clear()
@@ -403,6 +411,7 @@ class DrawGeometryLogicMixin:
         self._set_modeling_status("选择模式：请在模型树中点击选择模型")
 
     def _finish_draw_geometry(self) -> None:
+        """完成绘制并把勾选对象导出为网格生成页可直接导入的缓存几何。"""
         if self._current_project is None:
             self._set_modeling_status("请先新建或打开项目")
             return
@@ -498,6 +507,7 @@ class DrawGeometryLogicMixin:
             pass
 
     def _transformed_object_polydata(self, obj: GeometryObject):
+        """返回应用平移、旋转、缩放后的对象 polydata。"""
         source_poly_data = obj.source if isinstance(obj.source, vtk.vtkPolyData) else obj.source.GetOutput()
         transform_filter = vtk.vtkTransformPolyDataFilter()
         transform_filter.SetInputData(source_poly_data)
@@ -515,6 +525,7 @@ class DrawGeometryLogicMixin:
         return clean.GetOutput()
 
     def _domain_face_assets_from_polydata(self, object_name: str, poly_data, cache_dir) -> list:
+        """将绘制出的计算域几何拆成多个边界面 asset。"""
         """Split a drawn domain into planar face assets for boundary editing.
 
         A closed cube-like domain should appear in Group 2 as one row per face,
@@ -551,6 +562,7 @@ class DrawGeometryLogicMixin:
         return assets
 
     def _split_polydata_by_planar_faces(self, poly_data) -> list[tuple[str, object]]:
+        """按近似平面法向把 polydata 拆成可配置的边界面。"""
         triangle = vtk.vtkTriangleFilter()
         triangle.SetInputData(poly_data)
         triangle.Update()
@@ -662,6 +674,7 @@ class DrawGeometryLogicMixin:
         return obj.source.GetOutput()
 
     def _replace_object_polydata(self, obj: GeometryObject, poly_data) -> None:
+        """用编辑后的 polydata 替换对象几何，并刷新显示和持久化状态。"""
         clean = vtk.vtkCleanPolyData()
         clean.SetInputData(poly_data)
         clean.Update()
@@ -695,6 +708,7 @@ class DrawGeometryLogicMixin:
         self._save_modeling_state_if_ready()
 
     def _install_interactive_edit_handlers(self) -> None:
+        """安装点/线/面交互编辑的鼠标事件处理器。"""
         if getattr(self, "_interactive_edit_handlers_installed", False):
             return
         if not hasattr(self, "_modeling_viewport") or self._modeling_viewport is None:
@@ -708,6 +722,7 @@ class DrawGeometryLogicMixin:
         self._interactive_edit_handlers_installed = True
 
     def _edit_selected_vertices(self, region_type: str) -> None:
+        """进入点、线或面编辑模式，并等待用户在 3D 视图中拾取区域。"""
         obj = self._selected_modeling_object()
         if obj is None:
             return
@@ -849,6 +864,7 @@ class DrawGeometryLogicMixin:
         return np.array(transform.TransformVector(delta_world), dtype=float)
 
     def _pick_selected_edit_ids(self, obj: GeometryObject, poly_data, cell_id: int, pick_world: np.ndarray) -> list[int]:
+        """根据拾取到的 cell 和编辑模式，计算需要被拖动的点 ID 集合。"""
         cell = poly_data.GetCell(cell_id)
         if cell is None:
             return []
@@ -870,6 +886,7 @@ class DrawGeometryLogicMixin:
         return [start_id, end_id]
 
     def _screen_drag_to_world_delta(self, obj: GeometryObject, start_pos: tuple[int, int], current_pos: tuple[int, int]) -> np.ndarray:
+        """把屏幕拖拽位移换算为三维世界坐标中的移动量。"""
         dx = float(current_pos[0] - start_pos[0])
         dy = float(current_pos[1] - start_pos[1])
         renderer = self._modeling_viewport._renderer
@@ -965,6 +982,7 @@ class DrawGeometryLogicMixin:
         self._modeling_viewport.render()
 
     def _apply_edit_delta_to_polydata(self, poly_data, base_points, selected_ids: list[int], delta_local: np.ndarray) -> None:
+        """把拖拽增量应用到被选中的点，形成点/线/面局部变形。"""
         points = vtk.vtkPoints()
         selected = set(selected_ids)
         for point_id, point in enumerate(base_points):
@@ -1022,6 +1040,7 @@ class DrawGeometryLogicMixin:
         return clean.GetOutput()
 
     def _boolean_selected(self, operation: str) -> None:
+        """对选中的两个实体执行布尔并集、差集或交集运算。"""
         target = self._selected_modeling_object()
         if target is None:
             return
@@ -1085,6 +1104,8 @@ class DrawGeometryLogicMixin:
     # ------------------------------------------------------------------
 
     def _load_properties(self) -> None:
+        if not hasattr(self, "_modeling_prop_name"):
+            return
         if self._modeling_selected_index < 0:
             return
         obj = self._modeling_objects[self._modeling_selected_index]
@@ -1139,6 +1160,7 @@ class DrawGeometryLogicMixin:
         self._save_modeling_state_if_ready()
 
     def _apply_transform(self, obj: GeometryObject) -> None:
+        """把属性面板中的位置、旋转、缩放参数应用到对象 actor。"""
         transform = vtk.vtkTransform()
         transform.Translate(obj.position[0], obj.position[1], obj.position[2])
         transform.RotateX(obj.rotation[0])
@@ -1148,7 +1170,8 @@ class DrawGeometryLogicMixin:
         for actor in (obj.actor, obj.wire_actor, obj.point_actor):
             if actor is not None:
                 actor.SetUserTransform(transform)
-        self._modeling_viewport.render()
+        if hasattr(self, "_modeling_viewport") and self._modeling_viewport is not None:
+            self._modeling_viewport.render()
 
     def _on_color_pick(self) -> None:
         if self._modeling_selected_index < 0:
@@ -1174,6 +1197,8 @@ class DrawGeometryLogicMixin:
     # ------------------------------------------------------------------
 
     def _set_property_enabled(self, enabled: bool) -> None:
+        if not hasattr(self, "_modeling_prop_name"):
+            return
         for w in (
             self._modeling_prop_name,
             self._modeling_prop_pos_x, self._modeling_prop_pos_y, self._modeling_prop_pos_z,
@@ -1194,6 +1219,8 @@ class DrawGeometryLogicMixin:
         self._save_modeling_state_if_ready()
 
     def _block_prop_signals(self, block: bool) -> None:
+        if not hasattr(self, "_modeling_prop_pos_x"):
+            return
         for w in (
             self._modeling_prop_pos_x, self._modeling_prop_pos_y, self._modeling_prop_pos_z,
             self._modeling_prop_rot_x, self._modeling_prop_rot_y, self._modeling_prop_rot_z,
@@ -1202,6 +1229,8 @@ class DrawGeometryLogicMixin:
             w.blockSignals(block)
 
     def _set_modeling_status(self, msg: str) -> None:
+        if not hasattr(self, "_modeling_status_label"):
+            return
         self._modeling_status_label.setText(msg)
 
     # ------------------------------------------------------------------

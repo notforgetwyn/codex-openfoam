@@ -57,13 +57,13 @@ from foamdesk.ui import domain_templates
 
 class MainWindow(GeometryLogicMixin, ResultsLogicMixin, SettingsPhysicsLogicMixin, ProjectProcessLogicMixin, DrawGeometryLogicMixin, SketchLogicMixin, QMainWindow):
     TAB_PROJECT_HOME = 0
-    TAB_DRAW_GEOMETRY = 1
-    TAB_MESH_GENERATION = 2
-    TAB_SIMULATION_CONFIG = 3
-    TAB_SOLVER_RUN = 4
-    TAB_ENVIRONMENT = 5
-    TAB_SETTINGS = 6
-    TAB_RESULTS = 7
+    TAB_DRAW_GEOMETRY = -1
+    TAB_MESH_GENERATION = 1
+    TAB_SIMULATION_CONFIG = 2
+    TAB_SOLVER_RUN = 3
+    TAB_ENVIRONMENT = 4
+    TAB_SETTINGS = 5
+    TAB_RESULTS = 6
     RESULT_FIELDS = [
         "U",
         "p",
@@ -122,10 +122,11 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, SettingsPhysicsLogicMixi
         self._init_modeling_state()
         self._init_sketch_state()
         self._build_ui()
-        for obj in self._modeling_objects:
-            self._add_modeling_object_actors(obj)
-            self._apply_transform(obj)
-        self._rebuild_tree()
+        if hasattr(self, "_modeling_viewport") and self._modeling_viewport is not None:
+            for obj in self._modeling_objects:
+                self._add_modeling_object_actors(obj)
+                self._apply_transform(obj)
+            self._rebuild_tree()
         self._apply_settings_theme()
         self._refresh_status_bar()
         if initial_project is not None:
@@ -264,8 +265,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, SettingsPhysicsLogicMixi
         self._workspace_tabs.setDocumentMode(True)
         self._workspace_tabs.setTabsClosable(False)
         self._workspace_tabs.addTab(self._build_project_home_tab(), "项目主页")
-        self._workspace_tabs.addTab(self._build_draw_geometry_tab(), "绘制几何")
-        self._workspace_tabs.addTab(self._build_mesh_generation_tab(), "网格生成")
+        self._workspace_tabs.addTab(self._build_mesh_generation_tab(), "几何导入与网格生成")
         self._workspace_tabs.addTab(self._build_simulation_config_tab(), "仿真参数配置")
         self._workspace_tabs.addTab(self._build_solver_run_tab(), "求解运行")
         self._workspace_tabs.addTab(self._build_environment_tab(), "环境检查")
@@ -276,10 +276,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, SettingsPhysicsLogicMixi
         return container
 
     def _on_workspace_tab_changed(self, index: int) -> None:
-        if index == self.TAB_DRAW_GEOMETRY:
-            self._init_sketch_state()
-            self._init_modeling_state()
-        elif index == self.TAB_MESH_GENERATION:
+        if index == self.TAB_MESH_GENERATION:
             self._init_mesh_import_state()
             self._load_mesh_workflow_state()
         elif index == self.TAB_SIMULATION_CONFIG:
@@ -1136,6 +1133,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, SettingsPhysicsLogicMixi
         is_piso = solver in {"pisoFoam", "icoFoam"}
         is_pimple = solver in {"pimpleFoam", "rhoPimpleFoam"}
         is_compressible = solver in {"rhoSimpleFoam", "rhoPimpleFoam"}
+        simple_pressure_correctors = "1"
         outer_correctors = "1" if is_simple else ncorrectors
         extra_solvers = ""
         if is_compressible:
@@ -1164,7 +1162,7 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, SettingsPhysicsLogicMixi
                 "PIMPLE\n"
                 "{\n"
                 "    nOuterCorrectors 1;\n"
-                f"    nCorrectors      {ncorrectors};\n"
+                f"    nCorrectors      {simple_pressure_correctors};\n"
                 "    nNonOrthogonalCorrectors 0;\n"
                 "    momentumPredictor yes;\n"
                 "    pRefCell         0;\n"
@@ -2251,8 +2249,14 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, SettingsPhysicsLogicMixi
         if solver not in {"simpleFoam", "rhoSimpleFoam", "pimpleFoam", "rhoPimpleFoam"}:
             return
         fv_solution = case_dir / "system" / "fvSolution"
-        if fv_solution.exists() and "PIMPLE" in fv_solution.read_text(encoding="utf-8", errors="replace"):
-            return
+        if fv_solution.exists():
+            content = fv_solution.read_text(encoding="utf-8", errors="replace")
+            if solver in {"simpleFoam", "rhoSimpleFoam"} and "PIMPLE" in content:
+                import re
+                if re.search(r"\bnCorrectors\s+1\s*;", content):
+                    return
+            elif "PIMPLE" in content:
+                return
         key = self._cfg_fv_solution.currentData() if hasattr(self, "_cfg_fv_solution") else "default"
         residual = self._cfg_residual.text().strip() if hasattr(self, "_cfg_residual") else "1e-6"
         relaxation = self._cfg_relaxation.text().strip() if hasattr(self, "_cfg_relaxation") else "0.7"
@@ -2414,6 +2418,32 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, SettingsPhysicsLogicMixi
             self._redraw_residuals()
         self._save_solver_run_state()
 
+    def _residual_display_series(self, key: str, values: list[float], all_data: dict) -> list[float]:
+        """把同一时间步内多次压力校正残差压成一个显示点。
+
+        foamRun/incompressibleFluid 一步内可能输出多次 p 残差，直接串起来会形成
+        “一高一低”的锯齿。绘图时按速度场长度估计时间步数，并取每组最后一次
+        校正残差；原始日志和 residual_data.json 仍保留完整数据。
+        """
+        if not values:
+            return []
+        reference_lengths = [
+            len(series)
+            for field, series in all_data.items()
+            if field not in {"iter", key} and isinstance(series, list) and series
+        ]
+        reference_len = max(reference_lengths, default=0)
+        if reference_len <= 0 or len(values) <= reference_len * 1.35:
+            return values
+        compressed: list[float] = []
+        ratio = len(values) / reference_len
+        for index in range(reference_len):
+            start = int(round(index * ratio))
+            end = int(round((index + 1) * ratio))
+            group = values[start:max(start + 1, end)]
+            compressed.append(float(group[-1]))
+        return compressed
+
     def _redraw_residuals(self, save: bool = True) -> None:
         self._cfg_residual_axes.clear()
         self._cfg_residual_axes.set_facecolor("#1e1e1e")
@@ -2427,8 +2457,9 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, SettingsPhysicsLogicMixi
         for index, key in enumerate(fields):
             data = self._residual_data.get(key, [])
             if data:
-                iters = list(range(1, len(data) + 1))
-                self._cfg_residual_axes.plot(iters, data, color=palette[index % len(palette)], linewidth=1.5, label=key)
+                display_data = self._residual_display_series(key, data, self._residual_data)
+                iters = list(range(1, len(display_data) + 1))
+                self._cfg_residual_axes.plot(iters, display_data, color=palette[index % len(palette)], linewidth=1.5, label=key)
         self._cfg_residual_axes.set_yscale("log")
         self._cfg_residual_axes.grid(True, alpha=0.2, color="#2d2d30")
         if any(data for data in self._residual_data.values() if isinstance(data, list) and data):
@@ -2684,9 +2715,10 @@ class MainWindow(GeometryLogicMixin, ResultsLogicMixin, SettingsPhysicsLogicMixi
         for index, key in enumerate(fields):
             vals = data.get(key, [])
             if vals:
+                display_vals = self._residual_display_series(key, vals, data)
                 self._results_residual_axes.plot(
-                    list(range(1, len(vals) + 1)),
-                    vals,
+                    list(range(1, len(display_vals) + 1)),
+                    display_vals,
                     color=palette[index % len(palette)],
                     linewidth=1.5,
                     label=key,

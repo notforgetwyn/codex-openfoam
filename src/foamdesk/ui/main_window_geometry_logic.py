@@ -47,6 +47,7 @@ class GeometryLogicMixin:
 
 
     def _refresh_geometry_panel(self) -> None:
+        """刷新几何清单、预览图和网格生成相关状态。"""
         if self._current_project is None:
             return
         if hasattr(self, "_mesh_grid_vtk") and hasattr(self, "_mesh_imports"):
@@ -77,6 +78,28 @@ class GeometryLogicMixin:
         self._last_checkmesh_output: str = ""
         self._highlighted_domain_face: int = -1
         self._mesh_preview_force_reset_camera: bool = True
+        self._mesh_workflow_empty: bool = True
+
+    def _reset_mesh_workflow_ui(self) -> None:
+        """清空当前 Case 的网格生成页状态，避免新建空 Case 显示上一个 Case 的残留。"""
+        self._mesh_imports = []
+        self._mesh_import_selected_index = -1
+        self._cad_domain_imports = []
+        self._highlighted_domain_face = -1
+        self._mesh_preview_force_reset_camera = True
+        self._mesh_workflow_empty = True
+        if hasattr(self, "_mesh_import_combo"):
+            self._rebuild_mesh_import_combo()
+        if hasattr(self, "_cad_domain_file_table"):
+            self._rebuild_cad_domain_file_list()
+        if hasattr(self, "_domain_face_table"):
+            self._domain_face_table.blockSignals(True)
+            self._domain_face_table.setRowCount(0)
+            self._domain_face_table.blockSignals(False)
+        if hasattr(self, "_cad_domain_status_label"):
+            self._update_cad_domain_status()
+        if hasattr(self, "_mesh_grid_vtk"):
+            self._mesh_grid_vtk.clear()
 
     def _import_geometry_file(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
@@ -97,6 +120,7 @@ class GeometryLogicMixin:
                 continue
             asset = MeshImportAsset(name=name, source_path=source_path, polydata=polydata)
             self._mesh_imports.append(asset)
+        self._mesh_workflow_empty = False
         self._rebuild_mesh_import_combo()
         self._auto_fill_domain_bounds()
         self._redraw_mesh_grid_vtk()
@@ -204,6 +228,7 @@ class GeometryLogicMixin:
 
 
     def _load_stl_asset(self, source_path: Path, color: tuple[float, float, float] | None = None) -> MeshImportAsset | None:
+        """读取 STL 文件并转换成可在网格页面管理的导入对象。"""
         reader = vtkSTLReader()
         reader.SetFileName(str(source_path))
         reader.Update()
@@ -220,6 +245,11 @@ class GeometryLogicMixin:
         )
 
     def _split_ascii_stl_asset_by_solids(self, asset: MeshImportAsset) -> list[MeshImportAsset]:
+        """按 ASCII STL 内部的 solid/end solid 分段拆分 patch。
+
+        用于一个 STL 文件里同时包含 inlet、outlet、wall 等多个 solid 的情况，
+        拆分后边界配置表可以逐个 patch 设置边界类型和物理量。
+        """
         """Split an ASCII STL by `solid name` blocks before geometric guessing.
 
         This supports one file such as:
@@ -315,6 +345,7 @@ class GeometryLogicMixin:
         return assets
 
     def _safe_openfoam_patch_name(self, name: str) -> str:
+        """把任意文件名/solid 名转换成 OpenFOAM 可接受的 patch 名称。"""
         import re
         cleaned = re.sub(r"[^A-Za-z0-9_]+", "_", (name or "").strip())
         cleaned = cleaned.strip("_")
@@ -325,6 +356,7 @@ class GeometryLogicMixin:
         return cleaned
 
     def _split_stl_asset_by_connected_regions(self, asset: MeshImportAsset) -> list[MeshImportAsset]:
+        """按不连通三角面区域拆分 STL，作为没有 solid 名称时的兜底方案。"""
         """Split one STL into CAD-domain boundary rows.
 
         Priority:
@@ -367,6 +399,7 @@ class GeometryLogicMixin:
         return parts
 
     def _infer_cad_domain_part_names(self, parts: list[MeshImportAsset], base_name: str) -> None:
+        """根据文件名、solid 名或区域顺序推断 inlet/outlet/wall 名称。"""
         bounds = [part.polydata.GetBounds() for part in parts]
         valid = [b for b in bounds if b and all(np.isfinite(b))]
         if len(valid) < 3:
@@ -398,6 +431,7 @@ class GeometryLogicMixin:
                 part.name = "wall" if wall_count == 1 else f"wall_{wall_count}"
 
     def _import_cad_domain_files(self) -> None:
+        """导入 CAD 计算域 STL，并拆成可配置的边界 patch 行。"""
         paths, _ = QFileDialog.getOpenFileNames(
             self,
             "导入计算域 STL 几何体",
@@ -542,6 +576,7 @@ class GeometryLogicMixin:
         return "wall"
 
     def _cad_domain_faces_from_assets(self) -> list[dict]:
+        """把已导入的 CAD 计算域 patch 转换成边界配置表数据。"""
         return [
             {"label": a.name, "name": a.name, "type": self._cad_domain_patch_type(a.name)}
             for a in self._cad_domain_imports
@@ -559,6 +594,7 @@ class GeometryLogicMixin:
         return defaults
 
     def _cad_domain_transform(self) -> vtk.vtkTransform:
+        """根据 UI 中的平移、旋转、缩放参数构造计算域变换矩阵。"""
         vals = self._cad_domain_transform_values()
         tf = vtk.vtkTransform()
         tf.PostMultiply()
@@ -570,6 +606,7 @@ class GeometryLogicMixin:
         return tf
 
     def _transformed_cad_domain_polydata(self, asset: MeshImportAsset):
+        """返回应用当前变换后的计算域 patch 几何，用于预览和包围检测。"""
         flt = vtk.vtkTransformPolyDataFilter()
         flt.SetInputData(asset.polydata)
         flt.SetTransform(self._cad_domain_transform())
@@ -579,6 +616,7 @@ class GeometryLogicMixin:
         return out
 
     def _cad_domain_has_duplicate_surfaces(self) -> bool:
+        """检查计算域 STL patch 是否存在重复/重叠面，避免 snappyHexMesh 崩溃。"""
         names: set[str] = set()
         for asset in self._cad_domain_imports:
             name = self._safe_openfoam_patch_name(asset.name)
@@ -617,6 +655,7 @@ class GeometryLogicMixin:
         )
 
     def _update_cad_domain_status(self) -> None:
+        """根据计算域和障碍物包围关系更新状态提示。"""
         if not hasattr(self, "_cad_domain_status_label"):
             return
         if not self._cad_domain_imports:
@@ -666,6 +705,7 @@ class GeometryLogicMixin:
         )
 
     def _point_inside_polydata(self, point, polydata) -> bool | None:
+        """判断点是否在封闭三角面内部，用于 locationInMesh 自动推荐。"""
         if polydata is None or polydata.GetNumberOfPoints() == 0 or polydata.GetNumberOfPolys() == 0:
             return None
         points = vtk.vtkPoints()
@@ -683,6 +723,7 @@ class GeometryLogicMixin:
         return bool(selector.IsInside(0))
 
     def _combined_cad_domain_surface(self):
+        """合并所有 CAD 计算域 patch，形成一个完整封闭外边界。"""
         if not self._cad_domain_imports:
             return None
         append = vtk.vtkAppendPolyData()
@@ -701,6 +742,7 @@ class GeometryLogicMixin:
         return clean.GetOutput()
 
     def _point_inside_cad_domain(self, point, domain_surface=None) -> bool:
+        """判断候选点是否位于计算域内部。"""
         domain_bbox = self._cad_domain_bounds()
         if domain_bbox is None or not self._point_inside_bbox(point, domain_bbox):
             return False
@@ -711,6 +753,7 @@ class GeometryLogicMixin:
         return inside_surface
 
     def _point_inside_any_obstacle(self, point) -> bool:
+        """判断候选点是否落入障碍物内部，避免 locationInMesh 写错位置。"""
         for asset in self._mesh_imports:
             bounds = asset.polydata.GetBounds()
             if bounds and all(np.isfinite(bounds)) and not self._point_inside_bbox(point, bounds):
@@ -751,6 +794,7 @@ class GeometryLogicMixin:
         return candidates
 
     def _auto_location_candidate(self) -> tuple[float, float, float] | None:
+        """自动寻找 locationInMesh：必须在计算域内，并且不在障碍物内部。"""
         domain_bbox = self._cad_domain_bounds()
         if domain_bbox is None:
             return None
@@ -764,6 +808,7 @@ class GeometryLogicMixin:
         return None
 
     def _auto_recommend_location_in_mesh(self, _checked: bool = False, update_view: bool = True) -> None:
+        """把自动计算得到的 locationInMesh 写回界面并刷新预览。"""
         point = self._auto_location_candidate()
         if point is None:
             if update_view:
@@ -785,6 +830,7 @@ class GeometryLogicMixin:
             self._redraw_mesh_grid_vtk()
 
     def _auto_wrap_cad_domain_around_obstacles(self) -> None:
+        """自动平移/缩放计算域，使其能够包住当前障碍物。"""
         domain_bbox = self._cad_domain_bounds()
         obstacle_bbox = self._domain_geom_bbox()
         if domain_bbox is None or obstacle_bbox is None:
@@ -836,6 +882,7 @@ class GeometryLogicMixin:
         self._redraw_mesh_grid_vtk()
 
     def _redraw_mesh_grid_vtk(self) -> None:
+        """重绘网格生成页的 3D 预览，包括计算域、障碍物和 locationInMesh 标记。"""
         canvas = self._mesh_grid_vtk
         if hasattr(canvas, "ensure_interaction_enabled"):
             canvas.ensure_interaction_enabled()
@@ -884,6 +931,12 @@ class GeometryLogicMixin:
         if not hasattr(self, "_domain_face_table"):
             return
         table = self._domain_face_table
+        if getattr(self, "_mesh_workflow_empty", False) and not self._mesh_imports and not self._cad_domain_imports:
+            table.blockSignals(True)
+            table.setRowCount(0)
+            table.blockSignals(False)
+            self._highlighted_domain_face = -1
+            return
         previous_faces = []
         if table.rowCount() > 0:
             try:
@@ -952,11 +1005,14 @@ class GeometryLogicMixin:
             self._highlighted_domain_face = 0
         else:
             self._highlighted_domain_face = -1
-        try:
-            table.selectionModel().selectionChanged.disconnect(
-                self._on_domain_face_selection_changed)
-        except (TypeError, RuntimeError):
-            pass
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            try:
+                table.selectionModel().selectionChanged.disconnect(
+                    self._on_domain_face_selection_changed)
+            except (TypeError, RuntimeError):
+                pass
         table.selectionModel().selectionChanged.connect(
             self._on_domain_face_selection_changed)
 
@@ -968,6 +1024,7 @@ class GeometryLogicMixin:
         self._redraw_mesh_grid_vtk()
 
     def _get_domain_face_definitions(self) -> list[dict]:
+        """读取边界表中每一行的 patch 名称、类型、U/p 和加密级别。"""
         """Return {label, name, type, u_value, p_value, visible, refinement_level}."""
         template_faces = self._current_template_faces()
         if not hasattr(self, "_domain_face_table"):
@@ -1208,6 +1265,7 @@ class GeometryLogicMixin:
         return vector
 
     def _draw_domain_face_velocity_arrows(self, canvas: NativeVtkPreviewWidget, face_corners: np.ndarray, face_def: dict) -> None:
+        """在被选中的边界面上绘制速度箭头；速度为 0 时不显示。"""
         velocity = self._parse_velocity_vector_value(str(face_def.get("u_value", "")))
         if velocity is None:
             return
@@ -1402,6 +1460,7 @@ class GeometryLogicMixin:
                 self._draw_domain_face_velocity_arrows(canvas, face_corners, face_def)
 
     def _write_multi_solid_stl(self, dest: Path, regions: list[tuple[str, object]]) -> None:
+        """把多个 patch 面写入同一个多 solid STL 文件。"""
         """Write transformed CAD-domain patches as one ASCII STL with named solids."""
         def _fmt(v: float) -> str:
             return f"{float(v):.9g}"
@@ -1471,6 +1530,7 @@ class GeometryLogicMixin:
     # ── Group 6 button bar handlers ─────────────────────────
 
     def _on_generate_and_execute(self) -> None:
+        """生成 blockMesh/snappyHexMesh 字典并启动网格流水线。"""
         if not self._mesh_imports and not self._cad_domain_imports:
             self._show_error("请先在组1中导入障碍物，或在组2中导入计算域几何体。")
             return
@@ -1696,6 +1756,7 @@ class GeometryLogicMixin:
         return True
 
     def _clean_case_for_mesh_regeneration(self, case_dir: Path) -> None:
+        """重新生成网格前清理旧 polyMesh、VTK 和时间步结果，避免新旧数据混杂。"""
         root = case_dir.resolve()
 
         def remove_inside(path: Path) -> None:
@@ -1723,6 +1784,7 @@ class GeometryLogicMixin:
         self._append_log("已清理旧网格、旧时间步和后处理缓存，准备重新生成网格。")
 
     def _run_mesh_pipeline_command(self) -> None:
+        """按 OpenFOAM 环境启动 blockMesh/snappyHexMesh/checkMesh 网格流水线。"""
         env_script = self._context.settings_service.load().openfoam_env_script or ""
         case_dir = self._current_project.case_dir
         try:
@@ -1796,6 +1858,7 @@ class GeometryLogicMixin:
         self._set_status("网格预览已加载。")
 
     def _read_openfoam_polymesh(self, mesh_dir: Path):
+        """直接读取 constant/polyMesh 中的 points/faces/boundary，用于网格预览。"""
         points_path = mesh_dir / "points"
         faces_path = mesh_dir / "faces"
         vtk_points = vtk.vtkPoints()
@@ -1907,6 +1970,7 @@ class GeometryLogicMixin:
         return self._current_project.case_dir / "system" / "mesh_workflow.json"
 
     def _save_mesh_workflow_state(self) -> None:
+        """保存当前网格生成页参数，保证切换 Case 后可以恢复。"""
         sp = self._mesh_workflow_state_path()
         if sp is None:
             return
@@ -1948,13 +2012,18 @@ class GeometryLogicMixin:
         sp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _load_mesh_workflow_state(self) -> None:
+        """加载当前 Case 的网格生成页状态，并刷新边界表和 3D 预览。"""
         sp = self._mesh_workflow_state_path()
         if sp is None or not sp.exists():
+            self._reset_mesh_workflow_ui()
             return
         try:
             payload = json.loads(sp.read_text(encoding="utf-8"))
         except (OSError, ValueError):
+            self._reset_mesh_workflow_ui()
             return
+        self._reset_mesh_workflow_ui()
+        self._mesh_workflow_empty = False
         # restore domain template selection FIRST (face table depends on it)
         template_key = payload.get("domain_template", "box")
         if template_key not in domain_templates.DOMAIN_TEMPLATES:

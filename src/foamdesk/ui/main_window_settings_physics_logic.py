@@ -7,6 +7,7 @@ from foamdesk.ui.theme import THEMES, build_stylesheet
 
 class SettingsPhysicsLogicMixin:
     def _apply_settings_theme(self) -> None:
+        """根据设置页选择的主题重新应用全局样式。"""
         settings = self._context.settings_service.load()
         self._theme_index = self._theme_names.index(settings.theme_name)
         self.setStyleSheet(
@@ -47,6 +48,7 @@ class SettingsPhysicsLogicMixin:
         self._set_status(f"主题已切换为 {theme_name}。")
 
     def _save_settings(self) -> None:
+        """保存主题、背景色、工作区和 OpenFOAM 环境脚本路径。"""
         background_color = self._background_color_input.text().strip() or "#1e1e1e"
         env_script = self._env_script_input.text().strip() or None
         settings = self._context.settings_service.load()
@@ -71,6 +73,7 @@ class SettingsPhysicsLogicMixin:
         self._refresh_environment_panels(status)
 
     def _refresh_environment_panels(self, status=None) -> None:
+        """检测 OpenFOAM 环境，并把结果同步到环境检查面板。"""
         if status is None or isinstance(status, bool):
             status = self._context.environment_detector.detect()
         status_flag = "可用" if status.is_available else "不可用"

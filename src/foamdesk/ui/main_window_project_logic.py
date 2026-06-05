@@ -11,6 +11,7 @@ from foamdesk.ui.startup_window import StartupWindow
 
 class ProjectProcessLogicMixin:
     def _before_project_change(self) -> None:
+        """切换项目/Case 前保存当前页面状态，避免数据串到下一个 Case。"""
         if getattr(self, "_current_project", None) is None:
             return
         if hasattr(self, "_save_modeling_state_if_ready"):
@@ -60,6 +61,7 @@ class ProjectProcessLogicMixin:
         self._set_status("项目打开完成。")
 
     def _activate_project(self, project: SimulationProject, status_text: str) -> None:
+        """激活指定项目或 Case，并刷新所有依赖当前 Case 的页面状态。"""
         self._before_project_change()
         self._current_project = project
         self._clear_case_runtime_state()
@@ -81,6 +83,7 @@ class ProjectProcessLogicMixin:
         self._on_workspace_tab_changed(current_idx)
 
     def _refresh_project_home_summary(self) -> None:
+        """汇总当前 Case 的关键文件、几何、网格和结果字段状态。"""
         if not hasattr(self, "_project_home_summary"):
             return
         if self._current_project is None:
@@ -186,6 +189,7 @@ class ProjectProcessLogicMixin:
             return -1.0
 
     def _clear_case_runtime_state(self) -> None:
+        """清空只属于旧 Case 的运行缓存和诊断摘要。"""
         self._current_process_output = ""
         self._last_diagnostic_summary = "暂无诊断。"
         if hasattr(self, "_solver_metric_summary"):
@@ -194,6 +198,7 @@ class ProjectProcessLogicMixin:
             self._solver_diagnostic_text.setPlainText("最近诊断：\n暂无诊断。")
 
     def _create_case(self) -> None:
+        """在当前项目下创建新 Case，并立即切换过去。"""
         if self._current_project is None:
             self._show_error("请先选择项目。")
             return
@@ -209,6 +214,7 @@ class ProjectProcessLogicMixin:
         self._append_log(f"已创建 Case：{project.case_dir}")
 
     def _delete_case(self) -> None:
+        """删除当前 Case，并自动回退到同项目下其它 Case。"""
         if self._current_project is None:
             self._show_error("请先选择项目。")
             return
@@ -273,6 +279,7 @@ class ProjectProcessLogicMixin:
             app.setQuitOnLastWindowClosed(old_quit_on_close)
 
     def _restore_project_result_state(self) -> None:
+        """切换 Case 后读取已有结果索引，刷新底部任务状态。"""
         if self._current_project is None:
             return
         try:
@@ -299,6 +306,7 @@ class ProjectProcessLogicMixin:
         self._task_text.setPlainText("\n".join(lines))
 
     def _refresh_project_tree(self) -> None:
+        """刷新左侧 Case 树，只显示当前项目下的 Case。"""
         if not hasattr(self, "_project_tree"):
             return
         self._project_tree.clear()
@@ -320,6 +328,7 @@ class ProjectProcessLogicMixin:
         self._project_tree.expandAll()
 
     def _on_project_tree_item_clicked(self, item: QTreeWidgetItem) -> None:
+        """响应 Case 树点击事件，切换到用户选中的 Case。"""
         case_name = item.data(0, Qt.ItemDataRole.UserRole)
         if not case_name or self._current_project is None:
             return

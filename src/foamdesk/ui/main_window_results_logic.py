@@ -13,6 +13,13 @@ from foamdesk.ui.visualization_widgets import NativeVtkViewerDialog
 
 class ResultsLogicMixin:
     def _refresh_result_field_panel(self, show_errors: bool = True) -> None:
+        """刷新结果页字段列表。
+
+        逻辑分段：
+        1. 检查当前 Case 是否存在以及是否已经生成 polyMesh。
+        2. 通过 VTK 读取当前 Case 可用的点字段/单元字段。
+        3. 将支持的变量、时间步、单位和最大最小值同步回界面。
+        """
         if not hasattr(self, "_result_field_combo"):
             return
         self._result_time_combo.clear()
@@ -84,6 +91,7 @@ class ResultsLogicMixin:
         self._result_display_combo.blockSignals(False)
 
     def _update_result_field_metadata(self) -> None:
+        """更新当前结果变量的单位和数值范围说明。"""
         if not hasattr(self, "_result_field_combo"):
             return
         field_name = self._result_field_combo.currentText().strip()
@@ -107,6 +115,7 @@ class ResultsLogicMixin:
         )
 
     def _load_selected_result_display(self) -> None:
+        """根据用户选择的变量和显示方式加载 3D 后处理视图。"""
         if self._current_project is None:
             self._show_error("请先新建或打开项目。")
             return
@@ -228,6 +237,13 @@ class ResultsLogicMixin:
         mode: str,
         color_range: tuple[float, float],
     ) -> None:
+        """分发不同类型的结果场显示逻辑。
+
+        逻辑分段：
+        1. 保证原生 VTK 结果窗口存在，并传入 inlet/outlet 标签位置。
+        2. 对云图、切片、等值线、流线分别调用对应的绘制函数。
+        3. 每种显示方式完成后写入日志，方便用户确认当前加载的字段和时间步。
+        """
         # ensure viewer exists before passing inlet/outlet positions
         self._ensure_native_vtk_viewer()
         io_positions = self._compute_inlet_outlet_positions()
@@ -337,6 +353,7 @@ class ResultsLogicMixin:
         self._show_error(f"{mode} 已放入界面结构，但 VTK 专项实现还未接入。")
 
     def _ensure_point_field(self, output, field_array, storage: str):
+        """把单元字段转换为点字段，保证云图和切片可以按点插值显示。"""
         if storage == "point":
             return output, field_array
         array_name = field_array.GetName()
@@ -351,6 +368,7 @@ class ResultsLogicMixin:
         return converted_output, converted_array
 
     def _configure_result_animation_source(self) -> None:
+        """把结果时间步注册成动画帧，播放时按时间步重新加载当前显示方式。"""
         if not hasattr(self, "_result_time_combo"):
             return
         if self._native_vtk_viewer is None:
@@ -378,6 +396,7 @@ class ResultsLogicMixin:
         self._native_vtk_viewer.set_animation_source(frame_count, render_frame)
 
     def _load_result_field_data(self):
+        """读取当前 Case、当前时间步、当前变量对应的 VTK 几何和字段数组。"""
         if self._current_project is None:
             raise RuntimeError("未选择项目")
         if not self._result_mesh_available():
@@ -410,6 +429,7 @@ class ResultsLogicMixin:
         return self._lookup_result_array(data_object, field_name, display_map.get(field_name, field_name))
 
     def _lookup_result_array(self, data_object, array_name: str, display_name: str):
+        """在点数据和单元数据中查找字段，并返回它的存储位置。"""
         array = data_object.GetPointData().GetArray(array_name)
         storage = "point"
         if array is None:
@@ -442,6 +462,10 @@ class ResultsLogicMixin:
         return (vmin, vmax)
 
     def _scalar_values(self, field_array) -> np.ndarray:
+        """把标量/矢量字段统一转换成一维数值数组。
+
+        矢量字段如 U 会取模长，用于色标范围、最大最小值和云图着色。
+        """
         values = vtk_to_numpy(field_array)
         if values.ndim == 1:
             return values.astype(float)
@@ -470,13 +494,15 @@ class ResultsLogicMixin:
 
         # ── 1. 读取体网格与流场数据 (Plan.md 第22-37行) ──
         grid_data = None
+        volume_file: Path | None = None
         # try XML .vtu first
         volumes_dir = vtk_dir / "volumes"
         if volumes_dir.exists():
             vtu_files = sorted(volumes_dir.glob("*.vtu"))
             if vtu_files:
                 vtu_reader = vtk.vtkXMLUnstructuredGridReader()
-                vtu_reader.SetFileName(str(vtu_files[-1]))
+                volume_file = vtu_files[-1]
+                vtu_reader.SetFileName(str(volume_file))
                 vtu_reader.Update()
                 grid_data = vtu_reader.GetOutput()
         # fallback: legacy .vtk
@@ -485,7 +511,8 @@ class ResultsLogicMixin:
             if not vtk_files:
                 raise RuntimeError(f"{vtk_dir} 中没有 .vtu 或 .vtk 体网格文件")
             legacy_reader = vtk.vtkUnstructuredGridReader()
-            legacy_reader.SetFileName(str(vtk_files[-1]))
+            volume_file = vtk_files[-1]
+            legacy_reader.SetFileName(str(volume_file))
             legacy_reader.Update()
             grid_data = legacy_reader.GetOutput()
         if grid_data is None or grid_data.GetNumberOfPoints() == 0:
@@ -548,29 +575,45 @@ class ResultsLogicMixin:
             raise RuntimeError(f"{seed_label} 没有生成下游方向有效流线，请确认速度场结果和边界面存在。")
 
         # ── 4. 速度大小着色 (Plan.md 第77-85行: 优先 VelocityMagnitude, fallback |U|) ──
-        speed_range = (0.0, 1.0)
-        vel_mag = stream_lines.GetPointData().GetArray("VelocityMagnitude")
-        if vel_mag is not None:
-            rng = vel_mag.GetRange()
-            speed_range = (float(rng[0]), float(rng[1]))
-        else:
-            u_array = stream_lines.GetPointData().GetArray("U")
-            if u_array is not None:
-                vecs = vtk_to_numpy(u_array)
-                if vecs.ndim == 2 and vecs.shape[1] >= 3:
-                    speeds = np.linalg.norm(vecs[:, :3], axis=1)
-                else:
-                    speeds = np.abs(vecs.astype(float))
-                smin, smax = float(speeds.min()), float(speeds.max())
-                speed_array = numpy_to_vtk(speeds.astype(float), deep=True)
-                speed_array.SetName("U_mag")
-                stream_lines.GetPointData().AddArray(speed_array)
-                stream_lines.GetPointData().SetActiveScalars("U_mag")
-                speed_range = (smin, smax)
+        speed_range = self._streamline_speed_range(stream_lines)
 
         return stream_lines, grid_data, seed_label, seed_count, speed_range
 
+    def _streamline_speed_range(self, stream_lines) -> tuple[float, float]:
+        """确保流线有 |U| 标量并返回色标范围。"""
+        if stream_lines is None or stream_lines.GetNumberOfPoints() == 0:
+            return (0.0, 1.0)
+        vel_mag = stream_lines.GetPointData().GetArray("VelocityMagnitude")
+        if vel_mag is not None:
+            rng = vel_mag.GetRange()
+            return (float(rng[0]), float(rng[1]))
+        speed_array = stream_lines.GetPointData().GetArray("U_mag")
+        if speed_array is not None:
+            stream_lines.GetPointData().SetActiveScalars("U_mag")
+            rng = speed_array.GetRange()
+            return (float(rng[0]), float(rng[1]))
+        u_array = stream_lines.GetPointData().GetArray("U")
+        if u_array is None:
+            return (0.0, 1.0)
+        vecs = vtk_to_numpy(u_array)
+        if vecs.ndim == 2 and vecs.shape[1] >= 3:
+            speeds = np.linalg.norm(vecs[:, :3], axis=1)
+        else:
+            speeds = np.abs(vecs.astype(float))
+        if speeds.size == 0:
+            return (0.0, 1.0)
+        smin, smax = float(speeds.min()), float(speeds.max())
+        new_speed_array = numpy_to_vtk(speeds.astype(float), deep=True)
+        new_speed_array.SetName("U_mag")
+        stream_lines.GetPointData().AddArray(new_speed_array)
+        stream_lines.GetPointData().SetActiveScalars("U_mag")
+        return (smin, smax)
+
     def _load_inlet_seed_surface(self, vtk_dir: Path):
+        """读取入口面作为流线种子面。
+
+        优先读取 foamToVTK 的 surfaces/inlet.vtp；如果没有，则回退到 VTK/inlet/*.vtk。
+        """
         surfaces_dir = vtk_dir / "surfaces"
         if surfaces_dir.exists():
             inlet_vtp = surfaces_dir / "inlet.vtp"
@@ -596,6 +639,11 @@ class ResultsLogicMixin:
         return None, ""
 
     def _densify_seed_points(self, seed_geometry):
+        """加密流线种子点。
+
+        原始 patch 顶点较少时，直接追踪会导致流线数量稀疏；
+        这里补充面心、边中点和规则网格点，让入口面流线覆盖更均匀。
+        """
         points = seed_geometry.GetPoints()
         if points is None or seed_geometry.GetNumberOfPoints() == 0:
             return seed_geometry
@@ -652,6 +700,7 @@ class ResultsLogicMixin:
         return dense_seed
 
     def _mean_flow_direction(self, grid_data) -> np.ndarray | None:
+        """从速度场 U 估计整体主流方向，用于几何表面近壁种子偏移。"""
         u_array = grid_data.GetPointData().GetArray("U")
         if u_array is None:
             u_array = grid_data.GetCellData().GetArray("U")
@@ -672,6 +721,7 @@ class ResultsLogicMixin:
         return direction / norm
 
     def _load_geometry_seed_surface(self, vtk_dir: Path):
+        """读取障碍物几何表面作为近壁流线种子面。"""
         poly_data = self._build_geometry_patch_surface()
         if poly_data is None or poly_data.GetNumberOfPoints() == 0:
             raise RuntimeError("未能从 constant/polyMesh 中提取几何体表面，请先生成网格并确认障碍物 patch 存在。")
@@ -716,6 +766,7 @@ class ResultsLogicMixin:
         return reader.GetOutput()
 
     def _as_poly_data(self, data_object):
+        """把 VTK 数据对象统一转换成 vtkPolyData，便于后续 append/probe/渲染。"""
         if data_object is None:
             return None
         if isinstance(data_object, vtk.vtkPolyData):
@@ -726,6 +777,11 @@ class ResultsLogicMixin:
         return geometry_filter.GetOutput()
 
     def _near_wall_seed_shell(self, seed_geometry, flow_direction: np.ndarray | None = None):
+        """在几何表面外侧生成多层近壁种子点。
+
+        壁面速度可能接近 0，直接从壁面发射流线容易失败；
+        因此沿法向轻微偏移出几层种子，让流线从近壁流体区域开始追踪。
+        """
         pieces = []
         for offset_ratio in (0.004, 0.010, 0.018):
             shifted = self._offset_seed_surface(
@@ -749,6 +805,7 @@ class ResultsLogicMixin:
         offset_ratio: float = 0.01,
         flow_direction: np.ndarray | None = None,
     ):
+        """把种子点从几何表面向外偏移，避免种子落在壁面或固体内部。"""
         bounds = seed_geometry.GetBounds()
         if bounds is None or not all(np.isfinite(bounds)):
             return seed_geometry
@@ -787,6 +844,7 @@ class ResultsLogicMixin:
         return shifted
 
     def _ensure_native_vtk_viewer(self) -> None:
+        """创建或复用原生 VTK 结果窗口，并注入当前 Case 的几何/计算域边界。"""
         if self._native_vtk_viewer is None:
             self._native_vtk_viewer = NativeVtkViewerDialog(self)
             self._native_vtk_viewer.destroyed.connect(self._clear_native_vtk_viewer)
